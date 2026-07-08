@@ -255,7 +255,11 @@ def _restarted(
 
         dx, adx, k_done, _ = _fgmres_cycle(matvec, precond, r, beta, tol, m, C, U)
         x = x + dx
-        r = r - adx
+        # Recompute the residual exactly at the restart boundary (one extra
+        # matvec per cycle): the incremental update r - adx inherits CGS2
+        # orthogonality drift, and a stale small estimate would end the loop
+        # while the true residual is still large.
+        r = b - matvec(x)
         res = jnp.linalg.norm(r)
 
         if recycling:

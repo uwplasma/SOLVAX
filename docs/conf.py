@@ -30,3 +30,6 @@ intersphinx_mapping = {
 
 autodoc_typehints = "description"
 napoleon_google_docstring = True
+# NamedTuple fields are already documented via napoleon Attributes sections;
+# ivar rendering avoids duplicate autodoc entries for the same objects.
+napoleon_use_ivar = True
