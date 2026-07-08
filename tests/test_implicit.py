@@ -1,0 +1,194 @@
+"""Tests for solvax.implicit: implicit-diff linear solves and root finds."""
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+from solvax import linear_solve, root_solve
+
+jax.config.update("jax_enable_x64", True)
+
+
+def dense_solver(matvec, b):
+    """Materialise the operator column-by-column and solve densely."""
+    a = jax.vmap(matvec)(jnp.eye(b.shape[0], dtype=b.dtype)).T
+    return jnp.linalg.solve(a, b)
+
+
+def cg_solver(matvec, b):
+    """Plain conjugate gradients (SPD systems), run to tight tolerance."""
+
+    def body(carry):
+        x, r, p, rs = carry
+        ap = matvec(p)
+        alpha = rs / jnp.dot(p, ap)
+        x = x + alpha * p
+        r = r - alpha * ap
+        rs_new = jnp.dot(r, r)
+        p = r + (rs_new / rs) * p
+        return x, r, p, rs_new
+
+    def cond(carry):
+        return carry[3] > 1e-28
+
+    x0 = jnp.zeros_like(b)
+    x, _, _, _ = jax.lax.while_loop(cond, body, (x0, b, b, jnp.dot(b, b)))
+    return x
+
+
+def fd_grad(f, x, eps=1e-6):
+    """Central finite differences of a scalar function, entry by entry."""
+    x = np.asarray(x, dtype=np.float64)
+    g = np.zeros_like(x)
+    it = np.nditer(x, flags=["multi_index"])
+    while not it.finished:
+        i = it.multi_index
+        e = np.zeros_like(x)
+        e[i] = eps
+        g[i] = (float(f(jnp.asarray(x + e))) - float(f(jnp.asarray(x - e)))) / (2 * eps)
+        it.iternext()
+    return g
+
+
+def make_spd_params(n, seed=0):
+    rng = np.random.default_rng(seed)
+    a0 = jnp.asarray(rng.standard_normal((n, n)))
+    b = jnp.asarray(rng.standard_normal(n))
+    return a0, b
+
+
+def spd_from(a0):
+    return a0 @ a0.T + a0.shape[0] * jnp.eye(a0.shape[0])
+
+
+@pytest.mark.parametrize("solver", [dense_solver, cg_solver])
+def test_linear_solve_grads_match_fd(solver):
+    n = 6
+    a0, b = make_spd_params(n)
+
+    def loss(a0_, b_):
+        matvec = lambda v: spd_from(a0_) @ v  # noqa: E731
+        x = linear_solve(matvec, b_, solver)
+        return jnp.sum(jnp.sin(x))
+
+    g_a, g_b = jax.grad(loss, argnums=(0, 1))(a0, b)
+    fd_a = fd_grad(lambda a: loss(a, b), a0)
+    fd_b = fd_grad(lambda v: loss(a0, v), b)
+    assert np.allclose(np.asarray(g_a), fd_a, rtol=1e-5, atol=1e-8)
+    assert np.allclose(np.asarray(g_b), fd_b, rtol=1e-5, atol=1e-8)
+
+
+def test_linear_solve_explicit_transpose_nonsymmetric():
+    n = 5
+    rng = np.random.default_rng(1)
+    a = jnp.asarray(rng.standard_normal((n, n)) + n * np.eye(n))
+    b = jnp.asarray(rng.standard_normal(n))
+
+    def loss(a_, b_):
+        x = linear_solve(
+            lambda v: a_ @ v,
+            b_,
+            dense_solver,
+            transpose_matvec=lambda v: a_.T @ v,
+        )
+        return jnp.sum(x**3)
+
+    g_a, g_b = jax.grad(loss, argnums=(0, 1))(a, b)
+    fd_a = fd_grad(lambda m: loss(m, b), a)
+    fd_b = fd_grad(lambda v: loss(a, v), b)
+    assert np.allclose(np.asarray(g_a), fd_a, rtol=1e-5, atol=1e-8)
+    assert np.allclose(np.asarray(g_b), fd_b, rtol=1e-5, atol=1e-8)
+
+
+def test_adjoint_costs_one_extra_transposed_solve():
+    # Count *executions* of the solver (a Python-side counter would count
+    # traces: custom_linear_solve stages both solve and transpose_solve
+    # eagerly), via a host callback that fires each time a solve runs.
+    n = 4
+    a0, b = make_spd_params(n, seed=2)
+    counts = {"solve": 0}
+
+    def _bump():
+        counts["solve"] += 1
+
+    def counting_solver(matvec, rhs):
+        jax.debug.callback(_bump)
+        return dense_solver(matvec, rhs)
+
+    def loss(b_):
+        x = linear_solve(lambda v: spd_from(a0) @ v, b_, counting_solver)
+        return jnp.sum(x**2)
+
+    loss(b)
+    jax.effects_barrier()
+    assert counts["solve"] == 1
+
+    counts["solve"] = 0
+    jax.grad(loss)(b)
+    jax.effects_barrier()
+    # Forward solve plus exactly one additional (transposed) solve.
+    assert counts["solve"] == 2
+
+
+def newton_solver(f, x0):
+    """Fixed-iteration Newton rootfinder (scalar or small vector)."""
+    x = x0
+    for _ in range(30):
+        fx = f(x)
+        if jnp.ndim(x0) == 0:
+            x = x - fx / jax.grad(f)(x)
+        else:
+            x = x - jnp.linalg.solve(jax.jacobian(f)(x), fx)
+    return x
+
+
+def test_root_solve_scalar_sqrt():
+    def sqrt_root(p):
+        return root_solve(lambda x: x**2 - p, jnp.asarray(1.0), newton_solver)
+
+    p = 2.0
+    assert np.isclose(float(sqrt_root(p)), np.sqrt(p), rtol=1e-12)
+    g = float(jax.grad(sqrt_root)(p))
+    assert np.isclose(g, 1.0 / (2.0 * np.sqrt(p)), rtol=1e-10)
+
+
+def test_root_solve_vector_matches_fd():
+    def root(p):
+        def f(x):
+            return jnp.array(
+                [x[0] ** 2 + p[0] * x[1] - 2.0, x[0] * x[1] - p[1]]
+            )
+
+        return root_solve(f, jnp.array([1.0, 1.0]), newton_solver)
+
+    p = jnp.array([0.5, 0.7])
+
+    def loss(p_):
+        return jnp.sum(root(p_) ** 2)
+
+    x = root(p)
+    assert np.allclose(
+        [float(x[0] ** 2 + p[0] * x[1] - 2.0), float(x[0] * x[1] - p[1])],
+        0.0,
+        atol=1e-12,
+    )
+    g = jax.grad(loss)(p)
+    fd = fd_grad(loss, p)
+    assert np.allclose(np.asarray(g), fd, rtol=1e-5, atol=1e-8)
+
+
+def test_root_solve_custom_tangent_solve():
+    def tangent_solve(g, y):
+        return jnp.linalg.solve(jax.jacobian(g)(jnp.zeros_like(y)), y)
+
+    def root(p):
+        f = lambda x: x**3 - p  # noqa: E731
+        return root_solve(
+            f, jnp.ones_like(p), newton_solver, tangent_solve=tangent_solve
+        )
+
+    p = jnp.array([8.0, 27.0])
+    g = jax.jacobian(root)(p)
+    expected = np.diag(1.0 / (3.0 * np.cbrt(np.asarray(p)) ** 2))
+    assert np.allclose(np.asarray(g), expected, rtol=1e-8)

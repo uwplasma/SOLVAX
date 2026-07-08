@@ -50,12 +50,28 @@ x_low = sx.block_thomas_truncated(lower, diag, upper, rhs[:3], keep_lowest=3)
 Everything is differentiable (`jax.grad` through the solve) and batchable
 (`jax.vmap` over stacked systems).
 
-## Status
+## What's in the box
 
-v0.1 under active development. Roadmap: recycled/deflated flexible GMRES,
-coarse-operator and p-multigrid preconditioners, banded periodic LU,
-mixed-precision refinement, implicit-function-theorem solve/root wrappers,
-and host native-solver bridges.
+| Module | Contents |
+|---|---|
+| `solvax.direct` | Block-tridiagonal Schur elimination (block Thomas): full, factor/solve split, truncated-storage mode |
+| `solvax.banded` | Non-pivoted banded LU with row equilibration + static pivoting; periodic variant via the Woodbury capacitance trick |
+| `solvax.krylov` | Flexible restarted GMRES (CGS2 + Givens) and GCROT-style Krylov subspace recycling for parameter continuation |
+| `solvax.implicit` | Implicit-function-theorem `linear_solve` and `root_solve` — gradients cost one extra (transposed) solve |
+| `solvax.refine` | Mixed-precision iterative refinement (float32 factor, float64 residuals) |
+| `solvax.native` | Host-side SuperLU bridge (non-differentiable, import-guarded) |
+
+Roadmap to v0.2: coarse-operator and p-multigrid preconditioners, harmonic-Ritz
+recycle selection, pytree operands, complex dtypes.
+
+```python
+# Preconditioned, recycled Krylov across a parameter scan:
+sol = sx.gcrot(matvec, b, precond=coarse_inverse, m=50, k=10)
+sol2 = sx.gcrot(matvec2, b2, precond=coarse_inverse, recycle=sol.recycle)
+
+# Differentiable solve wrapping any solver:
+x = sx.linear_solve(matvec, b, solver=lambda mv, rhs: sx.gmres(mv, rhs).x)
+```
 
 ## License
 
