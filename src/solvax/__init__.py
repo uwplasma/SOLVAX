@@ -25,6 +25,24 @@ from solvax.direct import (
 from solvax.implicit import linear_solve, root_solve
 from solvax.krylov import KrylovSolution, gcrot, gmres
 from solvax.native import SpluFactorization, splu_solve
+from solvax.operators import (
+    BlockTridiagonalOperator,
+    BorderedOperator,
+    KroneckerOperator,
+    MatrixFreeOperator,
+    SumOperator,
+    schur_projected_precond,
+)
+from solvax.precond import (
+    block_jacobi,
+    coarse_operator,
+    jacobi,
+    kronecker_nkp,
+    line_smoother,
+    mixed_precision,
+    nearest_kronecker,
+    p_multigrid,
+)
 from solvax.refine import as_low_precision, iterative_refinement
 
 __version__ = "0.1.0.dev0"
@@ -47,6 +65,20 @@ __all__ = [
     "gcrot",
     "linear_solve",
     "root_solve",
+    "MatrixFreeOperator",
+    "SumOperator",
+    "KroneckerOperator",
+    "BlockTridiagonalOperator",
+    "BorderedOperator",
+    "schur_projected_precond",
+    "jacobi",
+    "block_jacobi",
+    "coarse_operator",
+    "line_smoother",
+    "p_multigrid",
+    "mixed_precision",
+    "kronecker_nkp",
+    "nearest_kronecker",
     "iterative_refinement",
     "as_low_precision",
     "SpluFactorization",

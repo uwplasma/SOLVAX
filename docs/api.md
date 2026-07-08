@@ -1,5 +1,21 @@
 # API reference
 
+## Linear operators
+
+```{eval-rst}
+.. automodule:: solvax.operators
+   :members:
+   :member-order: bysource
+```
+
+## Preconditioners
+
+```{eval-rst}
+.. automodule:: solvax.precond
+   :members:
+   :member-order: bysource
+```
+
 ## Structured direct solvers
 
 ```{eval-rst}

@@ -54,6 +54,8 @@ Everything is differentiable (`jax.grad` through the solve) and batchable
 
 | Module | Contents |
 |---|---|
+| `solvax.operators` | Matrix-free, sum, Kronecker, block-tridiagonal and bordered (constraint-row) operator containers with closed-form transposes |
+| `solvax.precond` | Jacobi/block-Jacobi, coarse-operator LU, alternating-direction line smoothers, p-multigrid V-cycles, nearest-Kronecker, mixed-precision wrappers |
 | `solvax.direct` | Block-tridiagonal Schur elimination (block Thomas): full, factor/solve split, truncated-storage mode |
 | `solvax.banded` | Non-pivoted banded LU with row equilibration + static pivoting; periodic variant via the Woodbury capacitance trick |
 | `solvax.krylov` | Flexible restarted GMRES (CGS2 + Givens) and GCROT-style Krylov subspace recycling for parameter continuation |
@@ -61,8 +63,8 @@ Everything is differentiable (`jax.grad` through the solve) and batchable
 | `solvax.refine` | Mixed-precision iterative refinement (float32 factor, float64 residuals) |
 | `solvax.native` | Host-side SuperLU bridge (non-differentiable, import-guarded) |
 
-Roadmap to v0.2: coarse-operator and p-multigrid preconditioners, harmonic-Ritz
-recycle selection, pytree operands, complex dtypes.
+Roadmap to v0.2: harmonic-Ritz recycle selection, pytree operands, complex
+dtypes, GPU batched-LU benchmarks.
 
 ```python
 # Preconditioned, recycled Krylov across a parameter scan:
