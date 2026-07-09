@@ -21,6 +21,7 @@ from solvax.direct import (
     block_thomas_factor,
     block_thomas_solve,
     block_thomas_truncated,
+    block_thomas_truncated_fn,
 )
 from solvax.implicit import linear_solve, root_solve
 from solvax.krylov import KrylovSolution, gcrot, gmres
@@ -60,6 +61,7 @@ __all__ = [
     "block_thomas_factor",
     "block_thomas_solve",
     "block_thomas_truncated",
+    "block_thomas_truncated_fn",
     "KrylovSolution",
     "gmres",
     "gcrot",

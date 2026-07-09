@@ -37,6 +37,7 @@ References
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import NamedTuple
 
 import jax
@@ -93,34 +94,57 @@ def block_thomas_factor(
     return BlockTridiagFactors(delta_lu, delta_piv, lower, upper)
 
 
-def block_thomas_solve(factors: BlockTridiagFactors, rhs: jax.Array) -> jax.Array:
+def block_thomas_solve(
+    factors: BlockTridiagFactors, rhs: jax.Array, transpose: bool = False
+) -> jax.Array:
     """Solve using precomputed factors.
+
+    With ``transpose=True`` this solves the *transposed* system
+    ``A^T x = rhs`` reusing the same factors: for the same elimination order
+    the Schur complements of ``A^T`` are exactly ``Delta_k^T`` (inductively,
+    ``Delta'_{N-1} = D_{N-1}^T`` and ``Delta'_k = D_k^T - L_{k+1}^T
+    Delta_{k+1}^{-T} U_k^T = Delta_k^T``), so the stored LU factors serve
+    both directions via ``trans=1`` triangular solves. The off-diagonal
+    blocks swap roles and transpose: the downward sweep uses ``L_{k+1}^T``
+    where the forward solve used ``U_k``, and the upward substitution uses
+    ``U_{k-1}^T`` where it used ``L_k``. One elimination thus covers the
+    forward and the adjoint solve — exactly what implicit differentiation
+    needs.
 
     Args:
         factors: output of :func:`block_thomas_factor`.
         rhs: ``(n_blocks, m)`` or ``(n_blocks, m, n_rhs)``.
+        transpose: if True, solve ``A^T x = rhs`` instead of ``A x = rhs``.
 
     Returns:
         Solution with the same shape as ``rhs``.
     """
     delta_lu, delta_piv, lower, upper = factors
+    if transpose:
+        down_blocks = jnp.swapaxes(lower[1:], -1, -2)
+        up_blocks = jnp.swapaxes(upper[:-1], -1, -2)
+        trans = 1
+    else:
+        down_blocks = upper[:-1]
+        up_blocks = lower[1:]
+        trans = 0
 
     def down_step(sigma_next, inputs):
-        u_k, lu_next, piv_next, b_k = inputs
-        sigma_k = b_k - u_k @ lu_solve((lu_next, piv_next), sigma_next)
+        c_k, lu_next, piv_next, b_k = inputs
+        sigma_k = b_k - c_k @ lu_solve((lu_next, piv_next), sigma_next, trans=trans)
         return sigma_k, sigma_k
 
-    inputs = (upper[:-1], delta_lu[1:], delta_piv[1:], rhs[:-1])
+    inputs = (down_blocks, delta_lu[1:], delta_piv[1:], rhs[:-1])
     _, sigmas = jax.lax.scan(down_step, rhs[-1], inputs, reverse=True)
     sigma = jnp.concatenate([sigmas, rhs[-1][None]], axis=0)
 
     def up_step(x_prev, inputs):
-        lu_k, piv_k, l_k, sigma_k = inputs
-        x_k = lu_solve((lu_k, piv_k), sigma_k - l_k @ x_prev)
+        lu_k, piv_k, c_k, sigma_k = inputs
+        x_k = lu_solve((lu_k, piv_k), sigma_k - c_k @ x_prev, trans=trans)
         return x_k, x_k
 
-    x0 = lu_solve((delta_lu[0], delta_piv[0]), sigma[0])
-    inputs_up = (delta_lu[1:], delta_piv[1:], lower[1:], sigma[1:])
+    x0 = lu_solve((delta_lu[0], delta_piv[0]), sigma[0], trans=trans)
+    inputs_up = (delta_lu[1:], delta_piv[1:], up_blocks, sigma[1:])
     _, xs = jax.lax.scan(up_step, x0, inputs_up)
     return jnp.concatenate([x0[None], xs], axis=0)
 
@@ -169,15 +193,15 @@ def block_thomas_truncated(
         rhs_low: nonzero head of the right-hand side, shape
             ``(keep_lowest, m)`` or ``(keep_lowest, m, n_rhs)``.
         keep_lowest: static number of solution blocks to compute
-            (1 <= keep_lowest < n_blocks).
+            (1 <= keep_lowest <= n_blocks; equality recovers the full solve).
 
     Returns:
         The lowest ``keep_lowest`` solution blocks, same layout as ``rhs_low``.
     """
     k = keep_lowest
     n = diag.shape[0]
-    if not 1 <= k < n:
-        raise ValueError("need 1 <= keep_lowest < n_blocks")
+    if not 1 <= k <= n:
+        raise ValueError("need 1 <= keep_lowest <= n_blocks")
     if rhs_low.shape[0] != k:
         raise ValueError("rhs_low must have keep_lowest leading blocks")
 
@@ -202,8 +226,17 @@ def block_thomas_truncated(
         lu_j, piv_j = lu_factor(d_j - u_j @ x)
         return (lu_j, piv_j, sigma_j), (lu_j, piv_j, sigma_j)
 
+    upper_head = upper[:k]
+    lower_next = lower[1 : k + 1]
+    if k == n:
+        # The head sweep now covers every block; its top step has no block
+        # above, encoded as U_{n-1} = 0 (the padded lower partner is then
+        # annihilated, and the initial carry acts as a dummy).
+        upper_head = upper_head.at[-1].set(0.0)
+        lower_next = jnp.concatenate([lower_next, lower[:1]], axis=0)
+
     carry0 = (delta_tail[0], delta_tail[1], jnp.zeros_like(rhs_low[0]))
-    head_inputs = (diag[:k], upper[:k], lower[1 : k + 1], rhs_low)
+    head_inputs = (diag[:k], upper_head, lower_next, rhs_low)
     _, (lus, pivs, sigmas) = jax.lax.scan(
         head_step, carry0, head_inputs, reverse=True
     )
@@ -215,5 +248,97 @@ def block_thomas_truncated(
 
     x0 = lu_solve((lus[0], pivs[0]), sigmas[0])
     inputs_up = (lus[1:], pivs[1:], lower[1:k], sigmas[1:])
+    _, xs = jax.lax.scan(up_step, x0, inputs_up)
+    return jnp.concatenate([x0[None], xs], axis=0)
+
+
+def block_thomas_truncated_fn(
+    block_fn: Callable[[jax.Array], tuple[jax.Array, jax.Array, jax.Array]],
+    n_blocks: int,
+    rhs_low: jax.Array,
+    keep_lowest: int,
+) -> jax.Array:
+    """Truncated block-tridiagonal solve with on-the-fly block assembly.
+
+    Identical semantics to :func:`block_thomas_truncated`, but the blocks are
+    produced per index by ``block_fn(k) -> (lower_k, diag_k, upper_k)`` inside
+    the sweeps, so the full ``(n_blocks, m, m)`` band arrays are never
+    materialized: peak memory is O(keep_lowest * m^2) plus a single block
+    triple. This is the right entry point when blocks are assembled from
+    compact physics coefficients (collision/streaming factors) and
+    ``n_blocks`` is large.
+
+    Args:
+        block_fn: maps a (traced) int32 index ``k`` to the three ``(m, m)``
+            blocks ``(L_k, D_k, U_k)``. ``L_0`` and ``U_{n_blocks-1}`` are
+            ignored.
+        n_blocks: static total number of blocks (>= 1).
+        rhs_low: nonzero head of the right-hand side, shape
+            ``(keep_lowest, m)`` or ``(keep_lowest, m, n_rhs)``; the right-hand
+            side must vanish for ``k >= keep_lowest``.
+        keep_lowest: static number of solution blocks to compute
+            (1 <= keep_lowest <= n_blocks; equality recovers the full solve).
+
+    Returns:
+        The lowest ``keep_lowest`` solution blocks, same layout as ``rhs_low``.
+    """
+    k = keep_lowest
+    n = n_blocks
+    if not 1 <= k <= n:
+        raise ValueError("need 1 <= keep_lowest <= n_blocks")
+    if rhs_low.shape[0] != k:
+        raise ValueError("rhs_low must have keep_lowest leading blocks")
+
+    m = rhs_low.shape[1]
+    dtype = rhs_low.dtype
+
+    if k < n:
+        # Tail sweep (blocks n-1 .. k): carry the running Schur complement
+        # and the L block of the row just processed (needed one step below).
+        l_last, d_last, _ = block_fn(jnp.int32(n - 1))
+        carry0 = (lu_factor(d_last), l_last)
+
+        def tail_step(carry, j):
+            delta_next, l_next = carry
+            l_j, d_j, u_j = block_fn(j)
+            x = lu_solve(delta_next, l_next)
+            delta_j = lu_factor(d_j - u_j @ x)
+            return (delta_j, l_j), None
+
+        (delta_head, l_head), _ = jax.lax.scan(
+            tail_step, carry0, jnp.arange(k, n - 1, dtype=jnp.int32), reverse=True
+        )
+    else:
+        # No tail: the head's top step has no block above; a dummy identity
+        # carry works because that step's U is annihilated below.
+        eye = jnp.eye(m, dtype=dtype)
+        delta_head = lu_factor(eye)
+        l_head = jnp.zeros((m, m), dtype=dtype)
+
+    def head_step(carry, inputs):
+        delta_next, l_next, sigma_next = carry
+        j, b_j = inputs
+        l_j, d_j, u_j = block_fn(j)
+        if k == n:
+            # Top block couples to nothing above.
+            u_j = jnp.where(j == n - 1, jnp.zeros_like(u_j), u_j)
+        x = lu_solve(delta_next, l_next)
+        sigma_j = b_j - u_j @ lu_solve(delta_next, sigma_next)
+        delta_j = lu_factor(d_j - u_j @ x)
+        return (delta_j, l_j, sigma_j), (delta_j[0], delta_j[1], sigma_j, l_j)
+
+    carry0 = (delta_head, l_head, jnp.zeros_like(rhs_low[0]))
+    head_inputs = (jnp.arange(k, dtype=jnp.int32), rhs_low)
+    _, (lus, pivs, sigmas, ls) = jax.lax.scan(
+        head_step, carry0, head_inputs, reverse=True
+    )
+
+    def up_step(x_prev, inputs):
+        lu_j, piv_j, l_j, sigma_j = inputs
+        x_j = lu_solve((lu_j, piv_j), sigma_j - l_j @ x_prev)
+        return x_j, x_j
+
+    x0 = lu_solve((lus[0], pivs[0]), sigmas[0])
+    inputs_up = (lus[1:], pivs[1:], ls[1:], sigmas[1:])
     _, xs = jax.lax.scan(up_step, x0, inputs_up)
     return jnp.concatenate([x0[None], xs], axis=0)
