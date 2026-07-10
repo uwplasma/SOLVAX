@@ -6,11 +6,11 @@ import numpy as np
 import pytest
 
 from solvax import (
-    block_thomas_truncated_fn,
     block_thomas,
     block_thomas_factor,
     block_thomas_solve,
     block_thomas_truncated,
+    block_thomas_truncated_fn,
 )
 
 jax.config.update("jax_enable_x64", True)
