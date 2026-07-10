@@ -72,7 +72,7 @@ def test_vmap_over_batch():
         return lower, diag, upper, rhs
 
     systems = [solve_one(s) for s in range(4)]
-    stacked = [jnp.stack(arrs) for arrs in zip(*systems)]
+    stacked = [jnp.stack(arrs) for arrs in zip(*systems, strict=False)]
     x_batch = jax.vmap(block_thomas)(*stacked)
     for i, (lower, diag, upper, rhs) in enumerate(systems):
         x_i = block_thomas(lower, diag, upper, rhs)
@@ -105,7 +105,8 @@ def test_transpose_solve_matches_dense(n_rhs):
 def test_transpose_solve_matches_linear_transpose():
     (lower, diag, upper, rhs), _ = make_system(6, 3, seed=6)
     factors = block_thomas_factor(lower, diag, upper)
-    fwd = lambda v: block_thomas_solve(factors, v)
+    def fwd(v):
+        return block_thomas_solve(factors, v)
     (via_lt,) = jax.linear_transpose(fwd, rhs)(rhs)
     via_flag = block_thomas_solve(factors, rhs, transpose=True)
     assert np.allclose(np.asarray(via_lt), np.asarray(via_flag), atol=1e-11)

@@ -147,7 +147,8 @@ def test_second_order_grad_through_chunked_jacobian():
 @pytest.mark.parametrize("chunk_size", [None, 1, 2, 3, 4, 10])
 def test_chunk_map_matches_vmap(chunk_size):
     xs = jnp.asarray(np.random.default_rng(7).standard_normal((7, 3)))
-    fun = lambda row: jnp.sum(row**2)
+    def fun(row):
+        return jnp.sum(row**2)
     got = chunk_map(fun, xs, chunk_size=chunk_size)
     assert np.allclose(np.asarray(got), np.asarray(jax.vmap(fun)(xs)), atol=1e-12)
 

@@ -180,7 +180,7 @@ def test_vmap_over_batch():
 def test_vmap_periodic_over_batch():
     bw = 1
     systems = [tuple(make_periodic(10, bw, seed=s)[0]) for s in range(3)]
-    stacked = [jnp.stack(arrs) for arrs in zip(*systems)]
+    stacked = [jnp.stack(arrs) for arrs in zip(*systems, strict=False)]
 
     def solve(ab, cul, clr, b):
         return lu_solve_banded_periodic(lu_factor_banded_periodic(ab, bw, bw, cul, clr), b)
