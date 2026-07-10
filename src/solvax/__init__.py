@@ -46,7 +46,7 @@ from solvax.precond import (
 )
 from solvax.refine import as_low_precision, iterative_refinement
 
-__version__ = "0.1.0.dev0"
+__version__ = "0.1.0"
 
 __all__ = [
     "BandedLUFactors",
