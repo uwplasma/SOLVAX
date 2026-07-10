@@ -32,6 +32,14 @@
    :member-order: bysource
 ```
 
+## Batched tridiagonal solve
+
+```{eval-rst}
+.. automodule:: solvax.tridiagonal
+   :members:
+   :member-order: bysource
+```
+
 ## Krylov methods
 
 ```{eval-rst}
@@ -44,6 +52,14 @@
 
 ```{eval-rst}
 .. automodule:: solvax.implicit
+   :members:
+   :member-order: bysource
+```
+
+## Memory-chunked autodiff
+
+```{eval-rst}
+.. automodule:: solvax.autodiff
    :members:
    :member-order: bysource
 ```
