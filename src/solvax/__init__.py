@@ -1,11 +1,18 @@
 """solvax: differentiable structured linear solvers and matrix-free methods in JAX.
 
 Generic solver infrastructure for kinetic and PDE codes: batched structured
-direct solves, preconditioned/recycled Krylov methods, and implicit
-differentiation — everything jit/vmap/grad-transparent unless explicitly
-marked as a host-side native bridge.
+direct solves, preconditioned/recycled Krylov methods, memory-chunked
+autodiff, and implicit differentiation — everything jit/vmap/grad-transparent
+unless explicitly marked as a host-side native bridge.
 """
 
+from solvax.autodiff import (
+    auto_chunk_size,
+    chunk_map,
+    chunked_jacfwd,
+    chunked_jacobian,
+    chunked_jacrev,
+)
 from solvax.banded import (
     BandedLUFactors,
     PeriodicBandedLUFactors,
@@ -22,6 +29,7 @@ from solvax.direct import (
     block_thomas_solve,
     block_thomas_truncated,
     block_thomas_truncated_fn,
+    mixed_precision_block_thomas,
 )
 from solvax.implicit import linear_solve, root_solve
 from solvax.krylov import KrylovSolution, gcrot, gmres
@@ -45,6 +53,7 @@ from solvax.precond import (
     p_multigrid,
 )
 from solvax.refine import as_low_precision, iterative_refinement
+from solvax.tridiagonal import tridiagonal_solve
 
 __version__ = "0.1.0"
 
@@ -62,6 +71,8 @@ __all__ = [
     "block_thomas_solve",
     "block_thomas_truncated",
     "block_thomas_truncated_fn",
+    "mixed_precision_block_thomas",
+    "tridiagonal_solve",
     "KrylovSolution",
     "gmres",
     "gcrot",
@@ -83,6 +94,11 @@ __all__ = [
     "nearest_kronecker",
     "iterative_refinement",
     "as_low_precision",
+    "chunk_map",
+    "auto_chunk_size",
+    "chunked_jacfwd",
+    "chunked_jacrev",
+    "chunked_jacobian",
     "SpluFactorization",
     "splu_solve",
     "__version__",

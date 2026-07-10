@@ -44,6 +44,8 @@ import jax
 import jax.numpy as jnp
 from jax.scipy.linalg import lu_factor, lu_solve
 
+from solvax.refine import iterative_refinement
+
 
 class BlockTridiagFactors(NamedTuple):
     """Reusable elimination state from :func:`block_thomas_factor`.
@@ -63,7 +65,7 @@ class BlockTridiagFactors(NamedTuple):
 
 
 def block_thomas_factor(
-    lower: jax.Array, diag: jax.Array, upper: jax.Array
+    lower: jax.Array, diag: jax.Array, upper: jax.Array, factor_dtype=None
 ) -> BlockTridiagFactors:
     """Run the downward Schur sweep once, for reuse across right-hand sides.
 
@@ -73,19 +75,32 @@ def block_thomas_factor(
         diag: diagonal blocks ``D_k``, shape ``(n_blocks, m, m)``.
         upper: super-diagonal blocks ``U_k``, shape ``(n_blocks, m, m)``;
             ``upper[-1]`` is ignored.
+        factor_dtype: if given, the Schur-complement LU factorizations and
+            their triangular solves run in this lower precision, while the
+            block products ``U_k Delta^{-1} L_k`` and the stored off-diagonal
+            bands stay in the working precision of ``diag``. The returned
+            ``delta_lu`` is then low precision; pair with
+            :func:`block_thomas_solve` under :func:`iterative_refinement` (see
+            :func:`mixed_precision_block_thomas`) to recover working-precision
+            accuracy on fast low-precision hardware. Practically this is
+            ``jnp.float32``: ``lu_factor`` dispatches to LAPACK/cuSOLVER
+            ``getrf``, which has float32 and float64 kernels but no half
+            precision, so bfloat16/float16 raise ``NotImplementedError``.
 
     Returns:
         Factors for :func:`block_thomas_solve`.
     """
+    work = jnp.result_type(diag)
+    fdt = work if factor_dtype is None else factor_dtype
 
     def down_step(carry, inputs):
         delta_next = carry
         d_k, u_k, l_next = inputs
-        x = lu_solve(delta_next, l_next)
-        delta_k = lu_factor(d_k - u_k @ x)
+        x = lu_solve(delta_next, l_next.astype(fdt)).astype(work)
+        delta_k = lu_factor((d_k - u_k @ x).astype(fdt))
         return delta_k, delta_k
 
-    last = lu_factor(diag[-1])
+    last = lu_factor(diag[-1].astype(fdt))
     inputs = (diag[:-1], upper[:-1], lower[1:])  # steps k = n-2 .. 0
     _, (lus, pivs) = jax.lax.scan(down_step, last, inputs, reverse=True)
 
@@ -129,9 +144,19 @@ def block_thomas_solve(
         up_blocks = lower[1:]
         trans = 0
 
+    # When the factors were built with a low ``factor_dtype`` (delta_lu below
+    # the working precision), run each triangular solve in that low precision
+    # and cast the result back up, so the band products keep working precision.
+    # For all-working-precision factors both casts are no-ops.
+    fdt = delta_lu.dtype
+    work = jnp.result_type(rhs, lower)
+
+    def tsolve(lu, piv, v):
+        return lu_solve((lu, piv), v.astype(fdt), trans=trans).astype(work)
+
     def down_step(sigma_next, inputs):
         c_k, lu_next, piv_next, b_k = inputs
-        sigma_k = b_k - c_k @ lu_solve((lu_next, piv_next), sigma_next, trans=trans)
+        sigma_k = b_k - c_k @ tsolve(lu_next, piv_next, sigma_next)
         return sigma_k, sigma_k
 
     inputs = (down_blocks, delta_lu[1:], delta_piv[1:], rhs[:-1])
@@ -140,10 +165,10 @@ def block_thomas_solve(
 
     def up_step(x_prev, inputs):
         lu_k, piv_k, c_k, sigma_k = inputs
-        x_k = lu_solve((lu_k, piv_k), sigma_k - c_k @ x_prev, trans=trans)
+        x_k = tsolve(lu_k, piv_k, sigma_k - c_k @ x_prev)
         return x_k, x_k
 
-    x0 = lu_solve((delta_lu[0], delta_piv[0]), sigma[0], trans=trans)
+    x0 = tsolve(delta_lu[0], delta_piv[0], sigma[0])
     inputs_up = (delta_lu[1:], delta_piv[1:], up_blocks, sigma[1:])
     _, xs = jax.lax.scan(up_step, x0, inputs_up)
     return jnp.concatenate([x0[None], xs], axis=0)
@@ -171,6 +196,76 @@ def block_thomas(
         ``x`` with the same shape as ``rhs``.
     """
     return block_thomas_solve(block_thomas_factor(lower, diag, upper), rhs)
+
+
+def _block_tridiag_matvec(
+    lower: jax.Array, diag: jax.Array, upper: jax.Array, x: jax.Array
+) -> jax.Array:
+    """Apply the block-tridiagonal operator to ``x`` in the band layout.
+
+    ``(A x)_k = L_k x_{k-1} + D_k x_k + U_k x_{k+1}``, evaluated for every
+    block at once. ``x`` and the result share the layout of the right-hand
+    side, ``(n_blocks, m)`` or ``(n_blocks, m, n_rhs)``. Used to form the
+    working-precision residual of :func:`mixed_precision_block_thomas`.
+    """
+    sub = "kij,kj...->ki..."
+    y = jnp.einsum(sub, diag, x)
+    y = y.at[1:].add(jnp.einsum(sub, lower[1:], x[:-1]))
+    y = y.at[:-1].add(jnp.einsum(sub, upper[:-1], x[1:]))
+    return y
+
+
+def mixed_precision_block_thomas(
+    lower: jax.Array,
+    diag: jax.Array,
+    upper: jax.Array,
+    rhs: jax.Array,
+    *,
+    factor_dtype=jnp.float32,
+    refine_steps: int = 2,
+) -> jax.Array:
+    """Block-tridiagonal solve with a low-precision factorization + refinement.
+
+    Factors once with :func:`block_thomas_factor` in ``factor_dtype`` — the
+    dense Schur-complement LU factorizations, the dominant cost of the sweep,
+    then run at (e.g.) float32 throughput, up to 32x that of float64 on
+    consumer GPUs — and recovers working-precision accuracy with
+    ``refine_steps`` sweeps of :func:`solvax.refine.iterative_refinement`. Each
+    sweep forms the residual with the working-precision operator and corrects
+    it with one low-precision :func:`block_thomas_solve`, so the result matches
+    the full-precision solve to working-precision accuracy whenever
+    ``kappa(A) * u_low < 1`` (Carson & Higham 2018; see :mod:`solvax.refine`).
+
+    This composes the existing factor/solve with iterative refinement — no
+    parallel scan — and stays jit/vmap/grad-transparent like the rest of the
+    module.
+
+    Args:
+        lower: ``L_k`` blocks, ``(n_blocks, m, m)``; ``lower[0]`` ignored.
+        diag: ``D_k`` blocks, ``(n_blocks, m, m)``.
+        upper: ``U_k`` blocks, ``(n_blocks, m, m)``; ``upper[-1]`` ignored.
+        rhs: ``(n_blocks, m)`` or ``(n_blocks, m, n_rhs)``.
+        factor_dtype: precision for the LU factorizations (default float32,
+            the fast low precision supported by the LAPACK/cuSOLVER ``getrf``
+            backend; half precision is not — see :func:`block_thomas_factor`).
+        refine_steps: number of refinement sweeps (static int); ``0`` returns
+            the bare low-precision solve.
+
+    Returns:
+        ``x`` with the same shape and precision as ``rhs``.
+    """
+    residual_dtype = jnp.result_type(rhs)
+    factors = block_thomas_factor(lower, diag, upper, factor_dtype=factor_dtype)
+    matvec = lambda x: _block_tridiag_matvec(lower, diag, upper, x)  # noqa: E731
+    approx_solve = lambda r: block_thomas_solve(factors, r)  # noqa: E731
+    x, _ = iterative_refinement(
+        matvec,
+        rhs,
+        approx_solve,
+        iterations=refine_steps,
+        residual_dtype=residual_dtype,
+    )
+    return x
 
 
 def block_thomas_truncated(
