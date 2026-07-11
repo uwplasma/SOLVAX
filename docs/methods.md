@@ -205,6 +205,24 @@ wrong terms; flexible GMRES tolerates inexact, step-dependent application.
   Van Loan-Pitsianis rearrangement (the nearest Kronecker product is the
   leading singular triplet of a permuted matrix) {cite}`vanloan1993`.
 
+## Fixed-point acceleration — {mod}`solvax.fixed_point`
+
+For a contractive map $G(x)$, vector Aitken acceleration updates a safeguarded
+scalar relaxation from successive residuals $r_k = G(x_k)-x_k$. This targets
+expensive partitioned multiphysics iterations where each map evaluation is a
+converged subsystem solve and unaccelerated fixed-point convergence is stiff.
+
+- **`aitken_fixed_point(mapping, x0, ...)`** reports the final iterate, true
+  fixed-point residual, iteration count, convergence flag, and relaxation.
+- Relaxation bounds make denominator breakdown and noncontractive transients
+  finite and explicit rather than silently producing NaNs.
+- The loop is `jit`/`vmap` compatible. For accepted gradients, combine the
+  primal solver with {func}`~solvax.implicit.root_solve` so differentiation is
+  implicit rather than through iteration-count branching.
+
+*Use case:* accelerate coupled field/fluid, radiation/material, or other
+partitioned steady solves without embedding application physics in SOLVAX.
+
 ## Implicit differentiation — {mod}`solvax.implicit`
 
 For a parameterized solve $A(\theta)x = b(\theta)$, the implicit function

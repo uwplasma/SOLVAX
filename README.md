@@ -59,11 +59,12 @@ Everything is differentiable (`jax.grad` through the solve) and batchable
 | `solvax.direct` | Block-tridiagonal Schur elimination (block Thomas): full, factor/solve split, truncated-storage mode |
 | `solvax.banded` | Non-pivoted banded LU with row equilibration + static pivoting; periodic variant via the Woodbury capacitance trick |
 | `solvax.krylov` | Flexible restarted GMRES (CGS2 + Givens) and GCROT-style Krylov subspace recycling for parameter continuation |
+| `solvax.fixed_point` | Safeguarded Aitken acceleration with explicit convergence diagnostics |
 | `solvax.implicit` | Implicit-function-theorem `linear_solve` and `root_solve` — gradients cost one extra (transposed) solve |
 | `solvax.refine` | Mixed-precision iterative refinement (float32 factor, float64 residuals) |
 | `solvax.native` | Host-side SuperLU bridge (non-differentiable, import-guarded) |
 
-Roadmap to v0.2: harmonic-Ritz recycle selection, pytree operands, complex
+Roadmap: harmonic-Ritz recycle selection, pytree operands, complex
 dtypes, GPU batched-LU benchmarks.
 
 ```python

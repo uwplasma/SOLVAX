@@ -56,6 +56,14 @@
    :member-order: bysource
 ```
 
+## Fixed-point acceleration
+
+```{eval-rst}
+.. automodule:: solvax.fixed_point
+   :members:
+   :member-order: bysource
+```
+
 ## Memory-chunked autodiff
 
 ```{eval-rst}
