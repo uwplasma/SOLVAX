@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.1 — 2026-07-11
+
+- Added `pcg_linear_solve`, which retains fixed-shape primal diagnostics while
+  applying an implicit VJP with independently controlled transpose solves.
+
 ## 0.5.0 — 2026-07-11
 
 - Added matrix-free preconditioned conjugate gradients on arbitrary JAX pytrees.

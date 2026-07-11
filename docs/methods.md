@@ -217,10 +217,12 @@ operator is not positive definite in the explored subspace; a non-positive
 $r^\ast M^{-1}r$ reports an invalid or broken preconditioner. Neither condition
 is silently converted into convergence.
 
-For gradients, pass PCG as the primal and transpose solver to
-{func}`~solvax.implicit.linear_solve`. The implicit VJP differentiates the
-converged linear system rather than the iteration count. Independent primal and
-transpose tolerances remain the caller's responsibility.
+For gradients, {func}`~solvax.pcg.pcg_linear_solve` preserves the forward
+{class}`~solvax.pcg.PCGSolution` diagnostics while registering an implicit VJP
+with independent primal and transpose tolerances, iteration limits, and
+preconditioners. It differentiates the converged linear system rather than the
+iteration count and does not require a second primal solve to recover
+diagnostics.
 
 *Use case:* symmetric elliptic operators, normal equations used with care, and
 multi-field SPD blocks where a structured line, multigrid, or application-

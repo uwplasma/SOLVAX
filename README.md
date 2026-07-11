@@ -41,6 +41,9 @@ x = sx.block_thomas(lower, diag, upper, rhs)
 solution = sx.pcg(matvec, rhs, precond=preconditioner, rtol=1e-10)
 assert solution.converged
 
+# Same diagnostics, but gradients use an implicit primal/transpose solve
+implicit_solution = sx.pcg_linear_solve(matvec, rhs, precond=preconditioner)
+
 # Reuse one elimination across many right-hand sides
 factors = sx.block_thomas_factor(lower, diag, upper)
 x1 = sx.block_thomas_solve(factors, rhs1)

@@ -40,6 +40,17 @@ class PCGSolution(NamedTuple):
     residual_history: jax.Array
 
 
+class PCGDiagnostics(NamedTuple):
+    """Fixed-shape PCG diagnostics carried through an implicit solve."""
+
+    residual_norm: jax.Array
+    relative_residual_norm: jax.Array
+    iterations: jax.Array
+    converged: jax.Array
+    status: jax.Array
+    residual_history: jax.Array
+
+
 def status_name(status: int | jax.Array) -> str:
     """Return the host-readable name for a materialized PCG status code."""
 
@@ -213,8 +224,74 @@ def pcg(
     )
 
 
+def _diagnostics(solution: PCGSolution) -> PCGDiagnostics:
+    return PCGDiagnostics(*solution[1:])
+
+
+def pcg_linear_solve(
+    matvec: MatVec,
+    b: PyTree,
+    *,
+    x0: PyTree | None = None,
+    precond: MatVec | None = None,
+    rtol: float = 1.0e-8,
+    atol: float = 0.0,
+    max_steps: int = 500,
+    transpose_precond: MatVec | None = None,
+    transpose_rtol: float | None = None,
+    transpose_atol: float | None = None,
+    transpose_max_steps: int | None = None,
+) -> PCGSolution:
+    """Implicitly differentiable PCG with retained forward diagnostics.
+
+    The primal and transpose solves use :func:`jax.lax.custom_linear_solve`, so
+    derivatives do not trace through iteration-count branches. The operator is
+    assumed Hermitian positive definite; the transpose preconditioner defaults
+    to the primal preconditioner, while transpose tolerances may be controlled
+    independently.
+    """
+
+    adjoint_precond = precond if transpose_precond is None else transpose_precond
+    adjoint_rtol = rtol if transpose_rtol is None else transpose_rtol
+    adjoint_atol = atol if transpose_atol is None else transpose_atol
+    adjoint_steps = max_steps if transpose_max_steps is None else transpose_max_steps
+
+    def solve(operator: MatVec, value: PyTree):
+        solution = pcg(
+            operator,
+            value,
+            x0=x0,
+            precond=precond,
+            rtol=rtol,
+            atol=atol,
+            max_steps=max_steps,
+        )
+        return solution.x, _diagnostics(solution)
+
+    def transpose_solve(operator: MatVec, value: PyTree):
+        solution = pcg(
+            operator,
+            value,
+            precond=adjoint_precond,
+            rtol=adjoint_rtol,
+            atol=adjoint_atol,
+            max_steps=adjoint_steps,
+        )
+        return solution.x, _diagnostics(solution)
+
+    x, diagnostics = jax.lax.custom_linear_solve(
+        matvec,
+        b,
+        solve=solve,
+        transpose_solve=transpose_solve,
+        has_aux=True,
+    )
+    return PCGSolution(x, *diagnostics)
+
+
 __all__ = [
     "PCGSolution",
+    "PCGDiagnostics",
     "RUNNING",
     "CONVERGED",
     "MAX_ITERATIONS",
@@ -223,5 +300,6 @@ __all__ = [
     "PRECONDITIONER_BREAKDOWN",
     "STATUS_NAMES",
     "pcg",
+    "pcg_linear_solve",
     "status_name",
 ]

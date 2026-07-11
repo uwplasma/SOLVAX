@@ -28,11 +28,21 @@ def squared_solution_norm(scale):
     def operator(value):
         return jax.tree.map(lambda diagonal_value, x: scale * diagonal_value * x, diagonal, value)
 
-    def solver(linear_operator, value):
-        return sx.pcg(linear_operator, value, precond=precondition, max_steps=8).x
+    def scaled_precondition(residual):
+        return jax.tree.map(
+            lambda value, diagonal_value: value / (scale * diagonal_value),
+            residual,
+            diagonal,
+        )
 
-    solved = sx.linear_solve(operator, rhs, solver)
-    return sum(jnp.vdot(leaf, leaf).real for leaf in jax.tree.leaves(solved))
+    solved = sx.pcg_linear_solve(
+        operator,
+        rhs,
+        precond=scaled_precondition,
+        max_steps=8,
+        transpose_rtol=1.0e-10,
+    )
+    return sum(jnp.vdot(leaf, leaf).real for leaf in jax.tree.leaves(solved.x))
 
 
 print("implicit gradient:", float(jax.grad(squared_solution_norm)(1.0)))

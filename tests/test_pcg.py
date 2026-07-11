@@ -13,6 +13,7 @@ from solvax.pcg import (
     PRECONDITIONER_BREAKDOWN,
     PCGSolution,
     pcg,
+    pcg_linear_solve,
     status_name,
 )
 
@@ -140,3 +141,32 @@ def test_pcg_works_as_implicit_linear_solve_backend():
     scale = 3.0
     expected = -2.0 * jnp.sum(rhs**2) / scale**3
     assert jnp.allclose(jax.grad(objective)(scale), expected, rtol=1.0e-6)
+
+
+def test_pcg_linear_solve_retains_diagnostics_and_uses_implicit_gradient():
+    rhs = jnp.array([1.0, -2.0])
+
+    def solve_and_sum(scale):
+        diagonal = jnp.array([scale, scale + 1.0])
+        solution = pcg_linear_solve(
+            lambda x: diagonal * x,
+            rhs,
+            precond=lambda residual: residual / diagonal,
+            rtol=1.0e-12,
+            max_steps=4,
+            transpose_rtol=1.0e-13,
+            transpose_max_steps=6,
+        )
+        return jnp.sum(solution.x**2), solution
+
+    objective, solution = solve_and_sum(3.0)
+    expected_solution = rhs / jnp.array([3.0, 4.0])
+    assert solution.converged
+    assert int(solution.iterations) == 1
+    assert solution.residual_history.shape == (5,)
+    assert jnp.allclose(solution.x, expected_solution)
+    assert jnp.allclose(objective, jnp.sum(expected_solution**2))
+
+    gradient = jax.grad(lambda scale: solve_and_sum(scale)[0])(3.0)
+    expected_gradient = -2.0 * (rhs[0] ** 2 / 3.0**3 + rhs[1] ** 2 / 4.0**3)
+    assert jnp.allclose(gradient, expected_gradient, rtol=1.0e-6)

@@ -17,7 +17,7 @@ def test_pcg_benchmark_records_correctness_and_cold_warm_timings():
     assert result["status"] == "converged"
     assert result["iterations"] <= 2
     assert result["relative_error"] < 1.0e-5
-    assert result["implementation"]["solvax_version"] == "0.5.0"
+    assert result["implementation"]["solvax_version"] == "0.5.1"
     assert len(result["implementation"]["pcg_sha256"]) == 64
     assert result["jax_version"]
     assert result["python_version"]

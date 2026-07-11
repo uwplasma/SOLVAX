@@ -48,7 +48,7 @@ from solvax.operators import (
     SumOperator,
     schur_projected_precond,
 )
-from solvax.pcg import PCGSolution, pcg, status_name
+from solvax.pcg import PCGDiagnostics, PCGSolution, pcg, pcg_linear_solve, status_name
 from solvax.precond import (
     block_jacobi,
     coarse_operator,
@@ -62,7 +62,7 @@ from solvax.precond import (
 from solvax.refine import as_low_precision, iterative_refinement
 from solvax.tridiagonal import tridiagonal_solve
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 __all__ = [
     "BandedLUFactors",
@@ -88,7 +88,9 @@ __all__ = [
     "gmres",
     "gcrot",
     "PCGSolution",
+    "PCGDiagnostics",
     "pcg",
+    "pcg_linear_solve",
     "status_name",
     "linear_solve",
     "root_solve",
