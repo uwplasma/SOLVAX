@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from solvax.fixed_point import aitken_fixed_point, aitken_relaxation, anderson_mixing
@@ -35,6 +36,49 @@ def test_aitken_fixed_point_is_jittable_and_vmappable():
     roots, converged = jax.jit(jax.vmap(solve))(values)
     assert roots == pytest.approx(values, rel=1.0e-6, abs=1.0e-6)
     assert jnp.all(converged)
+
+
+def test_complex_aitken_and_anderson_converge_with_real_safeguards():
+    target = jnp.asarray([1.0 + 2.0j, -0.5 + 0.3j])
+    solution = jax.jit(
+        lambda: aitken_fixed_point(
+            lambda x: 0.95 * x + 0.05 * target,
+            jnp.zeros_like(target),
+            max_steps=20,
+            rtol=1.0e-10,
+        )
+    )()
+    assert solution.converged
+    assert not jnp.issubdtype(solution.relaxation.dtype, jnp.complexfloating)
+    assert solution.x == pytest.approx(target, rel=2.0e-6, abs=2.0e-6)
+
+    iterates = jnp.stack([jnp.zeros_like(target), 0.2 * target])
+    residuals = jnp.stack([0.2 * target, 0.16 * target])
+    candidate = jax.jit(anderson_mixing)(iterates, residuals)
+    assert jnp.all(jnp.isfinite(candidate))
+    assert jnp.issubdtype(candidate.dtype, jnp.complexfloating)
+
+
+def test_complex_anderson_uses_hermitian_residual_gram_matrix():
+    iterates = jnp.asarray(
+        [[0.2 + 0.1j, -0.3j], [0.5 - 0.2j, 0.1 + 0.4j], [-0.1j, 0.3]]
+    )
+    residuals = jnp.asarray(
+        [[0.3 + 0.2j, -0.1j], [-0.2 + 0.1j, 0.4j], [0.1 - 0.3j, 0.2]]
+    )
+    regularization = 1.0e-6
+    result = anderson_mixing(
+        iterates, residuals, regularization=regularization, damping=1.0
+    )
+
+    flat = np.asarray(residuals)
+    gram = np.conj(flat) @ flat.T
+    scale = np.trace(gram).real / len(flat)
+    system = gram + (regularization + np.finfo(float).eps) * scale * np.eye(len(flat))
+    weights = np.linalg.solve(system, np.ones(len(flat), dtype=complex))
+    weights /= np.sum(weights)
+    expected = weights @ np.asarray(iterates + residuals)
+    assert np.asarray(result) == pytest.approx(expected, rel=1.0e-6, abs=1.0e-6)
 
 
 def test_aitken_fixed_point_reports_nonconvergence_without_nan():

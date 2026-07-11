@@ -168,11 +168,17 @@ Gram-Schmidt applied twice (CGS2), which cuts accelerator inner-product latency
 while keeping $O(\varepsilon)$ loss of orthogonality {cite}`saad2003`.
 
 **`gcrot`** adds GCROT($m$, $k$)-style subspace recycling: an outer pair
-$(C, U)$ with $AU = C$, $C^\top C = I$ deflates the operator, and the pair can
+$(C, U)$ with $AU = C$, $C^H C = I$ deflates the operator, and the pair can
 be carried across a slowly-varying sequence of solves (parameter continuation)
 — pass `solution.recycle` of one solve as `recycle=` of the next. On warm start
 $AU$ is recomputed for the current operator and re-orthonormalized by thin QR,
 so a stale pair is always consistent {cite}`parks2006,morgan2002`.
+
+Real and complex systems share the same implementation. Complex Arnoldi and
+recycling use Hermitian projections, while the incremental least-squares solve
+uses scaled unitary complex Givens rotations in the LAPACK ``xLARTG``
+convention. The convergence test always uses the true residual norm recomputed
+at restart boundaries and after the final cycle.
 
 *Use case:* matrix-free solves where a preconditioner clusters the spectrum
 (`gmres`), and parameter scans where consecutive systems share eigenmodes

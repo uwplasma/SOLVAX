@@ -98,12 +98,25 @@ def as_low_precision(solve: Callable, dtype=jnp.float32) -> Callable:
         A callable with the same signature operating in ``dtype`` internally.
     """
 
+    def cast_inexact(value):
+        if hasattr(value, "dtype") and jnp.issubdtype(
+            value.dtype, jnp.inexact
+        ):
+            return jnp.asarray(value, dtype)
+        return value
+
+    # Explicit PyTree callables (for example Equinox preconditioners) expose
+    # their factor arrays, so both stored state and runtime inputs use the
+    # requested precision. Opaque Python closure state cannot be discovered;
+    # callers should use an array-bearing PyTree for stateful solvers.
+    low_solve = jax.tree_util.tree_map(cast_inexact, solve)
+
     def wrapped(b, *args, **kwargs):
         out_dtype = jnp.result_type(b)
         low = jax.tree_util.tree_map(
-            lambda a: jnp.asarray(a, dtype), (b, *args)
+            cast_inexact, (b, *args)
         )
-        result = solve(*low, **kwargs)
+        result = low_solve(*low, **kwargs)
         return jax.tree_util.tree_map(
             lambda a: jnp.asarray(a, out_dtype), result
         )

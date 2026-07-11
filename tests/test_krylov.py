@@ -20,6 +20,15 @@ def random_system(n, seed=0, spread=0.5):
     return jnp.asarray(a), jnp.asarray(b)
 
 
+def random_complex_system(n, seed=0, spread=0.25):
+    """Well-conditioned non-Hermitian complex system."""
+    rng = np.random.default_rng(seed)
+    perturbation = rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n))
+    a = (2.5 + 0.2j) * np.eye(n) + spread * perturbation / np.sqrt(n)
+    b = rng.standard_normal(n) + 1j * rng.standard_normal(n)
+    return jnp.asarray(a), jnp.asarray(b)
+
+
 def advection_diffusion(n=256, peclet=1e3):
     """1-D periodic advection-diffusion, central differences, unit shift.
 
@@ -50,6 +59,51 @@ def test_gmres_matches_dense(n):
     x_ref = np.linalg.solve(np.asarray(a), np.asarray(b))
     err = np.linalg.norm(np.asarray(sol.x) - x_ref) / np.linalg.norm(x_ref)
     assert err <= 1e-8
+
+
+@pytest.mark.parametrize("solver_name", ["gmres", "gcrot"])
+@pytest.mark.parametrize(
+    "dtype,solve_rtol,error_tolerance",
+    [(jnp.complex64, 1.0e-6, 2.0e-5), (jnp.complex128, 1.0e-11, 1.0e-9)],
+)
+def test_complex_krylov_matches_dense_under_jit(
+    solver_name, dtype, solve_rtol, error_tolerance
+):
+    a, b = random_complex_system(48, seed=21)
+    a, b = a.astype(dtype), b.astype(dtype)
+
+    @jax.jit
+    def solve(rhs):
+        if solver_name == "gmres":
+            return gmres(lambda v: a @ v, rhs, restart=18, rtol=solve_rtol)
+        return gcrot(lambda v: a @ v, rhs, m=18, k=5, rtol=solve_rtol)
+
+    solution = solve(b)
+    reference = np.linalg.solve(np.asarray(a), np.asarray(b))
+    relative_error = np.linalg.norm(np.asarray(solution.x) - reference) / np.linalg.norm(
+        reference
+    )
+    assert bool(solution.converged)
+    assert relative_error <= error_tolerance
+    assert float(solution.residual_norm) <= 2.0 * solve_rtol * float(jnp.linalg.norm(b))
+
+
+def test_complex_gcrot_recycle_preserves_accuracy():
+    a0, b = random_complex_system(50, seed=22)
+    perturbation, _ = random_complex_system(50, seed=23, spread=0.01)
+    a1 = a0 + 0.01 * perturbation
+    first = gcrot(lambda v: a0 @ v, b, m=15, k=5, rtol=1.0e-11)
+    second = gcrot(
+        lambda v: a1 @ v,
+        b,
+        m=15,
+        k=5,
+        rtol=1.0e-11,
+        recycle=first.recycle,
+    )
+    reference = np.linalg.solve(np.asarray(a1), np.asarray(b))
+    assert bool(first.converged) and bool(second.converged)
+    assert np.asarray(second.x) == pytest.approx(reference, rel=1.0e-9, abs=1.0e-9)
 
 
 def test_exact_inverse_preconditioner():

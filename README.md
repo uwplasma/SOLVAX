@@ -72,7 +72,10 @@ Everything is differentiable (`jax.grad` through the solve) and batchable
 | `solvax.refine` | Mixed-precision iterative refinement (float32 factor, float64 residuals) |
 | `solvax.native` | Host-side SuperLU bridge (non-differentiable, import-guarded) |
 
-Roadmap: harmonic-Ritz recycle selection and broader GPU batched-LU benchmarks.
+Complex-valued GMRES/GCROT, tridiagonal solves, and fixed-point acceleration
+use Hermitian inner products and real-valued safeguards. Remaining roadmap:
+harmonic-Ritz recycle selection, pytree GMRES/GCROT operands, and expanded GPU
+batched-LU benchmarks.
 
 ```python
 # Preconditioned, recycled Krylov across a parameter scan:
