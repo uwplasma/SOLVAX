@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.0 — 2026-07-11
+
+- Added complex-valued GMRES/GCROT with scaled unitary Givens rotations and
+  Hermitian Arnoldi/recycle projections.
+- Added complex fixed-point acceleration with real Aitken safeguards and the
+  Hermitian Anderson residual Gram matrix.
+- Restored block-Thomas linear-transpose compatibility on current JAX while
+  preserving reusable factors and warm-solve performance.
+- Made Jacobi preconditioners explicit PyTrees so mixed-precision wrappers cast
+  stored factor state as well as runtime vectors.
+- Added supported-minimum/current JAX CI rows, manual draft-PR validation, GPU
+  compatibility evidence, and a complex implicit-gradient example.
+
 ## 0.5.1 — 2026-07-11
 
 - Added `pcg_linear_solve`, which retains fixed-shape primal diagnostics while
