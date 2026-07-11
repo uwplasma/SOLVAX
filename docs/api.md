@@ -48,6 +48,14 @@
    :member-order: bysource
 ```
 
+## Preconditioned conjugate gradients
+
+```{eval-rst}
+.. automodule:: solvax.pcg
+   :members:
+   :member-order: bysource
+```
+
 ## Implicit differentiation
 
 ```{eval-rst}

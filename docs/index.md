@@ -44,6 +44,9 @@ sol2 = sx.gcrot(matvec2, b2, precond=coarse_inverse, recycle=sol.recycle)
 # Differentiable solve wrapping any black-box solver
 x = sx.linear_solve(matvec, b, solver=lambda mv, rhs: sx.gmres(mv, rhs).x)
 
+# Matrix-free PCG on arrays or pytrees, with explicit termination status
+pcg_solution = sx.pcg(matvec, b, precond=preconditioner, rtol=1e-10)
+
 # Batched tridiagonal solve (Thomas on CPU, cuSPARSE on GPU) over many columns
 x = sx.tridiagonal_solve(lower, diag, upper, rhs)
 
@@ -63,6 +66,7 @@ Everything is differentiable (`jax.grad` through the solve) and batchable
 | {mod}`solvax.banded` | Non-pivoted banded LU with row equilibration + static pivoting; periodic variant via the Woodbury capacitance trick |
 | {mod}`solvax.tridiagonal` | Backend-aware batched tridiagonal solve: bit-reproducible Thomas on CPU, fused cuSPARSE kernel on GPU, many columns/fields at once |
 | {mod}`solvax.krylov` | Flexible restarted GMRES (CGS2 + Givens) and GCROT-style Krylov subspace recycling for parameter continuation |
+| {mod}`solvax.pcg` | Matrix-free pytree PCG with fixed-shape diagnostics and explicit breakdown status |
 | {mod}`solvax.fixed_point` | Safeguarded Aitken and bounded-memory Anderson acceleration |
 | {mod}`solvax.precond` | Jacobi/block-Jacobi, coarse-operator LU, line smoothers, p-multigrid V-cycles, nearest-Kronecker, mixed-precision wrappers |
 | {mod}`solvax.implicit` | Implicit-function-theorem `linear_solve` and `root_solve` — gradients cost one extra (transposed) solve |

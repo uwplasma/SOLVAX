@@ -178,6 +178,54 @@ so a stale pair is always consistent {cite}`parks2006,morgan2002`.
 (`gmres`), and parameter scans where consecutive systems share eigenmodes
 (`gcrot`).
 
+## Preconditioned conjugate gradients — {mod}`solvax.pcg`
+
+For a Hermitian positive-definite matrix-free operator $A$ and a positive-
+definite preconditioner $M$, PCG applies conjugate gradients to the
+preconditioned residual without materializing either matrix. With
+$r_0=b-Ax_0$, $z_0=M^{-1}r_0$, and $p_0=z_0$, each step is
+
+$$
+\alpha_k = \frac{r_k^\ast z_k}{p_k^\ast A p_k},\qquad
+x_{k+1}=x_k+\alpha_kp_k,\qquad
+r_{k+1}=r_k-\alpha_kAp_k,
+$$
+
+$$
+z_{k+1}=M^{-1}r_{k+1},\qquad
+\beta_k=\frac{r_{k+1}^\ast z_{k+1}}{r_k^\ast z_k},\qquad
+p_{k+1}=z_{k+1}+\beta_kp_k.
+$$
+
+{func}`~solvax.pcg.pcg` accepts an array or an arbitrary JAX pytree; `matvec`,
+`precond`, `b`, and `x0` share that structure. Dot products sum over every leaf,
+so coupled field blocks can remain named pytrees rather than being flattened by
+application code. Real and complex Hermitian systems are supported, and integer
+right-hand sides are promoted to floating point.
+
+The returned {class}`~solvax.pcg.PCGSolution` contains the solution, absolute
+and relative residual norms, iteration count, convergence flag, integer status,
+and a residual history of shape `max_steps + 1`. Entries after termination
+repeat the final norm: this fixed shape is deliberate, keeping the whole result
+compatible with `jit` and `vmap`. {func}`~solvax.pcg.status_name` maps a
+materialized status to one of `converged`, `max_iterations`,
+`non_positive_curvature`, `nonfinite`, or `preconditioner_breakdown`.
+
+Stopping uses $\|r_k\|\le\max(\texttt{atol},\texttt{rtol}\|b\|)$ and positive-
+curvature checks are scale-free. A non-positive $p^\ast A p$ reports that the
+operator is not positive definite in the explored subspace; a non-positive
+$r^\ast M^{-1}r$ reports an invalid or broken preconditioner. Neither condition
+is silently converted into convergence.
+
+For gradients, pass PCG as the primal and transpose solver to
+{func}`~solvax.implicit.linear_solve`. The implicit VJP differentiates the
+converged linear system rather than the iteration count. Independent primal and
+transpose tolerances remain the caller's responsibility.
+
+*Use case:* symmetric elliptic operators, normal equations used with care, and
+multi-field SPD blocks where a structured line, multigrid, or application-
+provided preconditioner removes anisotropy.
+
 ## Preconditioners — {mod}`solvax.precond`
 
 Every builder returns a callable $M^{-1}$ suitable for `precond=`. A

@@ -37,6 +37,10 @@ import solvax as sx
 # Solve a block-tridiagonal system L_k x_{k-1} + D_k x_k + U_k x_{k+1} = b_k
 x = sx.block_thomas(lower, diag, upper, rhs)
 
+# Matrix-free PCG on arrays or arbitrary JAX pytrees
+solution = sx.pcg(matvec, rhs, precond=preconditioner, rtol=1e-10)
+assert solution.converged
+
 # Reuse one elimination across many right-hand sides
 factors = sx.block_thomas_factor(lower, diag, upper)
 x1 = sx.block_thomas_solve(factors, rhs1)
@@ -59,13 +63,13 @@ Everything is differentiable (`jax.grad` through the solve) and batchable
 | `solvax.direct` | Block-tridiagonal Schur elimination (block Thomas): full, factor/solve split, truncated-storage mode |
 | `solvax.banded` | Non-pivoted banded LU with row equilibration + static pivoting; periodic variant via the Woodbury capacitance trick |
 | `solvax.krylov` | Flexible restarted GMRES (CGS2 + Givens) and GCROT-style Krylov subspace recycling for parameter continuation |
+| `solvax.pcg` | Matrix-free pytree PCG with preconditioning, fixed-shape residual history, and explicit convergence/breakdown status |
 | `solvax.fixed_point` | Safeguarded Aitken and bounded-memory Anderson acceleration |
 | `solvax.implicit` | Implicit-function-theorem `linear_solve` and `root_solve` — gradients cost one extra (transposed) solve |
 | `solvax.refine` | Mixed-precision iterative refinement (float32 factor, float64 residuals) |
 | `solvax.native` | Host-side SuperLU bridge (non-differentiable, import-guarded) |
 
-Roadmap: harmonic-Ritz recycle selection, pytree operands, complex
-dtypes, GPU batched-LU benchmarks.
+Roadmap: harmonic-Ritz recycle selection and broader GPU batched-LU benchmarks.
 
 ```python
 # Preconditioned, recycled Krylov across a parameter scan:

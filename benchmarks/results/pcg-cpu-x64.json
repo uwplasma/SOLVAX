@@ -1,0 +1,32 @@
+{
+  "benchmark": "matrix_free_pcg",
+  "cold_seconds": 0.050367374991765246,
+  "converged": true,
+  "device": "cpu:0",
+  "dtype": "float64",
+  "implementation": {
+    "benchmark_sha256": "b5504b42d890bef32ca0602b2092d0c4d5268eaba9c7451b8f9ea89e95ffc314",
+    "pcg_sha256": "4ad99d4a5e0d20c4daffb1689b8c37c176d89346c6e4536c9931e55795c7e73c",
+    "solvax_version": "0.5.0"
+  },
+  "iterations": 1,
+  "jax_version": "0.10.2",
+  "jaxlib_version": "0.10.2",
+  "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+  "python_version": "3.14.6",
+  "relative_error": 0.0,
+  "relative_residual_norm": 4.220764384040162e-17,
+  "repeats": 7,
+  "size": 4096,
+  "status": "converged",
+  "warm_median_seconds": 2.9125018045306206e-05,
+  "warm_samples_seconds": [
+    4.82079922221601e-05,
+    3.041699528694153e-05,
+    2.9166985768824816e-05,
+    2.9125018045306206e-05,
+    2.629202208481729e-05,
+    2.6249996153637767e-05,
+    2.62079993262887e-05
+  ]
+}
