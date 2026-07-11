@@ -214,6 +214,8 @@ converged subsystem solve and unaccelerated fixed-point convergence is stiff.
 
 - **`aitken_fixed_point(mapping, x0, ...)`** reports the final iterate, true
   fixed-point residual, iteration count, convergence flag, and relaxation.
+- **`aitken_relaxation(previous_residual, residual, ...)`** exposes the same
+  safeguarded scalar update for applications that own their coupled loop.
 - Relaxation bounds make denominator breakdown and noncontractive transients
   finite and explicit rather than silently producing NaNs.
 - The loop is `jit`/`vmap` compatible. For accepted gradients, combine the

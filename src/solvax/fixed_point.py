@@ -20,6 +20,37 @@ class FixedPointSolution(NamedTuple):
     relaxation: jax.Array
 
 
+def aitken_relaxation(
+    previous_residual: jax.Array,
+    residual: jax.Array,
+    previous_relaxation: jax.Array | float = 1.0,
+    *,
+    min_relaxation: float = 0.05,
+    max_relaxation: float = 100.0,
+) -> jax.Array:
+    """Return one safeguarded vector Aitken relaxation update."""
+
+    if min_relaxation <= 0.0 or max_relaxation < min_relaxation:
+        raise ValueError("relaxation bounds must satisfy 0 < min <= max")
+    previous_residual = jnp.asarray(previous_residual)
+    residual = jnp.asarray(residual)
+    if previous_residual.shape != residual.shape:
+        raise ValueError("successive residuals must have identical shapes")
+    omega = jnp.asarray(previous_relaxation, dtype=residual.dtype)
+    difference = residual - previous_residual
+    denominator = jnp.vdot(difference, difference).real
+    numerator = jnp.vdot(previous_residual, difference).real
+    candidate = -omega * numerator / jnp.maximum(
+        denominator, jnp.finfo(residual.dtype).tiny
+    )
+    candidate = jnp.where(
+        jnp.isfinite(candidate) & (denominator > jnp.finfo(residual.dtype).eps),
+        candidate,
+        omega,
+    )
+    return jnp.clip(candidate, min_relaxation, max_relaxation)
+
+
 def aitken_fixed_point(
     mapping: Callable[[jax.Array], jax.Array],
     x0: jax.Array,
@@ -63,17 +94,14 @@ def aitken_fixed_point(
 
     def body(state):
         x, residual, previous, omega, _, iterations = state
-        difference = residual - previous
-        denominator = jnp.vdot(difference, difference).real
-        numerator = jnp.vdot(previous, difference).real
-        candidate = -omega * numerator / jnp.maximum(
-            denominator, jnp.finfo(x.dtype).tiny
+        candidate = aitken_relaxation(
+            previous,
+            residual,
+            omega,
+            min_relaxation=min_relaxation,
+            max_relaxation=max_relaxation,
         )
-        use_candidate = (iterations > 0) & jnp.isfinite(candidate) & (
-            denominator > jnp.finfo(x.dtype).eps
-        )
-        next_omega = jnp.where(use_candidate, candidate, omega)
-        next_omega = jnp.clip(next_omega, min_relaxation, max_relaxation)
+        next_omega = jnp.where(iterations > 0, candidate, omega)
         next_x = x + next_omega * residual
         next_residual = mapping(next_x) - next_x
         next_norm = jnp.linalg.norm(next_residual)

@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from solvax.fixed_point import aitken_fixed_point
+from solvax.fixed_point import aitken_fixed_point, aitken_relaxation
 from solvax.implicit import root_solve
 
 
@@ -93,3 +93,14 @@ def test_aitken_primal_supports_implicit_root_gradient():
 
     assert solved(2.0) == pytest.approx(0.5, rel=1.0e-6)
     assert jax.grad(solved)(2.0) == pytest.approx(-0.25, rel=1.0e-6)
+
+
+def test_incremental_aitken_relaxation_is_jittable_and_safeguarded():
+    previous = jnp.asarray([1.0, -2.0])
+    current = 0.9 * previous
+    omega = jax.jit(aitken_relaxation)(previous, current, 1.0)
+    assert omega == pytest.approx(10.0, rel=1.0e-5)
+    unchanged = aitken_relaxation(previous, previous, 0.7)
+    assert unchanged == pytest.approx(0.7)
+    with pytest.raises(ValueError, match="identical shapes"):
+        aitken_relaxation(previous, jnp.ones((3,)))

@@ -31,7 +31,7 @@ from solvax.direct import (
     block_thomas_truncated_fn,
     mixed_precision_block_thomas,
 )
-from solvax.fixed_point import FixedPointSolution, aitken_fixed_point
+from solvax.fixed_point import FixedPointSolution, aitken_fixed_point, aitken_relaxation
 from solvax.implicit import linear_solve, root_solve
 from solvax.krylov import KrylovSolution, gcrot, gmres
 from solvax.native import SpluFactorization, splu_solve
@@ -76,6 +76,7 @@ __all__ = [
     "tridiagonal_solve",
     "FixedPointSolution",
     "aitken_fixed_point",
+    "aitken_relaxation",
     "KrylovSolution",
     "gmres",
     "gcrot",
