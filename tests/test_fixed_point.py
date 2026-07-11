@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from solvax.fixed_point import aitken_fixed_point, aitken_relaxation
+from solvax.fixed_point import aitken_fixed_point, aitken_relaxation, anderson_mixing
 from solvax.implicit import root_solve
 
 
@@ -104,3 +104,38 @@ def test_incremental_aitken_relaxation_is_jittable_and_safeguarded():
     assert unchanged == pytest.approx(0.7)
     with pytest.raises(ValueError, match="identical shapes"):
         aitken_relaxation(previous, jnp.ones((3,)))
+
+
+def test_anderson_mixing_accelerates_a_multimode_affine_map():
+    diagonal = jnp.asarray([0.2, 0.9, 0.99])
+    target = jnp.asarray([1.0, -2.0, 0.5])
+
+    def mapping(x):
+        return diagonal * x + (1.0 - diagonal) * target
+
+    x = jnp.zeros_like(target)
+    iterates = []
+    residuals = []
+    for _ in range(8):
+        residual = mapping(x) - x
+        iterates.append(x)
+        residuals.append(residual)
+        x = anderson_mixing(jnp.stack(iterates[-4:]), jnp.stack(residuals[-4:]))
+
+    assert x == pytest.approx(target, rel=2.0e-5, abs=2.0e-5)
+
+
+def test_anderson_mixing_is_jittable_safeguarded_and_validated():
+    iterates = jnp.asarray([[0.0, 0.0], [0.5, -0.5]])
+    residuals = jnp.asarray([[1.0, -1.0], [0.5, -0.5]])
+    candidate = jax.jit(anderson_mixing)(iterates, residuals)
+    assert jnp.all(jnp.isfinite(candidate))
+    assert anderson_mixing(iterates[-1:], residuals[-1:]) == pytest.approx([1.0, -1.0])
+    with pytest.raises(ValueError, match="identical shapes"):
+        anderson_mixing(iterates, residuals[:1])
+    with pytest.raises(ValueError, match="at least one"):
+        anderson_mixing(jnp.empty((0, 2)), jnp.empty((0, 2)))
+    with pytest.raises(ValueError, match="non-negative"):
+        anderson_mixing(iterates, residuals, regularization=-1.0)
+    with pytest.raises(ValueError, match=r"\[0, 1\]"):
+        anderson_mixing(iterates, residuals, damping=1.1)

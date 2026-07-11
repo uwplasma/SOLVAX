@@ -51,6 +51,56 @@ def aitken_relaxation(
     return jnp.clip(candidate, min_relaxation, max_relaxation)
 
 
+def anderson_mixing(
+    iterates: jax.Array,
+    residuals: jax.Array,
+    *,
+    regularization: float = 1.0e-8,
+    damping: float = 1.0,
+) -> jax.Array:
+    """Return a regularized Anderson update from a bounded fixed-point history.
+
+    ``residuals[i]`` must equal ``mapping(iterates[i]) - iterates[i]``. The
+    result is a residual-minimizing affine combination of the mapped points.
+    Keeping map evaluation and stopping outside this primitive lets applications
+    retain their own expensive subsystem solves and physical convergence gates.
+    """
+
+    if regularization < 0.0:
+        raise ValueError("regularization must be non-negative")
+    if not 0.0 <= damping <= 1.0:
+        raise ValueError("damping must lie in [0, 1]")
+    iterates = jnp.asarray(iterates)
+    residuals = jnp.asarray(residuals)
+    if iterates.shape != residuals.shape:
+        raise ValueError("iterate and residual histories must have identical shapes")
+    if iterates.ndim < 1 or iterates.shape[0] < 1:
+        raise ValueError("Anderson history must contain at least one entry")
+
+    history_size = iterates.shape[0]
+    flat_residuals = residuals.reshape((history_size, -1))
+    gram = flat_residuals @ flat_residuals.T
+    scale = jnp.maximum(
+        jnp.trace(gram) / history_size,
+        jnp.asarray(jnp.finfo(residuals.dtype).tiny, dtype=residuals.dtype),
+    )
+    stabilization = (regularization + jnp.finfo(residuals.dtype).eps) * scale
+    system = gram + stabilization * jnp.eye(history_size, dtype=residuals.dtype)
+    ones = jnp.ones((history_size,), dtype=residuals.dtype)
+    weights = jnp.linalg.solve(system, ones)
+    denominator = jnp.sum(weights)
+    weights = weights / jnp.where(
+        jnp.abs(denominator) > jnp.finfo(residuals.dtype).tiny,
+        denominator,
+        jnp.asarray(1.0, dtype=residuals.dtype),
+    )
+    fallback = jax.nn.one_hot(history_size - 1, history_size, dtype=residuals.dtype)
+    weights = jnp.where(jnp.all(jnp.isfinite(weights)), weights, fallback)
+    mapped = iterates + residuals
+    accelerated = jnp.tensordot(weights, mapped, axes=(0, 0))
+    return (1.0 - damping) * mapped[-1] + damping * accelerated
+
+
 def aitken_fixed_point(
     mapping: Callable[[jax.Array], jax.Array],
     x0: jax.Array,

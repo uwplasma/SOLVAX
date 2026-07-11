@@ -63,7 +63,7 @@ Everything is differentiable (`jax.grad` through the solve) and batchable
 | {mod}`solvax.banded` | Non-pivoted banded LU with row equilibration + static pivoting; periodic variant via the Woodbury capacitance trick |
 | {mod}`solvax.tridiagonal` | Backend-aware batched tridiagonal solve: bit-reproducible Thomas on CPU, fused cuSPARSE kernel on GPU, many columns/fields at once |
 | {mod}`solvax.krylov` | Flexible restarted GMRES (CGS2 + Givens) and GCROT-style Krylov subspace recycling for parameter continuation |
-| {mod}`solvax.fixed_point` | Safeguarded Aitken acceleration with residual, iteration, convergence and relaxation diagnostics |
+| {mod}`solvax.fixed_point` | Safeguarded Aitken and bounded-memory Anderson acceleration |
 | {mod}`solvax.precond` | Jacobi/block-Jacobi, coarse-operator LU, line smoothers, p-multigrid V-cycles, nearest-Kronecker, mixed-precision wrappers |
 | {mod}`solvax.implicit` | Implicit-function-theorem `linear_solve` and `root_solve` — gradients cost one extra (transposed) solve |
 | {mod}`solvax.autodiff` | Memory-chunked forward/reverse Jacobians (`jac_chunk_size`) and the `auto` sizing policy |

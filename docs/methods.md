@@ -214,6 +214,9 @@ converged subsystem solve and unaccelerated fixed-point convergence is stiff.
 
 - **`aitken_fixed_point(mapping, x0, ...)`** reports the final iterate, true
   fixed-point residual, iteration count, convergence flag, and relaxation.
+- **`anderson_mixing(iterates, residuals, ...)`** provides a JIT-compatible,
+  regularized affine history update for application loops with expensive maps
+  and application-specific stopping policies.
 - **`aitken_relaxation(previous_residual, residual, ...)`** exposes the same
   safeguarded scalar update for applications that own their coupled loop.
 - Relaxation bounds make denominator breakdown and noncontractive transients
