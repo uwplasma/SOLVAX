@@ -93,6 +93,8 @@ def test_thomas_matches_textbook_reference():
 def test_auto_is_thomas_on_cpu_bit_identical():
     # On the CPU lowering platform, "auto" must select the bit-reproducible
     # Thomas path (this whole suite runs on CPU in CI).
+    if jax.default_backend() != "cpu":
+        pytest.skip("CPU-only backend-selection identity contract")
     lower, diag, upper, rhs = make_tridiag(15, (3,), 2, seed=4)
     x_auto = tridiagonal_solve(lower, diag, upper, rhs, method="auto")
     x_thomas = tridiagonal_solve(lower, diag, upper, rhs, method="thomas")
