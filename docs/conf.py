@@ -22,6 +22,13 @@ myst_enable_extensions = ["dollarmath", "amsmath"]
 
 html_theme = "furo"
 html_title = "solvax"
+html_static_path = ["_static"]
+html_favicon = "_static/solvax.svg"
+
+# DOI targets are stable bibliography identifiers, but several publisher
+# endpoints reject automated HEAD/GET requests with HTTP 403. Keep the links in
+# rendered citations while excluding the resolver from linkcheck.
+linkcheck_ignore = [r"https://doi.org/.*"]
 
 intersphinx_mapping = {
     "jax": ("https://docs.jax.dev/en/latest/", None),
