@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Added opt-in single-reduction PCG for sharded systems. Its algebraically
+  equivalent recurrence lets XLA batch per-iteration scalar products into one
+  tuple all-reduce while retaining residual diagnostics and implicit gradients.
+
 ## 0.6.1 - 2026-07-11
 
 - Mark the distributed package as PEP 561 typed so strict downstream type

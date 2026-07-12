@@ -77,8 +77,137 @@ def _tree_norm(value: PyTree) -> jax.Array:
     return jnp.sqrt(jnp.maximum(_tree_dot(value, value), 0.0))
 
 
+def _tree_multi_dot(*pairs: tuple[PyTree, PyTree]) -> jax.Array:
+    """Evaluate independent inner products in one XLA reduction stage."""
+
+    return jnp.stack([_tree_dot(left, right) for left, right in pairs])
+
+
 def _identity(value: PyTree) -> PyTree:
     return value
+
+
+def _single_reduction_pcg(
+    matvec: MatVec,
+    b: PyTree,
+    x0: PyTree,
+    precond: MatVec,
+    *,
+    b_norm: jax.Array,
+    tolerance: jax.Array,
+    tiny: jax.Array,
+    scalar_dtype: jnp.dtype,
+    max_steps: int,
+) -> PCGSolution:
+    """PETSc-style PCG rearrangement with one reduction stage per step."""
+
+    residual0 = _tree_sub(b, matvec(x0))
+    z0 = precond(residual0)
+    applied0 = matvec(z0)
+    rho0, delta0, residual_squared0 = _tree_multi_dot(
+        (residual0, z0), (z0, applied0), (residual0, residual0)
+    )
+    residual_norm0 = jnp.sqrt(jnp.maximum(residual_squared0, 0.0))
+    finite0 = jnp.isfinite(residual_norm0) & jnp.isfinite(rho0) & jnp.isfinite(delta0)
+    status0 = jnp.where(
+        ~finite0,
+        NONFINITE,
+        jnp.where(
+            residual_norm0 <= tolerance,
+            CONVERGED,
+            jnp.where(
+                rho0 <= 0.0,
+                PRECONDITIONER_BREAKDOWN,
+                jnp.where(delta0 > 0.0, RUNNING, NON_POSITIVE_CURVATURE),
+            ),
+        ),
+    ).astype(jnp.int32)
+    history0 = jnp.full((max_steps + 1,), residual_norm0, dtype=scalar_dtype)
+
+    def cond_fun(state):
+        return (state[0] < max_steps) & (state[-2] == RUNNING)
+
+    def body_fun(state):
+        count, x, residual, z, direction, applied, rho, curvature, _, _, history = state
+        safe_curvature = jnp.where(curvature > 0.0, curvature, 1.0)
+        alpha = jnp.where(curvature > 0.0, rho / safe_curvature, 0.0)
+        x_next = _tree_add_scaled(x, alpha, direction)
+        residual_next = _tree_add_scaled(residual, -alpha, applied)
+        z_next = precond(residual_next)
+        applied_z = matvec(z_next)
+        rho_next, delta_next, residual_squared = _tree_multi_dot(
+            (residual_next, z_next),
+            (z_next, applied_z),
+            (residual_next, residual_next),
+        )
+        residual_norm = jnp.sqrt(jnp.maximum(residual_squared, 0.0))
+        safe_rho = jnp.where(rho > 0.0, rho, 1.0)
+        beta = jnp.where(rho_next > 0.0, rho_next / safe_rho, 0.0)
+        curvature_next = delta_next - beta**2 * curvature
+        direction_next = _tree_add_scaled(z_next, beta, direction)
+        applied_next = _tree_add_scaled(applied_z, beta, applied)
+        finite = (
+            jnp.isfinite(alpha)
+            & jnp.isfinite(beta)
+            & jnp.isfinite(curvature_next)
+            & jnp.isfinite(residual_norm)
+            & jnp.isfinite(rho_next)
+        )
+        status = jnp.where(
+            ~finite,
+            NONFINITE,
+            jnp.where(
+                residual_norm <= tolerance,
+                CONVERGED,
+                jnp.where(
+                    rho_next <= 0.0,
+                    PRECONDITIONER_BREAKDOWN,
+                    jnp.where(curvature_next > 0.0, RUNNING, NON_POSITIVE_CURVATURE),
+                ),
+            ),
+        ).astype(jnp.int32)
+        history = history.at[count + 1].set(residual_norm)
+        return (
+            count + 1,
+            x_next,
+            residual_next,
+            z_next,
+            direction_next,
+            applied_next,
+            rho_next,
+            curvature_next,
+            residual_norm,
+            status,
+            history,
+        )
+
+    initial = (
+        jnp.int32(0),
+        x0,
+        residual0,
+        z0,
+        z0,
+        applied0,
+        rho0,
+        delta0,
+        residual_norm0,
+        status0,
+        history0,
+    )
+    iterations, x, _, _, _, _, _, _, residual_norm, status, history = lax.while_loop(
+        cond_fun, body_fun, initial
+    )
+    status = jnp.where(status == RUNNING, MAX_ITERATIONS, status).astype(jnp.int32)
+    history = jnp.where(jnp.arange(max_steps + 1) <= iterations, history, residual_norm)
+    return PCGSolution(
+        x=x,
+        residual_norm=residual_norm,
+        relative_residual_norm=residual_norm / jnp.maximum(b_norm, tiny),
+        iterations=iterations,
+        converged=status == CONVERGED,
+        status=status,
+        residual_history=history,
+    )
 
 
 def pcg(
@@ -90,11 +219,14 @@ def pcg(
     rtol: float = 1.0e-8,
     atol: float = 0.0,
     max_steps: int = 500,
+    single_reduction: bool = False,
 ) -> PCGSolution:
     """Solve a symmetric positive-definite pytree system with matrix-free PCG.
 
     ``matvec`` and ``precond`` operate on a pytree with the same structure as
-    ``b``. The residual history always has shape ``(max_steps + 1,)``; entries
+    ``b``. Set ``single_reduction=True`` to batch the three independent inner
+    products in an algebraically equivalent recurrence. The residual history
+    always has shape ``(max_steps + 1,)``; entries
     after termination repeat the final norm, which keeps the result compatible
     with ``jit`` and ``vmap`` without dynamic allocation.
     """
@@ -122,11 +254,23 @@ def pcg(
         jnp.asarray(atol, scalar_dtype),
         jnp.asarray(rtol, scalar_dtype) * b_norm,
     )
+    tiny = jnp.asarray(jnp.finfo(scalar_dtype).tiny, dtype=scalar_dtype)
+    if single_reduction:
+        return _single_reduction_pcg(
+            matvec,
+            b,
+            x0,
+            precond,
+            b_norm=b_norm,
+            tolerance=tolerance,
+            tiny=tiny,
+            scalar_dtype=scalar_dtype,
+            max_steps=max_steps,
+        )
     residual0 = _tree_sub(b, matvec(x0))
     residual_norm0 = _tree_norm(residual0)
     z0 = precond(residual0)
     rho0 = _tree_dot(residual0, z0)
-    tiny = jnp.asarray(jnp.finfo(scalar_dtype).tiny, dtype=scalar_dtype)
     finite0 = jnp.isfinite(residual_norm0) & jnp.isfinite(rho0)
     status0 = jnp.where(
         ~finite0,
@@ -237,6 +381,7 @@ def pcg_linear_solve(
     rtol: float = 1.0e-8,
     atol: float = 0.0,
     max_steps: int = 500,
+    single_reduction: bool = False,
     transpose_precond: MatVec | None = None,
     transpose_rtol: float | None = None,
     transpose_atol: float | None = None,
@@ -265,6 +410,7 @@ def pcg_linear_solve(
             rtol=rtol,
             atol=atol,
             max_steps=max_steps,
+            single_reduction=single_reduction,
         )
         return solution.x, _diagnostics(solution)
 
@@ -276,6 +422,7 @@ def pcg_linear_solve(
             rtol=adjoint_rtol,
             atol=adjoint_atol,
             max_steps=adjoint_steps,
+            single_reduction=single_reduction,
         )
         return solution.x, _diagnostics(solution)
 

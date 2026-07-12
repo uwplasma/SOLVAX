@@ -45,6 +45,49 @@ def test_pcg_supports_pytree_systems_and_jit():
     assert jnp.allclose(solution.x["b"][0], jnp.array([3.0]))
 
 
+def test_single_reduction_pcg_matches_classical_recurrence_and_jit():
+    diagonal = jnp.logspace(0.0, 3.0, 48)
+    rhs = jnp.linspace(-1.0, 2.0, diagonal.size)
+    kwargs = {
+        "precond": lambda residual: residual / jnp.sqrt(diagonal),
+        "rtol": 1.0e-6,
+        "max_steps": 80,
+    }
+    classical = pcg(lambda x: diagonal * x, rhs, **kwargs)
+    reduced = jax.jit(
+        lambda value: pcg(lambda x: diagonal * x, value, single_reduction=True, **kwargs)
+    )(rhs)
+
+    assert classical.converged and reduced.converged
+    assert jnp.allclose(reduced.x, classical.x, rtol=2.0e-5, atol=2.0e-6)
+    assert reduced.residual_norm <= 2.0 * classical.residual_norm
+
+
+def test_single_reduction_pcg_supports_complex_and_implicit_gradients():
+    matrix = jnp.array([[4.0, 1.0j], [-1.0j, 3.0]])
+    rhs = jnp.array([1.0 + 2.0j, -2.0 + 0.5j])
+    solution = pcg(
+        lambda x: matrix @ x,
+        rhs,
+        rtol=1.0e-6,
+        max_steps=8,
+        single_reduction=True,
+    )
+    assert solution.converged
+    assert jnp.allclose(solution.x, jnp.linalg.solve(matrix, rhs), rtol=1.0e-5)
+
+    def objective(scale):
+        solved = pcg_linear_solve(
+            lambda x: scale * x,
+            jnp.array([1.0, -2.0]),
+            max_steps=4,
+            single_reduction=True,
+        )
+        return jnp.sum(solved.x**2)
+
+    assert jnp.allclose(jax.grad(objective)(3.0), -10.0 / 27.0, rtol=1.0e-6)
+
+
 def test_pcg_supports_integer_rhs_and_complex_hermitian_systems():
     integer = pcg(lambda x: 2.0 * x, jnp.array([2, 4]), max_steps=2)
     assert integer.converged

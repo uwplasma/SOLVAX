@@ -67,6 +67,7 @@ sx.pcg(
     rtol=1e-8,
     atol=0.0,
     max_steps=500,
+    single_reduction=False,
 )
 ```
 
@@ -75,6 +76,15 @@ sx.pcg(
 - `precond`: positive-definite inverse action; identity by default.
 - `rtol`, `atol`: residual stopping tolerances.
 - `max_steps`: fixed compiled iteration and history size.
+- `single_reduction`: use the algebraically equivalent single-reduction PCG
+  recurrence. XLA can combine its independent scalar products into one tuple
+  all-reduce, improving strong scaling at the cost of two extra work vectors.
+
+The single-reduction recurrence follows the same rearrangement exposed by
+PETSc's `KSPCGUseSingleReduction`. It retains the unpreconditioned residual norm
+and stopping contract of the classical implementation. Because finite-precision
+recurrences can drift differently, it is opt-in and should be qualified on the
+target operator before production use.
 
 ## Outputs and statuses
 
