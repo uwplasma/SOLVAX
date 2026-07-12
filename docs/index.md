@@ -1,92 +1,118 @@
-# solvax
+# SOLVAX
 
-**Differentiable structured linear solvers, preconditioners and matrix-free
-methods in JAX.**
+**Differentiable structured solvers, preconditioners, and matrix-free methods
+for JAX.**
 
-`solvax` is the solver layer that kinetic and PDE codes keep re-implementing,
-factored out once: structured direct solves (batched dense LU, block-tridiagonal
-Schur elimination with truncated storage, banded and periodic-banded LU,
-hardware-aware batched tridiagonal), preconditioned and recycled Krylov methods,
-physics-agnostic preconditioners (coarse-operator LU, p-multigrid, Kronecker
-approximations, line smoothers), mixed-precision iterative refinement,
-memory-chunked autodiff, and implicit differentiation of every solve — all
-jit/vmap/grad-transparent on CPU and GPU.
+SOLVAX is the numerical-solver layer that kinetic, transport, equilibrium, and
+PDE codes often reimplement independently. It provides structured direct
+factorizations, matrix-free Krylov methods, fixed-point acceleration,
+preconditioners, mixed-precision refinement, bounded-memory Jacobians, and
+implicit differentiation. With the exception of the explicitly host-side
+SuperLU bridge, the library is designed to compose with `jax.jit`, `jax.vmap`,
+and `jax.grad`.
 
-It builds on [lineax](https://github.com/patrick-kidger/lineax)'s operator
-interface and adds the block-structured direct elimination,
-coarse-operator/multigrid preconditioning, Krylov recycling, and chunked
-Jacobian layer that lineax does not cover.
+This documentation is organized around decisions rather than modules:
 
-## Install
+- {doc}`getting_started` establishes the operator, tolerance, shape, and result
+  conventions used everywhere.
+- {doc}`choosing` maps mathematical structure to a solver and preconditioner.
+- The solver guides derive each algorithm, document every input and output,
+  describe failure modes, and compare the method with common alternatives.
+- The tutorials build complete structured, matrix-free, and differentiable
+  workflows.
+- {doc}`api` is the generated signature-level reference.
 
-```bash
-pip install solvax            # core
-pip install solvax[native]    # + SciPy SuperLU host bridge
-```
-
-## Quickstart
+## A first solve
 
 ```python
+import jax.numpy as jnp
 import solvax as sx
 
-# Block-tridiagonal system: L_k x_{k-1} + D_k x_k + U_k x_{k+1} = b_k
-x = sx.block_thomas(lower, diag, upper, rhs)
+A = jnp.array([[4.0, 1.0], [1.0, 3.0]])
+b = jnp.array([1.0, 2.0])
 
-# Reuse one elimination across right-hand sides (and the transposed/adjoint solve)
-factors = sx.block_thomas_factor(lower, diag, upper)
-x1 = sx.block_thomas_solve(factors, rhs1)
-xT = sx.block_thomas_solve(factors, rhs1, transpose=True)
+solution = sx.pcg(lambda x: A @ x, b, rtol=1e-10)
+if not solution.converged:
+    raise RuntimeError(sx.status_name(solution.status))
 
-# Preconditioned, recycled Krylov across a parameter scan
-sol = sx.gcrot(matvec, b, precond=coarse_inverse, m=50, k=10)
-sol2 = sx.gcrot(matvec2, b2, precond=coarse_inverse, recycle=sol.recycle)
-
-# Differentiable solve wrapping any black-box solver
-x = sx.linear_solve(matvec, b, solver=lambda mv, rhs: sx.gmres(mv, rhs).x)
-
-# Matrix-free PCG on arrays or pytrees, with explicit termination status
-pcg_solution = sx.pcg(matvec, b, precond=preconditioner, rtol=1e-10)
-
-# Batched tridiagonal solve (Thomas on CPU, cuSPARSE on GPU) over many columns
-x = sx.tridiagonal_solve(lower, diag, upper, rhs)
-
-# Memory-chunked Jacobian (the jac_chunk_size knob)
-J = sx.chunked_jacrev(residual, chunk_size="auto")(theta)
+print(solution.x)
+print(solution.residual_norm)
 ```
 
-Everything is differentiable (`jax.grad` through the solve) and batchable
-(`jax.vmap` over stacked systems).
+For a nonsymmetric operator, use FGMRES:
 
-## What's in the box
+```python
+solution = sx.gmres(lambda x: A @ x, b, restart=20, rtol=1e-10)
+```
 
-| Module | Contents |
-|---|---|
-| {mod}`solvax.operators` | Matrix-free, sum, Kronecker, block-tridiagonal and bordered (constraint-row) operator containers with closed-form transposes |
-| {mod}`solvax.direct` | Block-tridiagonal Schur elimination (block Thomas): full, factor/solve split, truncated-storage and mixed-precision variants |
-| {mod}`solvax.banded` | Non-pivoted banded LU with row equilibration + static pivoting; periodic variant via the Woodbury capacitance trick |
-| {mod}`solvax.tridiagonal` | Backend-aware batched tridiagonal solve: bit-reproducible Thomas on CPU, fused cuSPARSE kernel on GPU, many columns/fields at once |
-| {mod}`solvax.krylov` | Flexible restarted GMRES (CGS2 + Givens) and GCROT-style Krylov subspace recycling for parameter continuation |
-| {mod}`solvax.pcg` | Matrix-free pytree PCG with fixed-shape diagnostics and explicit breakdown status |
-| {mod}`solvax.fixed_point` | Safeguarded Aitken and bounded-memory Anderson acceleration |
-| {mod}`solvax.precond` | Jacobi/block-Jacobi, coarse-operator LU, line smoothers, p-multigrid V-cycles, nearest-Kronecker, mixed-precision wrappers |
-| {mod}`solvax.implicit` | Implicit-function-theorem `linear_solve` and `root_solve` — gradients cost one extra (transposed) solve |
-| {mod}`solvax.autodiff` | Memory-chunked forward/reverse Jacobians (`jac_chunk_size`) and the `auto` sizing policy |
-| {mod}`solvax.refine` | Mixed-precision iterative refinement (float32 factor, float64 residuals) |
-| {mod}`solvax.native` | Host-side SuperLU bridge (non-differentiable, import-guarded) |
+For a block-tridiagonal operator, do not discard the structure:
 
-The {doc}`methods` page documents every capability — the equations, the source,
-the inputs/outputs and the use case; the {doc}`api` renders the full signatures.
-Runnable, pedagogic scripts (one per capability) live in the `examples/`
-directory of the repository.
+```python
+factors = sx.block_thomas_factor(lower, diagonal, upper)
+x = sx.block_thomas_solve(factors, rhs)
+```
+
+## Documentation map
 
 ```{toctree}
 :maxdepth: 2
+:caption: Start here
 
+getting_started
+choosing
 methods
+```
+
+```{toctree}
+:maxdepth: 2
+:caption: Structured direct solvers
+
+solvers/block_tridiagonal
+solvers/banded
+solvers/tridiagonal
+```
+
+```{toctree}
+:maxdepth: 2
+:caption: Iterative and nonlinear solvers
+
+solvers/krylov
+solvers/pcg
+solvers/fixed_point
+```
+
+```{toctree}
+:maxdepth: 2
+:caption: Solver infrastructure
+
+operators
+preconditioners
+solvers/implicit
+solvers/mixed_precision
+autodiff
+solvers/native
+```
+
+```{toctree}
+:maxdepth: 2
+:caption: Tutorials
+
+tutorials/index
+```
+
+```{toctree}
+:maxdepth: 2
+:caption: Reference
+
 api
 ```
 
-## References
+## Literature
+
+SOLVAX follows established numerical linear algebra rather than introducing
+new convergence theory. Each method page states the algorithmic variant used
+by the implementation and cites the relevant literature. The full bibliography
+is collected below.
 
 ```{bibliography}
 ```
