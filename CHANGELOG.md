@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.1 - 2026-07-11
+
+- Mark the distributed package as PEP 561 typed so strict downstream type
+  checking analyzes SOLVAX's annotated public API.
+
 ## 0.6.0 — 2026-07-11
 
 - Added complex-valued GMRES/GCROT with scaled unitary Givens rotations and
