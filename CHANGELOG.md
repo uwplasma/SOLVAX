@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 - 2026-07-12
 
 - Added opt-in single-reduction PCG for sharded systems. Its algebraically
   equivalent recurrence lets XLA batch per-iteration scalar products into one
