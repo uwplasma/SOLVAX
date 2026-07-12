@@ -68,6 +68,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 
+import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jax.scipy.linalg import lu_factor, lu_solve
@@ -75,6 +76,31 @@ from jax.scipy.linalg import lu_factor, lu_solve
 from solvax.refine import as_low_precision
 
 MatVec = Callable[[jax.Array], jax.Array]
+
+
+class _Jacobi(eqx.Module):
+    """PyTree point-Jacobi application, including its array state."""
+
+    inverse_diagonal: jax.Array
+
+    def __call__(self, vector: jax.Array) -> jax.Array:
+        return self.inverse_diagonal * vector
+
+
+class _BlockJacobi(eqx.Module):
+    """PyTree block-Jacobi application with reusable batched LU factors."""
+
+    lu: jax.Array
+    pivots: jax.Array
+    n_blocks: int = eqx.field(static=True)
+    block_size: int = eqx.field(static=True)
+
+    def __call__(self, vector: jax.Array) -> jax.Array:
+        residual = vector.reshape(self.n_blocks, self.block_size)
+        batched_solve = jax.vmap(
+            lambda lu_k, piv_k, rhs_k: lu_solve((lu_k, piv_k), rhs_k)
+        )
+        return batched_solve(self.lu, self.pivots, residual).reshape(vector.shape)
 
 
 def jacobi(diagonal: jax.Array) -> MatVec:
@@ -90,12 +116,7 @@ def jacobi(diagonal: jax.Array) -> MatVec:
     Returns:
         A callable ``precond(v) -> diagonal**-1 * v``.
     """
-    inv_diag = 1.0 / jnp.asarray(diagonal)
-
-    def apply(v: jax.Array) -> jax.Array:
-        return inv_diag * v
-
-    return apply
+    return _Jacobi(1.0 / jnp.asarray(diagonal))
 
 
 def block_jacobi(blocks: jax.Array) -> MatVec:
@@ -119,13 +140,7 @@ def block_jacobi(blocks: jax.Array) -> MatVec:
         raise ValueError("blocks must have shape (n_blocks, m, m)")
     n_blocks, m, _ = blocks.shape
     lu, piv = jax.vmap(lu_factor)(blocks)
-    batched_solve = jax.vmap(lambda lu_k, piv_k, r_k: lu_solve((lu_k, piv_k), r_k))
-
-    def apply(v: jax.Array) -> jax.Array:
-        r = v.reshape(n_blocks, m)
-        return batched_solve(lu, piv, r).reshape(v.shape)
-
-    return apply
+    return _BlockJacobi(lu, piv, n_blocks, m)
 
 
 def coarse_operator(solve: MatVec) -> MatVec:

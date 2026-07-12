@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+from solvax import __version__
+
 _BENCHMARK_PATH = Path(__file__).resolve().parents[1] / "benchmarks" / "benchmark_pcg.py"
 _SPEC = importlib.util.spec_from_file_location("benchmark_pcg", _BENCHMARK_PATH)
 assert _SPEC is not None and _SPEC.loader is not None
@@ -17,7 +19,7 @@ def test_pcg_benchmark_records_correctness_and_cold_warm_timings():
     assert result["status"] == "converged"
     assert result["iterations"] <= 2
     assert result["relative_error"] < 1.0e-5
-    assert result["implementation"]["solvax_version"] == "0.5.1"
+    assert result["implementation"]["solvax_version"] == __version__
     assert len(result["implementation"]["pcg_sha256"]) == 64
     assert result["jax_version"]
     assert result["python_version"]

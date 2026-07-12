@@ -36,15 +36,16 @@ def aitken_relaxation(
     residual = jnp.asarray(residual)
     if previous_residual.shape != residual.shape:
         raise ValueError("successive residuals must have identical shapes")
-    omega = jnp.asarray(previous_relaxation, dtype=residual.dtype)
+    real_dtype = jnp.real(residual).dtype
+    omega = jnp.asarray(previous_relaxation, dtype=real_dtype)
     difference = residual - previous_residual
     denominator = jnp.vdot(difference, difference).real
     numerator = jnp.vdot(previous_residual, difference).real
     candidate = -omega * numerator / jnp.maximum(
-        denominator, jnp.finfo(residual.dtype).tiny
+        denominator, jnp.finfo(real_dtype).tiny
     )
     candidate = jnp.where(
-        jnp.isfinite(candidate) & (denominator > jnp.finfo(residual.dtype).eps),
+        jnp.isfinite(candidate) & (denominator > jnp.finfo(real_dtype).eps),
         candidate,
         omega,
     )
@@ -79,18 +80,19 @@ def anderson_mixing(
 
     history_size = iterates.shape[0]
     flat_residuals = residuals.reshape((history_size, -1))
-    gram = flat_residuals @ flat_residuals.T
+    gram = jnp.conj(flat_residuals) @ flat_residuals.T
+    real_dtype = jnp.real(residuals).dtype
     scale = jnp.maximum(
-        jnp.trace(gram) / history_size,
-        jnp.asarray(jnp.finfo(residuals.dtype).tiny, dtype=residuals.dtype),
+        jnp.trace(gram).real / history_size,
+        jnp.asarray(jnp.finfo(real_dtype).tiny, dtype=real_dtype),
     )
-    stabilization = (regularization + jnp.finfo(residuals.dtype).eps) * scale
+    stabilization = (regularization + jnp.finfo(real_dtype).eps) * scale
     system = gram + stabilization * jnp.eye(history_size, dtype=residuals.dtype)
     ones = jnp.ones((history_size,), dtype=residuals.dtype)
     weights = jnp.linalg.solve(system, ones)
     denominator = jnp.sum(weights)
     weights = weights / jnp.where(
-        jnp.abs(denominator) > jnp.finfo(residuals.dtype).tiny,
+        jnp.abs(denominator) > jnp.finfo(real_dtype).tiny,
         denominator,
         jnp.asarray(1.0, dtype=residuals.dtype),
     )
@@ -131,11 +133,13 @@ def aitken_fixed_point(
     x0 = jnp.asarray(x0)
     residual0 = mapping(x0) - x0
     norm0 = jnp.linalg.norm(residual0)
-    scale = jnp.maximum(jnp.linalg.norm(x0), jnp.asarray(1.0, dtype=x0.dtype))
+    real_dtype = jnp.real(x0).dtype
+    scale = jnp.maximum(jnp.linalg.norm(x0), jnp.asarray(1.0, dtype=real_dtype))
     tolerance = jnp.maximum(
-        jnp.asarray(atol, dtype=x0.dtype), jnp.asarray(rtol, dtype=x0.dtype) * scale
+        jnp.asarray(atol, dtype=real_dtype),
+        jnp.asarray(rtol, dtype=real_dtype) * scale,
     )
-    omega0 = jnp.asarray(1.0, dtype=x0.dtype)
+    omega0 = jnp.asarray(1.0, dtype=real_dtype)
     previous0 = jnp.zeros_like(residual0)
 
     def condition(state):

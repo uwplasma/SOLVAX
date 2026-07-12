@@ -15,11 +15,11 @@ sequential inner-product latency of modified Gram-Schmidt on accelerators
 while retaining O(eps) loss of orthogonality.
 
 GCROT(m, k)-style recycling maintains an outer pair ``(C, U)`` with
-``A U = C`` and ``C^T C = I``. Each outer iteration first minimizes over
-the recycled space (``x += U C^T r``, ``r -= C C^T r``), then runs one
-FGMRES(m) cycle on the deflated operator ``(I - C C^T) A``, giving
+``A U = C`` and ``C^H C = I``. Each outer iteration first minimizes over
+the recycled space (``x += U C^H r``, ``r -= C C^H r``), then runs one
+FGMRES(m) cycle on the deflated operator ``(I - C C^H) A``, giving
 
-    (I - C C^T) A Z_m = V_{m+1} Hbar_m,     B_m = C^T A Z_m,
+    (I - C C^H) A Z_m = V_{m+1} Hbar_m,     B_m = C^H A Z_m,
 
 so the cycle correction is ``dx = Z_m y - U B_m y`` with
 ``A dx = V_{m+1} Hbar_m y`` orthogonal to ``C``. In this v0.1 the recycle
@@ -88,6 +88,36 @@ def _identity(v: jax.Array) -> jax.Array:
     return v
 
 
+def _adjoint(matrix: jax.Array) -> jax.Array:
+    """Return the conjugate transpose used by complex Krylov projections."""
+    return jnp.conj(matrix).T
+
+
+def _complex_givens(a: jax.Array, b: jax.Array):
+    r"""Return a unitary Givens rotation that annihilates ``b``.
+
+    The returned real ``c`` and possibly-complex ``s`` satisfy
+
+    ``[[c, s], [-conj(s), c]] @ [a, b] == [r, 0]``.
+
+    This is the complex ``xLARTG`` convention used by LAPACK. Scaling by
+    ``max(abs(a), abs(b))`` avoids avoidable overflow in the norm.
+    """
+    real_dtype = jnp.real(a).dtype
+    scale = jnp.maximum(jnp.abs(a), jnp.abs(b))
+    safe_scale = jnp.where(scale > 0, scale, jnp.asarray(1.0, real_dtype))
+    rho = safe_scale * jnp.sqrt(
+        (jnp.abs(a) / safe_scale) ** 2 + (jnp.abs(b) / safe_scale) ** 2
+    )
+    abs_a = jnp.abs(a)
+    alpha = jnp.where(abs_a > 0, a / abs_a, jnp.asarray(1.0, a.dtype))
+    safe_rho = jnp.where(rho > 0, rho, jnp.asarray(1.0, real_dtype))
+    c = jnp.where(rho > 0, abs_a / safe_rho, jnp.asarray(1.0, real_dtype))
+    s = jnp.where(rho > 0, alpha * jnp.conj(b) / safe_rho, 0.0)
+    r = jnp.where(rho > 0, alpha * rho, jnp.asarray(0.0, a.dtype))
+    return c, s, r
+
+
 def _fgmres_cycle(
     matvec: MatVec,
     precond: MatVec,
@@ -100,7 +130,7 @@ def _fgmres_cycle(
 ):
     """One flexible Arnoldi cycle of size ``m`` on the deflated operator.
 
-    Builds ``(I - C C^T) A Z = V Hbar`` with CGS2 orthogonalization and an
+    Builds ``(I - C C^H) A Z = V Hbar`` with CGS2 orthogonalization and an
     incremental Givens-rotation least-squares solve, stopping early (via
     ``lax.while_loop`` over a zero-padded fixed-size basis) once the
     residual estimate drops below ``tol``. Plain FGMRES is the special
@@ -133,7 +163,8 @@ def _fgmres_cycle(
     H = jnp.zeros((m + 1, m), dtype)  # Hessenberg (Arnoldi relation)
     R = jnp.zeros((m, m), dtype)  # Givens-rotated triangular factor
     B = jnp.zeros((k, m), dtype)
-    cs = jnp.zeros((m,), dtype)
+    real_dtype = jnp.real(r0).dtype
+    cs = jnp.zeros((m,), real_dtype)
     sn = jnp.zeros((m,), dtype)
     g = jnp.zeros((m + 1,), dtype).at[0].set(beta)
 
@@ -146,14 +177,14 @@ def _fgmres_cycle(
 
         z = precond(V[j])
         w = matvec(z)
-        b_j = C.T @ w  # deflation: project out the recycled image space
+        b_j = _adjoint(C) @ w  # project out the recycled image space
         w = w - C @ b_j
 
         # CGS2: two passes of classical Gram-Schmidt against the padded
         # basis (zero rows beyond j contribute nothing).
-        h1 = V @ w
+        h1 = jnp.conj(V) @ w
         w = w - h1 @ V
-        h2 = V @ w
+        h2 = jnp.conj(V) @ w
         w = w - h2 @ V
         h = h1 + h2
 
@@ -166,21 +197,18 @@ def _fgmres_cycle(
         def apply_rotation(i, hc):
             hi, hi1 = hc[i], hc[i + 1]
             return hc.at[i].set(cs[i] * hi + sn[i] * hi1).at[i + 1].set(
-                -sn[i] * hi + cs[i] * hi1
+                -jnp.conj(sn[i]) * hi + cs[i] * hi1
             )
 
         h = lax.fori_loop(0, j, apply_rotation, h)
 
         # New rotation annihilating h[j + 1]; happy breakdown (rho == 0)
         # degenerates to the identity rotation.
-        rho = jnp.hypot(h[j], h[j + 1])
-        rho_safe = jnp.where(rho > 0, rho, 1.0)
-        c_j = jnp.where(rho > 0, h[j] / rho_safe, 1.0)
-        s_j = jnp.where(rho > 0, h[j + 1] / rho_safe, 0.0)
+        c_j, s_j, rho = _complex_givens(h[j], h[j + 1])
         h = h.at[j].set(rho).at[j + 1].set(0.0)
         g_j = g[j]
-        g = g.at[j].set(c_j * g_j).at[j + 1].set(-s_j * g_j)
-        res_est = jnp.abs(s_j * g_j)
+        g = g.at[j].set(c_j * g_j).at[j + 1].set(-jnp.conj(s_j) * g_j)
+        res_est = jnp.abs(g[j + 1])
 
         R = R.at[:, j].set(h[:m])
         B = B.at[:, j].set(b_j)
@@ -218,7 +246,7 @@ def _restarted(
 ):
     """Outer restart loop shared by :func:`gmres` (k = 0) and :func:`gcrot`.
 
-    The residual is carried by exact recurrences (``r -= C C^T r`` after the
+    The residual is carried by exact recurrences (``r -= C C^H r`` after the
     outer projection, ``r -= A dx`` after each cycle, with ``A dx``
     reconstructed from the Arnoldi relation), so each cycle costs no extra
     matvec; the true residual is recomputed once at the end for honest
@@ -247,8 +275,8 @@ def _restarted(
     def body_fun(state):
         x, r, _, iters, cycles, C, U, fill = state
 
-        # Minimize over the recycled space first: x += U C^T r, r ⊥ C.
-        ctr = C.T @ r
+        # Minimize over the recycled space first: x += U C^H r, r ⊥ C.
+        ctr = _adjoint(C) @ r
         x = x + U @ ctr
         r = r - C @ ctr
         beta = jnp.linalg.norm(r)
@@ -266,7 +294,7 @@ def _restarted(
             # v0.1 update: keep the cycle's own optimal correction. One
             # projection pass against C for numerical hygiene (adx is
             # orthogonal to C in exact arithmetic), then FIFO insertion.
-            proj = C.T @ adx
+            proj = _adjoint(C) @ adx
             c_new = adx - C @ proj
             u_new = dx - U @ proj
             nc = jnp.linalg.norm(c_new)

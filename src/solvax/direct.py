@@ -154,24 +154,29 @@ def block_thomas_solve(
     def tsolve(lu, piv, v):
         return lu_solve((lu, piv), v.astype(fdt), trans=trans).astype(work)
 
-    def down_step(sigma_next, inputs):
-        c_k, lu_next, piv_next, b_k = inputs
-        sigma_k = b_k - c_k @ tsolve(lu_next, piv_next, sigma_next)
-        return sigma_k, sigma_k
+    # Static Python loops deliberately expose the linear recurrence to JAX.
+    # In JAX 0.9, reverse-transposing a scan that emits every intermediate can
+    # leak an internal ValAccum into the scan inputs. Unrolling restores the
+    # advertised linear_transpose/VJP contract and is also faster after
+    # compilation for representative 8--64-block systems; compilation grows
+    # with the static block count, as expected for an unrolled recurrence.
+    sigma = [None] * rhs.shape[0]
+    sigma[-1] = rhs[-1]
+    for k in range(rhs.shape[0] - 2, -1, -1):
+        sigma[k] = rhs[k] - down_blocks[k] @ tsolve(
+            delta_lu[k + 1], delta_piv[k + 1], sigma[k + 1]
+        )
 
-    inputs = (down_blocks, delta_lu[1:], delta_piv[1:], rhs[:-1])
-    _, sigmas = jax.lax.scan(down_step, rhs[-1], inputs, reverse=True)
-    sigma = jnp.concatenate([sigmas, rhs[-1][None]], axis=0)
-
-    def up_step(x_prev, inputs):
-        lu_k, piv_k, c_k, sigma_k = inputs
-        x_k = tsolve(lu_k, piv_k, sigma_k - c_k @ x_prev)
-        return x_k, x_k
-
-    x0 = tsolve(delta_lu[0], delta_piv[0], sigma[0])
-    inputs_up = (delta_lu[1:], delta_piv[1:], up_blocks, sigma[1:])
-    _, xs = jax.lax.scan(up_step, x0, inputs_up)
-    return jnp.concatenate([x0[None], xs], axis=0)
+    solution = [tsolve(delta_lu[0], delta_piv[0], sigma[0])]
+    for k in range(1, rhs.shape[0]):
+        solution.append(
+            tsolve(
+                delta_lu[k],
+                delta_piv[k],
+                sigma[k] - up_blocks[k - 1] @ solution[-1],
+            )
+        )
+    return jnp.stack(solution)
 
 
 def block_thomas(
