@@ -52,21 +52,22 @@ References
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
 from jax import lax
 from jax.scipy.linalg import solve_triangular
 
-MatVec = Callable[[jax.Array], jax.Array]
+PyTree = Any
+MatVec = Callable[[PyTree], PyTree]
 
 
 class KrylovSolution(NamedTuple):
     """Result of :func:`gmres` or :func:`gcrot`.
 
     Attributes:
-        x: approximate solution, shape ``(n,)``.
+        x: approximate solution with the same structure and leaf shapes as ``b``.
         residual_norm: true residual norm ``||b - A x||`` (recomputed once
             after the iteration, not the Givens estimate).
         iterations: total inner (Arnoldi) iterations across all cycles,
@@ -77,7 +78,7 @@ class KrylovSolution(NamedTuple):
             Unfilled columns are zero.
     """
 
-    x: jax.Array
+    x: PyTree
     residual_norm: jax.Array
     iterations: jax.Array
     converged: jax.Array
@@ -91,6 +92,51 @@ def _identity(v: jax.Array) -> jax.Array:
 def _adjoint(matrix: jax.Array) -> jax.Array:
     """Return the conjugate transpose used by complex Krylov projections."""
     return jnp.conj(matrix).T
+
+
+def _tree_add_scaled(left: PyTree, scale: jax.Array, right: PyTree) -> PyTree:
+    return jax.tree.map(lambda x, y: x + scale * y, left, right)
+
+
+def _tree_sub(left: PyTree, right: PyTree) -> PyTree:
+    return jax.tree.map(lambda x, y: x - y, left, right)
+
+
+def _tree_dot(left: PyTree, right: PyTree) -> jax.Array:
+    products = jax.tree.leaves(jax.tree.map(jnp.vdot, left, right))
+    return sum(products[1:], products[0])
+
+
+def _tree_norm(value: PyTree) -> jax.Array:
+    return jnp.sqrt(jnp.maximum(jnp.real(_tree_dot(value, value)), 0.0))
+
+
+def _tree_basis(value: PyTree, size: int) -> PyTree:
+    return jax.tree.map(lambda x: jnp.zeros((size, *x.shape), x.dtype), value)
+
+
+def _tree_basis_dot(basis: PyTree, value: PyTree) -> jax.Array:
+    products = jax.tree.leaves(
+        jax.tree.map(
+            lambda vectors, x: jnp.conj(vectors).reshape(vectors.shape[0], -1)
+            @ x.reshape(-1),
+            basis,
+            value,
+        )
+    )
+    return sum(products[1:], products[0])
+
+
+def _tree_basis_sum(coefficients: jax.Array, basis: PyTree) -> PyTree:
+    return jax.tree.map(lambda vectors: jnp.tensordot(coefficients, vectors, axes=1), basis)
+
+
+def _tree_basis_set(basis: PyTree, index: jax.Array, value: PyTree) -> PyTree:
+    return jax.tree.map(lambda vectors, x: vectors.at[index].set(x), basis, value)
+
+
+def _tree_basis_get(basis: PyTree, index: jax.Array) -> PyTree:
+    return jax.tree.map(lambda vectors: vectors[index], basis)
 
 
 def _complex_givens(a: jax.Array, b: jax.Array):
@@ -323,11 +369,142 @@ def _restarted(
     return x, res, iters, res <= tol, C, U, fill
 
 
+def _pytree_fgmres_cycle(
+    matvec: MatVec,
+    precond: MatVec,
+    residual: PyTree,
+    beta: jax.Array,
+    tolerance: jax.Array,
+    restart: int,
+    dtype: jnp.dtype,
+):
+    """Run one FGMRES cycle without flattening a pytree operand."""
+    basis = _tree_basis(residual, restart + 1)
+    preconditioned = _tree_basis(residual, restart)
+    beta_safe = jnp.where(beta > 0, beta, 1.0)
+    basis = _tree_basis_set(
+        basis, jnp.int32(0), jax.tree.map(lambda x: x / beta_safe, residual)
+    )
+    triangular = jnp.zeros((restart, restart), dtype)
+    real_dtype = jnp.real(jnp.zeros((), dtype)).dtype
+    cosines = jnp.zeros((restart,), real_dtype)
+    sines = jnp.zeros((restart,), dtype)
+    rotated_rhs = jnp.zeros((restart + 1,), dtype).at[0].set(beta)
+
+    def cond_fun(state):
+        index, _, _, _, _, _, _, residual_estimate = state
+        return (index < restart) & (residual_estimate > tolerance)
+
+    def body_fun(state):
+        index, basis, z_basis, triangular, cosines, sines, rhs, _ = state
+        z = precond(_tree_basis_get(basis, index))
+        applied = matvec(z)
+
+        first = _tree_basis_dot(basis, applied)
+        applied = _tree_sub(applied, _tree_basis_sum(first, basis))
+        second = _tree_basis_dot(basis, applied)
+        applied = _tree_sub(applied, _tree_basis_sum(second, basis))
+        column = first + second
+
+        next_norm = _tree_norm(applied)
+        next_vector = jax.tree.map(
+            lambda x: x / jnp.where(next_norm > 0, next_norm, 1.0), applied
+        )
+        basis = _tree_basis_set(basis, index + 1, next_vector)
+        column = column.at[index + 1].set(next_norm)
+
+        def apply_rotation(i, values):
+            first_value, second_value = values[i], values[i + 1]
+            return values.at[i].set(
+                cosines[i] * first_value + sines[i] * second_value
+            ).at[i + 1].set(
+                -jnp.conj(sines[i]) * first_value + cosines[i] * second_value
+            )
+
+        column = lax.fori_loop(0, index, apply_rotation, column)
+        cosine, sine, diagonal = _complex_givens(column[index], column[index + 1])
+        column = column.at[index].set(diagonal).at[index + 1].set(0.0)
+        rhs_value = rhs[index]
+        rhs = rhs.at[index].set(cosine * rhs_value).at[index + 1].set(
+            -jnp.conj(sine) * rhs_value
+        )
+        residual_estimate = jnp.abs(rhs[index + 1])
+
+        triangular = triangular.at[:, index].set(column[:restart])
+        z_basis = _tree_basis_set(z_basis, index, z)
+        cosines = cosines.at[index].set(cosine)
+        sines = sines.at[index].set(sine)
+        return (
+            index + 1,
+            basis,
+            z_basis,
+            triangular,
+            cosines,
+            sines,
+            rhs,
+            residual_estimate,
+        )
+
+    initial = (
+        jnp.int32(0),
+        basis,
+        preconditioned,
+        triangular,
+        cosines,
+        sines,
+        rotated_rhs,
+        beta,
+    )
+    used_count, _, z_basis, triangular, _, _, rhs, _ = lax.while_loop(
+        cond_fun, body_fun, initial
+    )
+    used = jnp.arange(restart) < used_count
+    triangular = triangular + jnp.diag(jnp.where(used, 0.0, 1.0).astype(dtype))
+    coefficients = solve_triangular(
+        triangular, jnp.where(used, rhs[:restart], 0.0), lower=False
+    )
+    correction = _tree_basis_sum(coefficients, z_basis)
+    return correction, used_count
+
+
+def _pytree_gmres(
+    matvec: MatVec,
+    b: PyTree,
+    x0: PyTree,
+    precond: MatVec,
+    restart: int,
+    tolerance: jax.Array,
+    max_restarts: int,
+    dtype: jnp.dtype,
+    zero_initial: bool,
+):
+    """Restarted FGMRES implementation for matching pytree operands."""
+    residual = b if zero_initial else _tree_sub(b, matvec(x0))
+
+    def cond_fun(state):
+        _, _, residual_norm, _, cycles = state
+        return (residual_norm > tolerance) & (cycles < max_restarts)
+
+    def body_fun(state):
+        x, residual, _, iterations, cycles = state
+        residual_norm = _tree_norm(residual)
+        correction, used = _pytree_fgmres_cycle(
+            matvec, precond, residual, residual_norm, tolerance, restart, dtype
+        )
+        x = _tree_add_scaled(x, 1.0, correction)
+        residual = _tree_sub(b, matvec(x))
+        return x, residual, _tree_norm(residual), iterations + used, cycles + 1
+
+    initial = (x0, residual, _tree_norm(residual), jnp.int32(0), jnp.int32(0))
+    x, _, residual_norm, iterations, _ = lax.while_loop(cond_fun, body_fun, initial)
+    return KrylovSolution(x, residual_norm, iterations, residual_norm <= tolerance, None)
+
+
 def gmres(
     matvec: MatVec,
-    b: jax.Array,
+    b: PyTree,
     *,
-    x0: jax.Array | None = None,
+    x0: PyTree | None = None,
     precond: MatVec | None = None,
     restart: int = 30,
     rtol: float = 1e-8,
@@ -342,9 +519,10 @@ def gmres(
     size and early convergence exits via ``lax.while_loop``).
 
     Args:
-        matvec: the operator ``v -> A v`` on flat ``(n,)`` arrays; must be
-            pure JAX (traceable).
-        b: right-hand side, shape ``(n,)``.
+        matvec: the operator ``v -> A v`` on an array or pytree; must be pure
+            JAX (traceable) and preserve the input tree structure.
+        b: array or pytree right-hand side. Pytree leaves must have one common
+            inexact dtype.
         x0: initial guess (defaults to zeros).
         precond: right preconditioner ``v -> M^{-1} v`` (defaults to the
             identity). May be flexible, i.e. nonlinear or changing between
@@ -358,6 +536,30 @@ def gmres(
     Returns:
         A :class:`KrylovSolution` with ``recycle=None``.
     """
+    if jax.tree.structure(b) != jax.tree.structure(0):
+        b = jax.tree.map(jnp.asarray, b)
+        structure = jax.tree.structure(b)
+        leaves = jax.tree.leaves(b)
+        if not leaves:
+            raise ValueError("b must contain at least one array leaf")
+        dtype = jnp.result_type(*[leaf.dtype for leaf in leaves])
+        if not jnp.issubdtype(dtype, jnp.inexact) or any(
+            leaf.dtype != dtype for leaf in leaves
+        ):
+            raise ValueError("pytree leaves must have one common inexact dtype")
+        zero_initial = x0 is None
+        if zero_initial:
+            x0 = jax.tree.map(jnp.zeros_like, b)
+        elif jax.tree.structure(x0) != structure:
+            raise ValueError("x0 and b must have identical pytree structure")
+        else:
+            x0 = jax.tree.map(lambda x: jnp.asarray(x, dtype), x0)
+        precond = _identity if precond is None else precond
+        tol = jnp.maximum(atol, rtol * _tree_norm(b))
+        return _pytree_gmres(
+            matvec, b, x0, precond, restart, tol, max_restarts, dtype, zero_initial
+        )
+
     b = jnp.asarray(b)
     n = b.shape[0]
     x0 = jnp.zeros_like(b) if x0 is None else jnp.asarray(x0)

@@ -1,8 +1,9 @@
 # FGMRES and GCROT recycling
 
 SOLVAX provides restarted flexible GMRES for general matrix-free systems and a
-GCROT-style extension for sequences of related systems. Both support real or
-complex one-dimensional arrays and right preconditioning.
+GCROT-style extension for sequences of related systems. GMRES supports real or
+complex arrays and arbitrary matching JAX pytrees; GCROT currently requires a
+one-dimensional array. Both use right preconditioning.
 
 ## Flexible GMRES
 
@@ -55,8 +56,8 @@ solution = sx.gmres(
 
 | Input | Meaning |
 |---|---|
-| `matvec` | pure JAX callable `v -> A v` on `(n,)` arrays |
-| `b` | right-hand side `(n,)`, real or complex |
+| `matvec` | pure JAX callable `v -> A v` preserving the operand structure |
+| `b` | array or matching-leaf pytree right-hand side, real or complex |
 | `x0` | optional initial guess; zero by default |
 | `precond` | right inverse action `v -> M_j^{-1}v`; identity by default |
 | `restart` | maximum Arnoldi steps per cycle |
