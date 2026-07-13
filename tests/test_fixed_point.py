@@ -245,3 +245,30 @@ def test_anderson_mixing_is_jittable_safeguarded_and_validated():
         anderson_mixing(iterates, residuals, regularization=-1.0)
     with pytest.raises(ValueError, match=r"\[0, 1\]"):
         anderson_mixing(iterates, residuals, damping=1.1)
+    with pytest.raises(ValueError, match="condition_limit"):
+        anderson_mixing(iterates, residuals, condition_limit=0.5)
+
+
+def test_condition_filtered_anderson_handles_dependent_histories():
+    iterates = jnp.asarray([[0.0, 0.0], [0.5, -0.5], [0.75, -0.75]])
+    residuals = jnp.asarray([[1.0, -1.0], [0.5, -0.5], [0.25, -0.25]])
+
+    candidate = jax.jit(
+        lambda: anderson_mixing(
+            iterates, residuals, regularization=0.0, condition_limit=1.0e4
+        )
+    )()
+
+    assert jnp.all(jnp.isfinite(candidate))
+    assert candidate == pytest.approx([1.0, -1.0], rel=1.0e-6, abs=1.0e-6)
+
+
+def test_anderson_falls_back_when_affine_weights_are_degenerate():
+    iterates = jnp.asarray([[1.0, 2.0], [3.0, 4.0]])
+    residuals = jnp.zeros_like(iterates)
+
+    candidate = anderson_mixing(
+        iterates, residuals, regularization=0.0, condition_limit=1.0e4
+    )
+
+    assert candidate == pytest.approx(iterates[-1])

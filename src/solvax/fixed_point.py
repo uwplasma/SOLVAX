@@ -62,6 +62,7 @@ def anderson_mixing(
     *,
     regularization: float = 1.0e-8,
     damping: float = 1.0,
+    condition_limit: float | None = None,
 ) -> jax.Array:
     """Return a regularized Anderson update from a bounded fixed-point history.
 
@@ -75,6 +76,8 @@ def anderson_mixing(
         raise ValueError("regularization must be non-negative")
     if not 0.0 <= damping <= 1.0:
         raise ValueError("damping must lie in [0, 1]")
+    if condition_limit is not None and condition_limit < 1.0:
+        raise ValueError("condition_limit must be at least one")
     iterates = jnp.asarray(iterates)
     residuals = jnp.asarray(residuals)
     if iterates.shape != residuals.shape:
@@ -91,17 +94,30 @@ def anderson_mixing(
         jnp.asarray(jnp.finfo(real_dtype).tiny, dtype=real_dtype),
     )
     stabilization = (regularization + jnp.finfo(real_dtype).eps) * scale
-    system = gram + stabilization * jnp.eye(history_size, dtype=residuals.dtype)
     ones = jnp.ones((history_size,), dtype=residuals.dtype)
-    weights = jnp.linalg.solve(system, ones)
+    if condition_limit is None:
+        system = gram + stabilization * jnp.eye(
+            history_size, dtype=residuals.dtype
+        )
+        weights = jnp.linalg.solve(system, ones)
+    else:
+        eigenvalues, eigenvectors = jnp.linalg.eigh(gram)
+        threshold = jnp.maximum(
+            eigenvalues[-1] / condition_limit**2,
+            jnp.finfo(real_dtype).eps * scale,
+        )
+        inverse = jnp.where(
+            eigenvalues >= threshold,
+            1.0 / (eigenvalues + stabilization),
+            0.0,
+        )
+        weights = eigenvectors @ (inverse * (jnp.conj(eigenvectors).T @ ones))
     denominator = jnp.sum(weights)
-    weights = weights / jnp.where(
-        jnp.abs(denominator) > jnp.finfo(real_dtype).tiny,
-        denominator,
-        jnp.asarray(1.0, dtype=residuals.dtype),
-    )
     fallback = jax.nn.one_hot(history_size - 1, history_size, dtype=residuals.dtype)
-    weights = jnp.where(jnp.all(jnp.isfinite(weights)), weights, fallback)
+    valid = jnp.all(jnp.isfinite(weights)) & (
+        jnp.abs(denominator) > jnp.finfo(real_dtype).tiny
+    )
+    weights = jnp.where(valid, weights / jnp.where(valid, denominator, 1.0), fallback)
     mapped = iterates + residuals
     accelerated = jnp.tensordot(weights, mapped, axes=(0, 0))
     return (1.0 - damping) * mapped[-1] + damping * accelerated

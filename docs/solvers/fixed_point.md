@@ -129,8 +129,13 @@ x_next = sx.anderson_mixing(
     residuals,      # G(iterates) - iterates, same shape
     regularization=1e-8,
     damping=1.0,
+    condition_limit=1e6,
 )
 ```
+
+`condition_limit` optionally filters residual-history singular directions
+before solving the affine-weight system. This prevents nearly dependent map
+histories from squaring an already large condition number in the Gram solve.
 
 Map evaluation and stopping intentionally remain outside this primitive so an
 application can keep a bounded ring buffer and its own nonlinear control
@@ -155,7 +160,9 @@ not make a fundamentally noncontractive map globally convergent.
 
 - A vanishing Aitken denominator retains the previous relaxation.
 - Anderson adds scale-aware regularization and falls back to the newest mapped
-  point if weights become nonfinite.
+  point if weights or their affine normalization become degenerate.
+- `condition_limit` bounds the retained residual-history condition number;
+  use it when a longer history produces spikes from nearly dependent columns.
 - Large Aitken upper bounds can destabilize nonlinear maps; choose physical
   bounds rather than accepting the permissive default blindly.
 - Nearly dependent Anderson histories require stronger regularization or a
