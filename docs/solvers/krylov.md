@@ -132,7 +132,10 @@ residual between restart cycles. Use `fixed_cycles=True` only inside
 {func}`solvax.implicit.linear_solve`; it avoids Python convergence branching
 while implicit differentiation supplies the reverse-mode rule. When
 `operator_sharding` is set, Krylov vectors stay on the right-hand side's
-original sharding and visit the operator mesh only for opaque actions.
+original sharding and visit the operator mesh only for opaque actions. Set
+`state_sharding=operator_sharding` to keep replicated Krylov state on that mesh
+and avoid transfers; the small Arnoldi update receives explicit replicated
+input and output shardings.
 
 ## GCROT-style recycling
 

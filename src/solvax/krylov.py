@@ -480,6 +480,7 @@ def gmres_staged(
     max_restarts: int = 50,
     fixed_cycles: bool = False,
     operator_sharding=None,
+    state_sharding=None,
 ) -> KrylovSolution:
     """Host-stage FGMRES around opaque compiled operator call boundaries.
 
@@ -492,6 +493,8 @@ def gmres_staged(
     Pass ``operator_sharding`` when opaque actions require a different device
     mesh from ``b``. Inputs are placed on that sharding for each action and
     exact outputs return to the right-hand side's sharding for Arnoldi work.
+    Set ``state_sharding`` to keep Arnoldi state on an explicit sharding instead;
+    its small update then uses matching compiled input and output shardings.
 
     By default the host checks the true residual once per restart and exits
     early. Set ``fixed_cycles=True`` when tracing the solver through
@@ -500,7 +503,9 @@ def gmres_staged(
     """
 
     b = jnp.asarray(b)
-    state_sharding = getattr(b, "sharding", None)
+    state_sharding = (
+        getattr(b, "sharding", None) if state_sharding is None else state_sharding
+    )
 
     def place_on_state(value):
         return (
@@ -514,25 +519,35 @@ def gmres_staged(
             value = jax.device_put(value, operator_sharding)
         return place_on_state(action(value))
 
+    b = place_on_state(b)
     x = jnp.zeros_like(b) if x0 is None else place_on_state(jnp.asarray(x0))
     precond = _identity if precond is None else precond
     tol = jnp.maximum(atol, rtol * jnp.linalg.norm(b))
     total_iterations = jnp.int32(0)
     residual = b - apply_staged(matvec, x)
     residual_norm = jnp.linalg.norm(residual)
+    arnoldi_step = _staged_arnoldi_step
+    if state_sharding is not None:
+        arnoldi_step = jax.jit(
+            _staged_arnoldi_step.__wrapped__,
+            in_shardings=(state_sharding,) * 11,
+            out_shardings=(state_sharding,) * 7,
+        )
 
     for _ in range(max_restarts):
         beta = residual_norm
         beta_safe = jnp.where(beta > 0, beta, 1.0)
         n = b.shape[0]
         dtype = b.dtype
-        V = jnp.zeros((restart + 1, n), dtype).at[0].set(residual / beta_safe)
-        Z = jnp.zeros((restart, n), dtype)
-        R = jnp.zeros((restart, restart), dtype)
+        V = place_on_state(jnp.zeros((restart + 1, n), dtype)).at[0].set(
+            residual / beta_safe
+        )
+        Z = place_on_state(jnp.zeros((restart, n), dtype))
+        R = place_on_state(jnp.zeros((restart, restart), dtype))
         real_dtype = jnp.real(b).dtype
-        cs = jnp.zeros((restart,), real_dtype)
-        sn = jnp.zeros((restart,), dtype)
-        g = jnp.zeros((restart + 1,), dtype).at[0].set(beta)
+        cs = place_on_state(jnp.zeros((restart,), real_dtype))
+        sn = place_on_state(jnp.zeros((restart,), dtype))
+        g = place_on_state(jnp.zeros((restart + 1,), dtype)).at[0].set(beta)
         active = beta > tol
         cycle_iterations = jnp.int32(0)
 
@@ -542,7 +557,7 @@ def gmres_staged(
             was_active = active
             z = apply_staged(precond, V[step])
             w = apply_staged(matvec, z)
-            V, Z, R, cs, sn, g, active = _staged_arnoldi_step(
+            V, Z, R, cs, sn, g, active = arnoldi_step(
                 jnp.int32(step), active, w, z, V, Z, R, cs, sn, g, tol
             )
             cycle_iterations = cycle_iterations + was_active.astype(jnp.int32)

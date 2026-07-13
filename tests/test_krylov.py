@@ -247,6 +247,8 @@ def test_host_staged_gmres_matches_monolithic_solve():
         restart=12,
         rtol=1.0e-10,
         max_restarts=8,
+        operator_sharding=b.sharding,
+        state_sharding=b.sharding,
     )
     monolithic = gmres(
         lambda vector: a @ vector,
