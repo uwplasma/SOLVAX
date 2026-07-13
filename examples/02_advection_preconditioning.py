@@ -36,7 +36,11 @@ A = A + 5.0 * np.random.default_rng(0).standard_normal((n, n)) / n  # long-range
 A_j = jnp.asarray(A)
 
 b = jnp.ones(n)
-matvec = lambda v: A_j @ v
+
+
+def matvec(v):
+    return A_j @ v
+
 
 plain = sx.gmres(matvec, b, restart=30, rtol=1e-10, max_restarts=10)
 print(f"unpreconditioned: converged={bool(plain.converged)} iters={int(plain.iterations)}")

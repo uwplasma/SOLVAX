@@ -21,11 +21,18 @@ n = 200
 rng = np.random.default_rng(0)
 A = jnp.asarray(rng.standard_normal((n, n)) + n * np.eye(n))  # moderate conditioning
 b = jnp.asarray(rng.standard_normal(n))
-matvec = lambda x: A @ x
 
 # A dense solve wrapped to run in float32, used as the low-precision inner solve.
 solve32 = sx.as_low_precision(jnp.linalg.solve, dtype=jnp.float32)
-approx_solve = lambda r: solve32(A, r)
+
+
+def matvec(x):
+    return A @ x
+
+
+def approx_solve(r):
+    return solve32(A, r)
+
 
 x, residual_norms = sx.iterative_refinement(matvec, b, approx_solve, iterations=3)
 print("residual norm after each sweep:")

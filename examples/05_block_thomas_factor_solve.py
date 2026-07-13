@@ -33,7 +33,12 @@ print("linearity check (x_scaled == 2 x):", bool(jnp.allclose(x_scaled, 2.0 * x)
 
 # The transposed solve reuses the same factors — no second elimination.
 x_adj = sx.block_thomas_solve(factors, rhs, transpose=True)
-fwd = lambda v: sx.block_thomas_solve(factors, v)
+
+
+def fwd(v):
+    return sx.block_thomas_solve(factors, v)
+
+
 (x_adj_ref,) = jax.linear_transpose(fwd, rhs)(rhs)
 print("adjoint matches jax.linear_transpose:", bool(jnp.allclose(x_adj, x_adj_ref, atol=1e-10)))
 

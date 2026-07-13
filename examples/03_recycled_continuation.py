@@ -25,7 +25,9 @@ cold_total, warm_total = 0, 0
 recycle = None
 for i in range(6):
     A_i = A0 + 0.02 * i * dA
-    mv = lambda v, A=A_i: A @ v
+
+    def mv(v, A=A_i):
+        return A @ v
 
     cold = sx.gcrot(mv, b, m=30, k=10, rtol=1e-10)
     warm = sx.gcrot(mv, b, m=30, k=10, rtol=1e-10, recycle=recycle)

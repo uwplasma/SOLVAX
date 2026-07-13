@@ -29,7 +29,11 @@ A = sx.BlockTridiagonalOperator(lower, diag, upper)
 
 # The block-Thomas factors of the principal part are its natural preconditioner.
 facs = sx.block_thomas_factor(*A.to_blocks())
-a_inv = lambda r: sx.block_thomas_solve(facs, r.reshape(n_blocks, m)).reshape(-1)
+
+
+def a_inv(r):
+    return sx.block_thomas_solve(facs, r.reshape(n_blocks, m)).reshape(-1)
+
 
 # SumOperator: the structured core plus a matrix-free low-rank perturbation.
 u = jnp.asarray(rng.standard_normal(n))
