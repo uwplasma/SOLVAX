@@ -121,6 +121,32 @@ x_low = sx.block_thomas_truncated_fn(
 ```
 
 `n_blocks` and `keep_lowest` are static algorithm sizes under `jit`.
+Each generated block index is assembled exactly once per solve. In the retained
+head, the Schur update and all right-hand-side updates share one multi-column LU
+solve. This matters when block assembly or dense triangular dispatch dominates.
+
+## Residual gate
+
+Validate a solve with an operator action independent of the factorization:
+
+```python
+relative_residual = sx.block_tridiag_relative_residual(
+    lower, diag, upper, x, rhs
+)
+```
+
+The diagnostic evaluates every block row, including high-mode tails. It is a
+numerical consistency gate, not a substitute for discretization convergence.
+
+## Assembly, factors, and transpose scope
+
+`block_thomas_truncated_fn` calls `block_fn` once for each block index during a
+primal solve and retains factors only for the requested low blocks. Those
+truncated factors live only for that call. Use `block_thomas_factor` followed
+by `block_thomas_solve` when factors must survive across right-hand sides or
+when an exact transposed solve is required. A full transpose generally
+propagates through the discarded high-mode tail, so SOLVAX does not claim that
+an O(K) truncated factorization can provide an exact transpose action.
 
 ## Mixed-precision variant
 
@@ -160,6 +186,8 @@ defect corrections recover accuracy when the conditioning permits. See
 ## API summary
 
 - {func}`solvax.direct.block_thomas`
+- {func}`solvax.direct.block_tridiag_matvec`
+- {func}`solvax.direct.block_tridiag_relative_residual`
 - {func}`solvax.direct.block_thomas_factor`
 - {func}`solvax.direct.block_thomas_solve`
 - {func}`solvax.direct.block_thomas_truncated`
@@ -169,3 +197,28 @@ defect corrections recover accuracy when the conditioning permits. See
 Runnable counterparts: `examples/01_block_tridiagonal_kinetic.py`,
 `examples/05_block_thomas_factor_solve.py`, and
 `examples/16_mixed_precision_block_thomas.py`.
+
+From a source checkout, reproduce the kinetic-shaped CPU or accelerator
+benchmark with:
+
+```bash
+PYTHONPATH=src python benchmarks/benchmark_generated_block.py --output result.json
+```
+
+The JSON records the exact implementation hashes, JAX versions, device, cold
+compile time, warm samples, executable memory, and error against the
+materialized-band algorithm. Keep device families in separate result files;
+cross-device timing comparisons are otherwise not meaningful.
+
+Measured results for this change (float64; medians, not universal hardware
+claims) are:
+
+| Device and workload | v0.7.0 baseline | Fused head solve | Change |
+|---|---:|---:|---:|
+| Apple CPU, `13x15x32`, 2 RHS | 20.53 ms | 20.61 ms | +0.36% |
+| RTX A4000, `13x15x63`, 8 RHS | 171.63 ms | 162.14 ms | -5.53% |
+
+The GPU compile time increased from 0.53 s to 0.65 s. The checked-in JSON under
+`benchmarks/results/` records raw samples, executable memory, software versions,
+and source hashes. The change is therefore an accelerator/multi-RHS throughput
+optimization with a cold-compile tradeoff, not a blanket speedup.

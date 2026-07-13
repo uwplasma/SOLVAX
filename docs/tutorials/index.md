@@ -23,3 +23,14 @@ differentiable_solve
 The repository also contains focused scripts in `examples/`, one per major
 capability. The documentation tutorials emphasize composition and engineering
 decisions; the example scripts emphasize minimal runnable demonstrations.
+
+## Kinetic generated-block example
+
+| Script | Device | Expected runtime | Output | Assumptions |
+|---|---|---:|---|---|
+| `examples/01_block_tridiagonal_kinetic.py` | CPU or GPU | seconds | shapes, dense-reference error, one gradient | nearest-mode coupling; forcing and observable restricted to modes 0--2 |
+
+The production solve in this example generates each dense block from compact
+streaming and collision coefficients. It materializes full bands only for the
+small validation cross-check; callers should not copy that reference step into
+production workflows.

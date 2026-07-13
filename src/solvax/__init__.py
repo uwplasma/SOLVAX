@@ -29,6 +29,8 @@ from solvax.direct import (
     block_thomas_solve,
     block_thomas_truncated,
     block_thomas_truncated_fn,
+    block_tridiag_matvec,
+    block_tridiag_relative_residual,
     mixed_precision_block_thomas,
 )
 from solvax.fixed_point import (
@@ -73,6 +75,8 @@ __all__ = [
     "lu_solve_banded",
     "lu_solve_banded_periodic",
     "BlockTridiagFactors",
+    "block_tridiag_matvec",
+    "block_tridiag_relative_residual",
     "block_thomas",
     "block_thomas_factor",
     "block_thomas_solve",

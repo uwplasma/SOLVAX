@@ -1,0 +1,47 @@
+{
+  "benchmark": "generated_truncated_block_thomas",
+  "block_size": 195,
+  "compile_seconds": 0.5302251710090786,
+  "device": "cuda:0",
+  "dtype": "float64",
+  "executable_memory": {
+    "argument_size_in_bytes": 37440,
+    "output_size_in_bytes": 37440,
+    "alias_size_in_bytes": 0,
+    "temp_size_in_bytes": 3698696,
+    "generated_code_size_in_bytes": 3116584
+  },
+  "first_execute_seconds": 0.21705980104161426,
+  "grid": {
+    "n_theta": 13,
+    "n_zeta": 15,
+    "n_xi": 63
+  },
+  "implementation": {
+    "benchmark_sha256": "887e8d1d248b92251876885244be6a9145512c8bcfe7700c800f5dfe2c22d28d",
+    "direct_sha256": "9484124bc27c71549a57fc28429d2ae4404e2237df0e84f30ba6589a7fc8d6f1",
+    "solvax_version": "0.7.0"
+  },
+  "jax_version": "0.6.2",
+  "jaxlib_version": "0.6.2",
+  "keep_lowest": 3,
+  "n_blocks": 64,
+  "n_rhs": 8,
+  "platform": "Linux-6.17.9-76061709-generic-x86_64-with-glibc2.35",
+  "python_version": "3.10.12",
+  "relative_error_vs_materialized": 0.0,
+  "repeats": 10,
+  "warm_median_seconds": 0.17162906349403784,
+  "warm_samples_seconds": [
+    0.17379660700680688,
+    0.17218152299756184,
+    0.1704643839620985,
+    0.17260109301423654,
+    0.17084424098720774,
+    0.17090418300358579,
+    0.17364937398815528,
+    0.17107660399051383,
+    0.17255839798599482,
+    0.17048669297946617
+  ]
+}

@@ -11,6 +11,8 @@ from solvax import (
     block_thomas_solve,
     block_thomas_truncated,
     block_thomas_truncated_fn,
+    block_tridiag_matvec,
+    block_tridiag_relative_residual,
 )
 
 jax.config.update("jax_enable_x64", True)
@@ -53,6 +55,22 @@ def test_factor_solve_reuse():
     assert np.allclose(np.asarray(x2), 2.0 * np.asarray(x1), atol=1e-12)
     x_dense = np.linalg.solve(dense, np.asarray(rhs).reshape(-1))
     assert np.allclose(np.asarray(x1).reshape(-1), x_dense, atol=1e-12)
+
+
+@pytest.mark.parametrize("n_rhs", [None, 3])
+def test_block_operator_action_and_residual_match_dense(n_rhs):
+    n_blocks, m = 7, 4
+    (lower, diag, upper, rhs), dense = make_system(n_blocks, m, n_rhs, seed=11)
+    x = block_thomas(lower, diag, upper, rhs)
+    action = block_tridiag_matvec(lower, diag, upper, x)
+    dense_action = dense @ np.asarray(x).reshape(n_blocks * m, -1)
+    assert np.allclose(
+        np.asarray(action).reshape(n_blocks * m, -1), dense_action, atol=1e-12
+    )
+    residual = block_tridiag_relative_residual(lower, diag, upper, x, rhs)
+    expected_shape = () if n_rhs is None else (n_rhs,)
+    assert residual.shape == expected_shape
+    assert np.all(np.asarray(residual) < 1.0e-14)
 
 
 @pytest.mark.parametrize("keep", [1, 3])
@@ -165,3 +183,40 @@ def test_truncated_fn_under_jit():
     x_jit = run(rhs[:keep])
     x_ref = block_thomas(lower, diag, upper, rhs)[:keep]
     assert np.allclose(np.asarray(x_jit), np.asarray(x_ref), atol=1e-12)
+
+
+def test_truncated_fn_multiple_rhs_jit_vmap_and_grad():
+    n_blocks, keep, n_rhs = 9, 3, 2
+    (lower, diag, upper, rhs), _ = make_system(n_blocks, 4, n_rhs, seed=12)
+    rhs = rhs.at[keep:].set(0.0)
+    fn = _fn_from_arrays(lower, diag, upper)
+
+    def solve(r):
+        return block_thomas_truncated_fn(fn, n_blocks, r, keep)
+
+    x = jax.jit(solve)(rhs[:keep])
+    x_full = block_thomas(lower, diag, upper, rhs)
+    assert np.allclose(np.asarray(x), np.asarray(x_full[:keep]), atol=1e-12)
+
+    batch = jnp.stack([rhs[:keep], 2.0 * rhs[:keep]])
+    x_batch = jax.jit(jax.vmap(solve))(batch)
+    assert np.allclose(np.asarray(x_batch[1]), 2.0 * np.asarray(x_batch[0]), atol=1e-12)
+
+    gradient = jax.grad(lambda r: jnp.sum(solve(r) ** 2))(rhs[:keep])
+    assert gradient.shape == rhs[:keep].shape
+    assert np.all(np.isfinite(np.asarray(gradient)))
+
+
+@pytest.mark.parametrize("dtype,atol", [(jnp.float32, 2.0e-5), (jnp.float64, 1.0e-12)])
+def test_truncated_fn_low_order_recovery_by_precision(dtype, atol):
+    """Three blocks represent the N_xi=2 boundary used by kinetic callers."""
+    n_blocks, keep = 3, 3
+    (lower, diag, upper, rhs), _ = make_system(n_blocks, 5, 2, seed=13)
+    lower, diag, upper, rhs = (
+        value.astype(dtype) for value in (lower, diag, upper, rhs)
+    )
+    x_fn = block_thomas_truncated_fn(
+        _fn_from_arrays(lower, diag, upper), n_blocks, rhs, keep
+    )
+    x_full = block_thomas(lower, diag, upper, rhs)
+    assert np.allclose(np.asarray(x_fn), np.asarray(x_full), atol=atol, rtol=atol)
