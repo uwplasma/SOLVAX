@@ -109,6 +109,58 @@ def block_thomas_factor(
     return BlockTridiagFactors(delta_lu, delta_piv, lower, upper)
 
 
+def block_thomas_factor_fn(
+    block_fn: Callable[[jax.Array], tuple[jax.Array, jax.Array, jax.Array]],
+    n_blocks: int,
+    factor_dtype=None,
+) -> BlockTridiagFactors:
+    """Factor generated block rows once for reusable primal/transpose solves.
+
+    Unlike :func:`block_thomas_factor`, this entry point never materializes the
+    diagonal band. ``block_fn`` is evaluated exactly once per block index; the
+    returned state stores Schur LU factors and the two off-diagonal bands needed
+    by :func:`block_thomas_solve`.
+
+    Args:
+        block_fn: maps a traced int32 index to ``(lower, diagonal, upper)``
+            blocks of identical square shape.
+        n_blocks: static positive number of block rows.
+        factor_dtype: optional lower precision for Schur LU factorizations, with
+            the same contract as :func:`block_thomas_factor`.
+
+    Returns:
+        Reusable factors accepted by :func:`block_thomas_solve`, including its
+        exact ``transpose=True`` path.
+    """
+    if n_blocks < 1:
+        raise ValueError("n_blocks must be positive")
+
+    l_last, d_last, u_last = block_fn(jnp.int32(n_blocks - 1))
+    work = jnp.result_type(d_last)
+    fdt = work if factor_dtype is None else factor_dtype
+    last = lu_factor(d_last.astype(fdt))
+
+    def down_step(carry, index):
+        delta_next, l_next = carry
+        lower, diagonal, upper = block_fn(index)
+        solved_lower = lu_solve(delta_next, l_next.astype(fdt)).astype(work)
+        delta = lu_factor((diagonal - upper @ solved_lower).astype(fdt))
+        return (delta, lower), (delta[0], delta[1], lower, upper)
+
+    _, (lus, pivs, lowers, uppers) = jax.lax.scan(
+        down_step,
+        (last, l_last),
+        jnp.arange(n_blocks - 1, dtype=jnp.int32),
+        reverse=True,
+    )
+    return BlockTridiagFactors(
+        delta_lu=jnp.concatenate([lus, last[0][None]], axis=0),
+        delta_piv=jnp.concatenate([pivs, last[1][None]], axis=0),
+        lower=jnp.concatenate([lowers, l_last[None]], axis=0),
+        upper=jnp.concatenate([uppers, u_last[None]], axis=0),
+    )
+
+
 def block_thomas_solve(
     factors: BlockTridiagFactors, rhs: jax.Array, transpose: bool = False
 ) -> jax.Array:

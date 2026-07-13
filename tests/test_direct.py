@@ -8,6 +8,7 @@ import pytest
 from solvax import (
     block_thomas,
     block_thomas_factor,
+    block_thomas_factor_fn,
     block_thomas_solve,
     block_thomas_truncated,
     block_thomas_truncated_fn,
@@ -55,6 +56,71 @@ def test_factor_solve_reuse():
     assert np.allclose(np.asarray(x2), 2.0 * np.asarray(x1), atol=1e-12)
     x_dense = np.linalg.solve(dense, np.asarray(rhs).reshape(-1))
     assert np.allclose(np.asarray(x1).reshape(-1), x_dense, atol=1e-12)
+
+
+@pytest.mark.parametrize("n_rhs", [None, 2])
+@pytest.mark.parametrize("n_blocks", [1, 8])
+def test_generated_factor_matches_materialized_primal_and_transpose(n_blocks, n_rhs):
+    (lower, diag, upper, rhs), dense = make_system(n_blocks, 4, n_rhs, seed=14)
+    generated = block_thomas_factor_fn(
+        _fn_from_arrays(lower, diag, upper), n_blocks
+    )
+    materialized = block_thomas_factor(lower, diag, upper)
+    for transpose in (False, True):
+        actual = block_thomas_solve(generated, rhs, transpose=transpose)
+        expected = block_thomas_solve(materialized, rhs, transpose=transpose)
+        dense_expected = np.linalg.solve(
+            dense.T if transpose else dense,
+            np.asarray(rhs).reshape(n_blocks * 4, -1),
+        )
+        assert np.allclose(np.asarray(actual), np.asarray(expected), atol=1e-12)
+        assert np.allclose(
+            np.asarray(actual).reshape(n_blocks * 4, -1), dense_expected, atol=1e-12
+        )
+
+
+def test_generated_factor_jit_grad_and_float32():
+    n_blocks = 6
+    (lower, diag, upper, rhs), _ = make_system(n_blocks, 3, seed=15)
+    lower, diag, upper, rhs = (
+        value.astype(jnp.float32) for value in (lower, diag, upper, rhs)
+    )
+
+    def loss(shift):
+        def block_fn(index):
+            diagonal = diag[index] + shift * jnp.eye(3, dtype=diag.dtype)
+            return lower[index], diagonal, upper[index]
+
+        factors = block_thomas_factor_fn(block_fn, n_blocks)
+        return jnp.sum(block_thomas_solve(factors, rhs) ** 2)
+
+    value, gradient = jax.jit(jax.value_and_grad(loss))(jnp.float32(0.1))
+    assert np.isfinite(float(value))
+    assert np.isfinite(float(gradient))
+
+
+def test_generated_factor_assembles_each_index_once():
+    n_blocks = 5
+    (lower, diag, upper, rhs), _ = make_system(n_blocks, 2, seed=16)
+    seen = []
+
+    def record(index):
+        seen.append(int(index))
+
+    def solve():
+        def block_fn(index):
+            jax.debug.callback(record, index, ordered=True)
+            return lower[index], diag[index], upper[index]
+
+        return block_thomas_solve(block_thomas_factor_fn(block_fn, n_blocks), rhs)
+
+    jax.jit(solve)().block_until_ready()
+    assert sorted(seen) == list(range(n_blocks))
+
+
+def test_generated_factor_rejects_empty_system():
+    with pytest.raises(ValueError, match="positive"):
+        block_thomas_factor_fn(lambda _: (None, None, None), 0)
 
 
 @pytest.mark.parametrize("n_rhs", [None, 3])
