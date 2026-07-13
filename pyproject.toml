@@ -27,7 +27,7 @@ Documentation = "https://solvax.readthedocs.io"
 
 [project.optional-dependencies]
 native = ["scipy"]
-dev = ["pytest", "pytest-cov", "pytest-xdist", "scipy", "numpy"]
+dev = ["pytest", "pytest-cov", "pytest-xdist", "scipy", "numpy", "ruff"]
 docs = [
   "sphinx",
   "furo",

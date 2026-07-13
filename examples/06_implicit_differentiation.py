@@ -25,7 +25,10 @@ b = jnp.ones(n)
 # --- linear_solve: differentiate a Krylov solve w.r.t. a matrix parameter. ---
 def energy(theta):
     a = base + theta * jnp.eye(n)
-    matvec = lambda v: a @ v
+
+    def matvec(v):
+        return a @ v
+
     x = sx.linear_solve(matvec, b, solver=lambda mv, rhs: sx.gmres(mv, rhs, rtol=1e-12).x)
     return jnp.sum(x**2)
 
@@ -38,10 +41,13 @@ print(f"linear_solve: grad = {float(g):+.6f}   finite-diff = {float(fd):+.6f}")
 
 # --- root_solve: differentiate the root of f(x, theta) = 0 (here x = atanh). ---
 def root(theta):
-    f = lambda x: jnp.tanh(x) - theta
+    def f(x):
+        return jnp.tanh(x) - theta
 
     def newton(f, x0):
-        step = lambda _, x: x - f(x) / jax.grad(f)(x)
+        def step(_, x):
+            return x - f(x) / jax.grad(f)(x)
+
         return jax.lax.fori_loop(0, 30, step, x0)
 
     return sx.root_solve(f, 0.0, newton)
