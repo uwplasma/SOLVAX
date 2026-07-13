@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import scipy.linalg
 
-from solvax import gcrot, gmres, gmres_cycle, linear_solve
+from solvax import gcrot, gmres, gmres_cycle, gmres_staged, linear_solve
 
 jax.config.update("jax_enable_x64", True)
 
@@ -238,6 +238,27 @@ def test_staged_gmres_cycles_match_monolithic_solve():
     assert np.allclose(staged.x, monolithic.x, rtol=1.0e-10, atol=1.0e-10)
 
 
+def test_host_staged_gmres_matches_monolithic_solve():
+    a, b = random_system(50, seed=32, spread=0.35)
+    matvec = jax.jit(lambda vector: a @ vector)
+    staged = gmres_staged(
+        matvec,
+        b,
+        restart=12,
+        rtol=1.0e-10,
+        max_restarts=8,
+    )
+    monolithic = gmres(
+        lambda vector: a @ vector,
+        b,
+        restart=12,
+        rtol=1.0e-10,
+        max_restarts=8,
+    )
+    assert bool(staged.converged)
+    assert np.allclose(staged.x, monolithic.x, rtol=1.0e-9, atol=1.0e-10)
+
+
 def test_reverse_mode_through_implicit_staged_gmres_solve():
     base = jnp.asarray(
         [[3.0, -0.2, 0.1], [0.3, 2.5, -0.1], [0.0, 0.2, 2.0]]
@@ -248,16 +269,14 @@ def test_reverse_mode_through_implicit_staged_gmres_solve():
         matrix = base.at[0, 0].add(alpha)
 
         def solver(operator, right_hand_side):
-            solution = jnp.zeros_like(right_hand_side)
-            for _ in range(4):
-                solution = gmres_cycle(
-                    operator,
-                    right_hand_side,
-                    x0=solution,
-                    restart=2,
-                    rtol=1.0e-12,
-                ).x
-            return solution
+            return gmres_staged(
+                operator,
+                right_hand_side,
+                restart=2,
+                rtol=1.0e-12,
+                max_restarts=4,
+                fixed_cycles=True,
+            ).x
 
         solution = linear_solve(lambda vector: matrix @ vector, rhs, solver)
         return jnp.sum(solution**2)

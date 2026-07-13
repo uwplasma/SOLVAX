@@ -76,12 +76,12 @@ Restarting caps memory and compiled shapes, but discards spectral information
 and can stagnate. Increase `restart` when memory permits and convergence stalls;
 improve the preconditioner before relying on very large restart spaces.
 
-## Staged restart cycles
+## Staged solves
 
 For expensive nested or multi-device operators, compiling every restart into
-one executable can dominate the solve. `gmres_cycle` exposes one bounded
-FGMRES cycle so the operator and preconditioner remain behind a reusable JIT
-call boundary:
+one executable can dominate the solve. SOLVAX offers two staging levels.
+
+`gmres_cycle` exposes one bounded FGMRES cycle for a fixed outer loop:
 
 ```python
 @jax.jit
@@ -107,6 +107,29 @@ loop fixed when tracing; do not branch in Python on a JAX `converged` value.
 For reverse-mode gradients, use the staged loop as the black-box solver passed
 to {func}`solvax.implicit.linear_solve`. Krylov iterations contain dynamic JAX
 loops and are differentiated implicitly, not by reversing their execution.
+
+When even one compiled cycle is too large, `gmres_staged` keeps every matrix
+and preconditioner action behind its own compiled call boundary. It runs the
+Arnoldi loop on the host and compiles only the small dense update:
+
+```python
+matvec = jax.jit(matvec)
+precond = jax.jit(precond)
+solution = sx.gmres_staged(
+    matvec,
+    b,
+    precond=precond,
+    restart=24,
+    max_restarts=8,
+    rtol=1e-10,
+)
+```
+
+This boundary is intended for costly nested or sharded kernels, not small
+operators where host dispatch can dominate. The default checks the true
+residual between restart cycles. Use `fixed_cycles=True` only inside
+{func}`solvax.implicit.linear_solve`; it avoids Python convergence branching
+while implicit differentiation supplies the reverse-mode rule.
 
 ## GCROT-style recycling
 
@@ -207,6 +230,7 @@ differences; see `examples/18_complex_krylov_gradient.py`.
 
 - {func}`solvax.krylov.gmres`
 - {func}`solvax.krylov.gmres_cycle`
+- {func}`solvax.krylov.gmres_staged`
 - {func}`solvax.krylov.gcrot`
 - {class}`solvax.krylov.KrylovSolution`
 

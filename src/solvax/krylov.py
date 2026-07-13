@@ -419,6 +419,132 @@ def gmres_cycle(
     return KrylovSolution(x, res, iters, converged, None)
 
 
+@jax.jit
+def _staged_arnoldi_step(j, active, w, z, V, Z, R, cs, sn, g, tol):
+    """Update the small Arnoldi state without tracing the matrix actions."""
+
+    m = Z.shape[0]
+    basis_mask = jnp.arange(m + 1) <= j
+    basis = jnp.where(basis_mask[:, None], V, 0.0)
+    h1 = jnp.conj(basis) @ w
+    w = w - h1 @ basis
+    h2 = jnp.conj(basis) @ w
+    w = w - h2 @ basis
+    h = h1 + h2
+    h_next = jnp.linalg.norm(w)
+    next_vector = w / jnp.where(h_next > 0, h_next, 1.0)
+    candidate_V = V.at[j + 1].set(next_vector)
+    h = h.at[j + 1].set(h_next)
+
+    def rotate(i, column):
+        first, second = column[i], column[i + 1]
+        return column.at[i].set(cs[i] * first + sn[i] * second).at[i + 1].set(
+            -jnp.conj(sn[i]) * first + cs[i] * second
+        )
+
+    h = lax.fori_loop(0, j, rotate, h)
+    c_j, s_j, diagonal = _complex_givens(h[j], h[j + 1])
+    h = h.at[j].set(diagonal).at[j + 1].set(0.0)
+    g_j = g[j]
+    candidate_g = g.at[j].set(c_j * g_j).at[j + 1].set(
+        -jnp.conj(s_j) * g_j
+    )
+    candidate_R = R.at[:, j].set(h[:m])
+    candidate_Z = Z.at[j].set(z)
+    candidate_cs = cs.at[j].set(c_j)
+    candidate_sn = sn.at[j].set(s_j)
+    residual_estimate = jnp.abs(candidate_g[j + 1])
+
+    def choose(candidate, previous):
+        return jnp.where(active, candidate, previous)
+    return (
+        choose(candidate_V, V),
+        choose(candidate_Z, Z),
+        choose(candidate_R, R),
+        choose(candidate_cs, cs),
+        choose(candidate_sn, sn),
+        choose(candidate_g, g),
+        active & (residual_estimate > tol),
+    )
+
+
+def gmres_staged(
+    matvec: MatVec,
+    b: jax.Array,
+    *,
+    x0: jax.Array | None = None,
+    precond: MatVec | None = None,
+    restart: int = 30,
+    rtol: float = 1e-8,
+    atol: float = 0.0,
+    max_restarts: int = 50,
+    fixed_cycles: bool = False,
+) -> KrylovSolution:
+    """Host-stage FGMRES around opaque compiled operator call boundaries.
+
+    Unlike :func:`gmres`, this routine does not JIT the Krylov loop. It calls
+    ``matvec`` and ``precond`` from a fixed Python Arnoldi loop and JITs only
+    the small dense orthogonalization update. This is useful when those actions
+    are already compiled multi-device kernels that would be prohibitively
+    expensive to inline into a monolithic XLA program.
+
+    By default the host checks the true residual once per restart and exits
+    early. Set ``fixed_cycles=True`` when tracing the solver through
+    :func:`solvax.linear_solve`; all cycles then execute and reverse-mode uses
+    implicit differentiation rather than the dynamic Krylov trace.
+    """
+
+    b = jnp.asarray(b)
+    x = jnp.zeros_like(b) if x0 is None else jnp.asarray(x0)
+    precond = _identity if precond is None else precond
+    tol = jnp.maximum(atol, rtol * jnp.linalg.norm(b))
+    total_iterations = jnp.int32(0)
+    residual = b - matvec(x)
+    residual_norm = jnp.linalg.norm(residual)
+
+    for _ in range(max_restarts):
+        beta = residual_norm
+        beta_safe = jnp.where(beta > 0, beta, 1.0)
+        n = b.shape[0]
+        dtype = b.dtype
+        V = jnp.zeros((restart + 1, n), dtype).at[0].set(residual / beta_safe)
+        Z = jnp.zeros((restart, n), dtype)
+        R = jnp.zeros((restart, restart), dtype)
+        real_dtype = jnp.real(b).dtype
+        cs = jnp.zeros((restart,), real_dtype)
+        sn = jnp.zeros((restart,), dtype)
+        g = jnp.zeros((restart + 1,), dtype).at[0].set(beta)
+        active = beta > tol
+        cycle_iterations = jnp.int32(0)
+
+        for step in range(restart):
+            if not fixed_cycles and not bool(active):
+                break
+            was_active = active
+            z = precond(V[step])
+            w = matvec(z)
+            V, Z, R, cs, sn, g, active = _staged_arnoldi_step(
+                jnp.int32(step), active, w, z, V, Z, R, cs, sn, g, tol
+            )
+            cycle_iterations = cycle_iterations + was_active.astype(jnp.int32)
+
+        used = jnp.arange(restart) < cycle_iterations
+        triangular = R + jnp.diag(jnp.where(used, 0.0, 1.0).astype(dtype))
+        coefficients = solve_triangular(
+            triangular, jnp.where(used, g[:restart], 0.0), lower=False
+        )
+        x = x + coefficients @ Z
+        residual = b - matvec(x)
+        residual_norm = jnp.linalg.norm(residual)
+        total_iterations = total_iterations + cycle_iterations
+        if not fixed_cycles and bool(residual_norm <= tol):
+            break
+
+    return KrylovSolution(
+        x, residual_norm, total_iterations, residual_norm <= tol, None
+    )
+
+
 def gcrot(
     matvec: MatVec,
     b: jax.Array,
