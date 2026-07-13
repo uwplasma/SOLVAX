@@ -39,9 +39,9 @@ def matvec(v):
 
 This contract supports dense arrays, stencil applications, spectral
 transforms, and nested solver calls without changing the outer method. GMRES
-and GCROT currently operate on flat one-dimensional arrays. PCG accepts an
-arbitrary JAX pytree, provided `matvec`, `precond`, `b`, and `x0` all preserve
-the same tree structure.
+and PCG accept arbitrary JAX pytrees, provided `matvec`, `precond`, `b`, and
+`x0` all preserve the same tree structure. GCROT currently operates on flat
+one-dimensional arrays.
 
 ## Preconditioner contract
 
@@ -98,8 +98,8 @@ $\max(\lVert x_0\rVert_2,1)$.
 |---|---|
 | `block_thomas*` | `(n_blocks, block_size[, n_rhs])` |
 | `tridiagonal_solve` | system dimension first; all trailing axes are batched |
-| `gmres`, `gcrot` | flat `(n,)` vector |
-| `pcg` | array or arbitrary matching pytree |
+| `gmres`, `pcg` | array or arbitrary matching pytree |
+| `gcrot` | flat `(n,)` vector |
 | `anderson_mixing` | history on axis 0 |
 | `chunked_jacfwd/rev` | same output layout as the corresponding JAX transform |
 

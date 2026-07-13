@@ -77,7 +77,7 @@ Everything is differentiable (`jax.grad` through the solve) and batchable
 
 Complex-valued GMRES/GCROT, tridiagonal solves, and fixed-point acceleration
 use Hermitian inner products and real-valued safeguards. Remaining roadmap:
-harmonic-Ritz recycle selection, pytree GMRES/GCROT operands, and expanded GPU
+harmonic-Ritz recycle selection, pytree GCROT operands, and expanded GPU
 batched-LU benchmarks.
 
 ```python
