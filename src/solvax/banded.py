@@ -231,7 +231,7 @@ def lu_solve_banded(factors: BandedLUFactors, b: jax.Array) -> jax.Array:
     ku = u_bands.shape[0] - 1
     b = jnp.asarray(b)
     vector = b.ndim == 1
-    bb = b[:, None] if vector else b
+    bb = (b[:, None] if vector else b).astype(jnp.result_type(b, l_bands, u_bands))
     bb = bb * row_scale[:, None]
 
     # Forward: y[i] = b[i] - sum_t L[i, i - t] y[i - t], L[i, i - t] = l_bands[t - 1, i - t].
