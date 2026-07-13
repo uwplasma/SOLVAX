@@ -42,7 +42,7 @@ from solvax.fixed_point import (
     anderson_mixing,
 )
 from solvax.implicit import linear_solve, root_solve
-from solvax.krylov import KrylovSolution, gcrot, gmres
+from solvax.krylov import KrylovSolution, gcrot, gmres, gmres_cycle
 from solvax.native import SpluFactorization, splu_solve
 from solvax.operators import (
     BlockTridiagonalOperator,
@@ -94,6 +94,7 @@ __all__ = [
     "anderson_mixing",
     "KrylovSolution",
     "gmres",
+    "gmres_cycle",
     "gcrot",
     "PCGSolution",
     "PCGDiagnostics",

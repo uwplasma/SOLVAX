@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import scipy.linalg
 
-from solvax import gcrot, gmres
+from solvax import gcrot, gmres, gmres_cycle, linear_solve
 
 jax.config.update("jax_enable_x64", True)
 
@@ -206,6 +206,69 @@ def test_gmres_under_jit():
     assert bool(sol_jit.converged)
     assert int(sol_jit.iterations) == int(sol_ref.iterations)
     assert np.allclose(np.asarray(sol_jit.x), np.asarray(sol_ref.x), atol=1e-12)
+
+
+def test_staged_gmres_cycles_match_monolithic_solve():
+    a, b = random_system(50, seed=31, spread=0.35)
+
+    @jax.jit
+    def cycle(matrix, rhs, initial):
+        return gmres_cycle(
+            lambda vector: matrix @ vector,
+            rhs,
+            x0=initial,
+            restart=12,
+            rtol=1.0e-10,
+        )
+
+    staged = None
+    initial = jnp.zeros_like(b)
+    for _ in range(8):
+        staged = cycle(a, b, initial)
+        initial = staged.x
+    monolithic = gmres(
+        lambda vector: a @ vector,
+        b,
+        x0=jnp.zeros_like(b),
+        restart=12,
+        rtol=1.0e-10,
+        max_restarts=8,
+    )
+    assert bool(staged.converged)
+    assert np.allclose(staged.x, monolithic.x, rtol=1.0e-10, atol=1.0e-10)
+
+
+def test_reverse_mode_through_implicit_staged_gmres_solve():
+    base = jnp.asarray(
+        [[3.0, -0.2, 0.1], [0.3, 2.5, -0.1], [0.0, 0.2, 2.0]]
+    )
+    rhs = jnp.asarray([1.0, -0.4, 0.7])
+
+    def staged_loss(alpha):
+        matrix = base.at[0, 0].add(alpha)
+
+        def solver(operator, right_hand_side):
+            solution = jnp.zeros_like(right_hand_side)
+            for _ in range(4):
+                solution = gmres_cycle(
+                    operator,
+                    right_hand_side,
+                    x0=solution,
+                    restart=2,
+                    rtol=1.0e-12,
+                ).x
+            return solution
+
+        solution = linear_solve(lambda vector: matrix @ vector, rhs, solver)
+        return jnp.sum(solution**2)
+
+    def dense_loss(alpha):
+        solution = jnp.linalg.solve(base.at[0, 0].add(alpha), rhs)
+        return jnp.sum(solution**2)
+
+    assert jax.grad(staged_loss)(0.2) == pytest.approx(
+        jax.grad(dense_loss)(0.2), rel=1.0e-8, abs=1.0e-10
+    )
 
 
 def test_gcrot_under_jit():

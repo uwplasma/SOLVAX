@@ -372,6 +372,53 @@ def gmres(
     return KrylovSolution(x, res, iters, converged, None)
 
 
+def gmres_cycle(
+    matvec: MatVec,
+    b: jax.Array,
+    *,
+    x0: jax.Array | None = None,
+    precond: MatVec | None = None,
+    restart: int = 30,
+    rtol: float = 1e-8,
+    atol: float = 0.0,
+) -> KrylovSolution:
+    """Run one independently compilable flexible-GMRES restart cycle.
+
+    This is the staged counterpart to :func:`gmres`: callers may JIT this
+    bounded cycle once and invoke it repeatedly from a fixed Python loop. That
+    keeps expensive matrix-free operators behind compiled call boundaries
+    instead of lowering every restart into one monolithic executable. Fixed
+    outer loops remain JAX-traceable. For reverse-mode differentiation, wrap
+    the staged solver with :func:`solvax.linear_solve`, just like
+    :func:`gmres`; dynamic Krylov loops are differentiated implicitly rather
+    than by reversing through their iterations.
+
+    The arguments match :func:`gmres` except that exactly one restart cycle is
+    attempted. Pass the returned ``x`` as ``x0`` to continue.
+    """
+
+    b = jnp.asarray(b)
+    n = b.shape[0]
+    x0 = jnp.zeros_like(b) if x0 is None else jnp.asarray(x0)
+    precond = _identity if precond is None else precond
+    tol = jnp.maximum(atol, rtol * jnp.linalg.norm(b))
+    empty = jnp.zeros((n, 0), b.dtype)
+    x, res, iters, converged, _, _, _ = _restarted(
+        matvec,
+        b,
+        x0,
+        precond,
+        restart,
+        tol,
+        1,
+        empty,
+        empty,
+        jnp.int32(0),
+        recycling=False,
+    )
+    return KrylovSolution(x, res, iters, converged, None)
+
+
 def gcrot(
     matvec: MatVec,
     b: jax.Array,

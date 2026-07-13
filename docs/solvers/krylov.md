@@ -76,6 +76,38 @@ Restarting caps memory and compiled shapes, but discards spectral information
 and can stagnate. Increase `restart` when memory permits and convergence stalls;
 improve the preconditioner before relying on very large restart spaces.
 
+## Staged restart cycles
+
+For expensive nested or multi-device operators, compiling every restart into
+one executable can dominate the solve. `gmres_cycle` exposes one bounded
+FGMRES cycle so the operator and preconditioner remain behind a reusable JIT
+call boundary:
+
+```python
+@jax.jit
+def cycle(rhs, initial):
+    return sx.gmres_cycle(
+        matvec,
+        rhs,
+        x0=initial,
+        precond=precond,
+        restart=24,
+        rtol=1e-10,
+    )
+
+initial = jnp.zeros_like(b)
+for _ in range(8):  # fixed, bounded staging loop
+    solution = cycle(b, initial)
+    initial = solution.x
+```
+
+Each result reports the true residual and iterations for that cycle. Passing
+`solution.x` back as `x0` continues the same restarted method. Keep the outer
+loop fixed when tracing; do not branch in Python on a JAX `converged` value.
+For reverse-mode gradients, use the staged loop as the black-box solver passed
+to {func}`solvax.implicit.linear_solve`. Krylov iterations contain dynamic JAX
+loops and are differentiated implicitly, not by reversing their execution.
+
 ## GCROT-style recycling
 
 For a sequence $A_i x_i=b_i$, retain source and image bases $(U,C)$ satisfying
@@ -174,6 +206,7 @@ differences; see `examples/18_complex_krylov_gradient.py`.
 ## API summary
 
 - {func}`solvax.krylov.gmres`
+- {func}`solvax.krylov.gmres_cycle`
 - {func}`solvax.krylov.gcrot`
 - {class}`solvax.krylov.KrylovSolution`
 
