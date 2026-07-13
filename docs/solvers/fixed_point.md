@@ -13,7 +13,32 @@ r(x)=G(x)-x.
 $$
 
 SOLVAX provides safeguarded vector Aitken relaxation, a bounded-history
-Anderson mixing primitive, and a complete Aitken fixed-point loop.
+Anderson mixing primitive, a complete Aitken fixed-point loop, and matrix-free
+FGMRES for affine maps.
+
+## Affine fixed points with FGMRES
+
+For an affine map $G(x)=Lx+c$, the fixed-point equation is the linear system
+
+$$
+(I-L)\delta=G(x_0)-x_0,\qquad x^*=x_0+\delta.
+$$
+
+`affine_fixed_point_gmres` applies this operator through map evaluations, so no
+matrix or Jacobian is assembled. Array and PyTree states, custom inner
+products, and right preconditioners use the same contracts as `gmres`.
+
+```python
+solution = sx.affine_fixed_point_gmres(
+    mapping,
+    x0,
+    restart=20,
+    rtol=1e-8,
+)
+```
+
+The affine contract is deliberate. For a genuinely nonlinear map, use a
+globalized nonlinear primal solver and `root_solve` for implicit derivatives.
 
 ## Relaxed iteration
 
@@ -104,8 +129,13 @@ x_next = sx.anderson_mixing(
     residuals,      # G(iterates) - iterates, same shape
     regularization=1e-8,
     damping=1.0,
+    condition_limit=1e6,
 )
 ```
+
+`condition_limit` optionally filters residual-history singular directions
+before solving the affine-weight system. This prevents nearly dependent map
+histories from squaring an already large condition number in the Gram solve.
 
 Map evaluation and stopping intentionally remain outside this primitive so an
 application can keep a bounded ring buffer and its own nonlinear control
@@ -130,7 +160,9 @@ not make a fundamentally noncontractive map globally convergent.
 
 - A vanishing Aitken denominator retains the previous relaxation.
 - Anderson adds scale-aware regularization and falls back to the newest mapped
-  point if weights become nonfinite.
+  point if weights or their affine normalization become degenerate.
+- `condition_limit` bounds the retained residual-history condition number;
+  use it when a longer history produces spikes from nearly dependent columns.
 - Large Aitken upper bounds can destabilize nonlinear maps; choose physical
   bounds rather than accepting the permissive default blindly.
 - Nearly dependent Anderson histories require stronger regularization or a
@@ -149,4 +181,5 @@ $f(x)=G(x)-x$ and wrap the primal solver with
 - {func}`solvax.fixed_point.aitken_relaxation`
 - {func}`solvax.fixed_point.anderson_mixing`
 - {func}`solvax.fixed_point.aitken_fixed_point`
+- {func}`solvax.fixed_point.affine_fixed_point_gmres`
 - {class}`solvax.fixed_point.FixedPointSolution`

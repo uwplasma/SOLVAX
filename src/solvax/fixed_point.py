@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
 from jax import lax
+
+from solvax.krylov import KrylovSolution, gmres
+
+PyTree = Any
 
 
 class FixedPointSolution(NamedTuple):
@@ -58,6 +62,7 @@ def anderson_mixing(
     *,
     regularization: float = 1.0e-8,
     damping: float = 1.0,
+    condition_limit: float | None = None,
 ) -> jax.Array:
     """Return a regularized Anderson update from a bounded fixed-point history.
 
@@ -71,6 +76,8 @@ def anderson_mixing(
         raise ValueError("regularization must be non-negative")
     if not 0.0 <= damping <= 1.0:
         raise ValueError("damping must lie in [0, 1]")
+    if condition_limit is not None and condition_limit < 1.0:
+        raise ValueError("condition_limit must be at least one")
     iterates = jnp.asarray(iterates)
     residuals = jnp.asarray(residuals)
     if iterates.shape != residuals.shape:
@@ -87,20 +94,104 @@ def anderson_mixing(
         jnp.asarray(jnp.finfo(real_dtype).tiny, dtype=real_dtype),
     )
     stabilization = (regularization + jnp.finfo(real_dtype).eps) * scale
-    system = gram + stabilization * jnp.eye(history_size, dtype=residuals.dtype)
     ones = jnp.ones((history_size,), dtype=residuals.dtype)
-    weights = jnp.linalg.solve(system, ones)
+    if condition_limit is None:
+        system = gram + stabilization * jnp.eye(
+            history_size, dtype=residuals.dtype
+        )
+        weights = jnp.linalg.solve(system, ones)
+    else:
+        eigenvalues, eigenvectors = jnp.linalg.eigh(gram)
+        threshold = jnp.maximum(
+            eigenvalues[-1] / condition_limit**2,
+            jnp.finfo(real_dtype).eps * scale,
+        )
+        inverse = jnp.where(
+            eigenvalues >= threshold,
+            1.0 / (eigenvalues + stabilization),
+            0.0,
+        )
+        weights = eigenvectors @ (inverse * (jnp.conj(eigenvectors).T @ ones))
     denominator = jnp.sum(weights)
-    weights = weights / jnp.where(
-        jnp.abs(denominator) > jnp.finfo(real_dtype).tiny,
-        denominator,
-        jnp.asarray(1.0, dtype=residuals.dtype),
-    )
     fallback = jax.nn.one_hot(history_size - 1, history_size, dtype=residuals.dtype)
-    weights = jnp.where(jnp.all(jnp.isfinite(weights)), weights, fallback)
+    valid = jnp.all(jnp.isfinite(weights)) & (
+        jnp.abs(denominator) > jnp.finfo(real_dtype).tiny
+    )
+    weights = jnp.where(valid, weights / jnp.where(valid, denominator, 1.0), fallback)
     mapped = iterates + residuals
     accelerated = jnp.tensordot(weights, mapped, axes=(0, 0))
     return (1.0 - damping) * mapped[-1] + damping * accelerated
+
+
+def affine_fixed_point_gmres(
+    mapping: Callable[[PyTree], PyTree],
+    x0: PyTree,
+    *,
+    precond: Callable[[PyTree], PyTree] | None = None,
+    inner_product: Callable[[PyTree, PyTree], jax.Array] | None = None,
+    restart: int = 30,
+    rtol: float = 1.0e-8,
+    atol: float = 0.0,
+    max_restarts: int = 50,
+) -> KrylovSolution:
+    """Solve an affine fixed-point map with matrix-free FGMRES.
+
+    For ``G(x) = L x + c``, this solves ``(I - L) delta = G(x0) - x0``
+    and returns ``x0 + delta``. Each Krylov operator application evaluates
+    ``mapping`` once; no explicit matrix or Jacobian is formed. The mapping
+    must be affine over the trial space. Use :func:`root_solve` with a
+    nonlinear primal solver for a genuinely nonlinear map.
+    """
+
+    x0 = jax.tree.map(jnp.asarray, x0)
+    mapped0 = mapping(x0)
+    if jax.tree.structure(mapped0) != jax.tree.structure(x0):
+        raise ValueError("mapping must preserve the fixed-point pytree structure")
+
+    def tree_add(left, right):
+        return jax.tree.map(lambda x, y: x + y, left, right)
+
+    def tree_sub(left, right):
+        return jax.tree.map(lambda x, y: x - y, left, right)
+
+    residual0 = tree_sub(mapped0, x0)
+
+    def operator(delta):
+        mapped_trial = mapping(tree_add(x0, delta))
+        return tree_sub(delta, tree_sub(mapped_trial, mapped0))
+
+    correction = gmres(
+        operator,
+        residual0,
+        precond=precond,
+        inner_product=inner_product,
+        restart=restart,
+        rtol=rtol,
+        atol=atol,
+        max_restarts=max_restarts,
+    )
+    x = tree_add(x0, correction.x)
+    residual = tree_sub(mapping(x), x)
+    if inner_product is None:
+        products = jax.tree.leaves(jax.tree.map(jnp.vdot, residual, residual))
+        squared_norm = sum(products[1:], products[0]).real
+        initial_products = jax.tree.leaves(
+            jax.tree.map(jnp.vdot, residual0, residual0)
+        )
+        initial_squared_norm = sum(initial_products[1:], initial_products[0]).real
+    else:
+        squared_norm = jnp.real(inner_product(residual, residual))
+        initial_squared_norm = jnp.real(inner_product(residual0, residual0))
+    residual_norm = jnp.sqrt(jnp.maximum(squared_norm, 0.0))
+    initial_norm = jnp.sqrt(jnp.maximum(initial_squared_norm, 0.0))
+    tolerance = jnp.maximum(atol, rtol * initial_norm)
+    return KrylovSolution(
+        x=x,
+        residual_norm=residual_norm,
+        iterations=correction.iterations,
+        converged=residual_norm <= tolerance,
+        recycle=None,
+    )
 
 
 def aitken_fixed_point(

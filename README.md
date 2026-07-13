@@ -40,6 +40,9 @@ x = sx.block_thomas(lower, diag, upper, rhs)
 solution = sx.pcg(matvec, rhs, precond=preconditioner, rtol=1e-10)
 assert solution.converged
 
+# Solve an expensive affine coupling map without assembling its Jacobian
+coupled = sx.affine_fixed_point_gmres(coupling_sweep, initial_state)
+
 # Same diagnostics, but gradients use an implicit primal/transpose solve
 implicit_solution = sx.pcg_linear_solve(matvec, rhs, precond=preconditioner)
 
@@ -70,7 +73,7 @@ Everything is differentiable (`jax.grad` through the solve) and batchable
 | `solvax.banded` | Non-pivoted banded LU with row equilibration + static pivoting; periodic variant via the Woodbury capacitance trick |
 | `solvax.krylov` | Flexible restarted GMRES (CGS2 + Givens) and GCROT-style Krylov subspace recycling for parameter continuation |
 | `solvax.pcg` | Matrix-free pytree PCG with preconditioning, fixed-shape residual history, and explicit convergence/breakdown status |
-| `solvax.fixed_point` | Safeguarded Aitken and bounded-memory Anderson acceleration |
+| `solvax.fixed_point` | Safeguarded Aitken, bounded-memory Anderson, and matrix-free affine fixed-point FGMRES |
 | `solvax.implicit` | Implicit-function-theorem `linear_solve` and `root_solve` — gradients cost one extra (transposed) solve |
 | `solvax.refine` | Mixed-precision iterative refinement (float32 factor, float64 residuals) |
 | `solvax.native` | Host-side SuperLU bridge (non-differentiable, import-guarded) |
