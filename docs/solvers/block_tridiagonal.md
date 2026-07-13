@@ -71,6 +71,22 @@ x_a = sx.block_thomas_solve(factors, rhs_a)
 x_b = sx.block_thomas_solve(factors, rhs_b)
 ```
 
+When blocks come from compact coefficients, avoid materializing the diagonal
+band before factorization:
+
+```python
+def block_fn(k):
+    return lower_block(k), diagonal_block(k), upper_block(k)
+
+factors = sx.block_thomas_factor_fn(block_fn, n_blocks=N)
+x = sx.block_thomas_solve(factors, rhs)
+x_t = sx.block_thomas_solve(factors, adjoint_rhs, transpose=True)
+```
+
+`block_fn` is evaluated once per index. The reusable factors necessarily retain
+`O(N m^2)` LU and off-diagonal state, but no full diagonal input band is kept in
+addition to the Schur factors.
+
 `BlockTridiagFactors` contains:
 
 - `delta_lu`: LU storage for every Schur complement;
@@ -189,6 +205,7 @@ defect corrections recover accuracy when the conditioning permits. See
 - {func}`solvax.direct.block_tridiag_matvec`
 - {func}`solvax.direct.block_tridiag_relative_residual`
 - {func}`solvax.direct.block_thomas_factor`
+- {func}`solvax.direct.block_thomas_factor_fn`
 - {func}`solvax.direct.block_thomas_solve`
 - {func}`solvax.direct.block_thomas_truncated`
 - {func}`solvax.direct.block_thomas_truncated_fn`

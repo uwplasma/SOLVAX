@@ -48,6 +48,10 @@ factors = sx.block_thomas_factor(lower, diag, upper)
 x1 = sx.block_thomas_solve(factors, rhs1)
 x2 = sx.block_thomas_solve(factors, rhs2)
 
+# Generate each block once when reusable factors are needed without a stored
+# diagonal band.
+generated_factors = sx.block_thomas_factor_fn(block_fn, n_blocks=N)
+
 # Memory-truncated mode: rhs nonzero only in the lowest K blocks and only the
 # lowest K solution blocks needed -> O(K m^2) memory, independent of N.
 x_low = sx.block_thomas_truncated(lower, diag, upper, rhs[:3], keep_lowest=3)
