@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from solvax import linear_solve, root_solve
+from solvax import linear_solve, newton_krylov, root_solve
 
 jax.config.update("jax_enable_x64", True)
 
@@ -192,3 +192,88 @@ def test_root_solve_custom_tangent_solve():
     g = jax.jacobian(root)(p)
     expected = np.diag(1.0 / (3.0 * np.cbrt(np.asarray(p)) ** 2))
     assert np.allclose(np.asarray(g), expected, rtol=1e-8)
+
+
+def test_newton_krylov_scalar_converges_under_jit():
+    solution = jax.jit(
+        lambda initial: newton_krylov(
+            lambda x: x**2 - 2.0,
+            initial,
+            rtol=1e-12,
+            atol=1e-12,
+            max_steps=8,
+            linear_restart=1,
+            linear_rtol=1e-12,
+            linear_max_restarts=2,
+        )
+    )(jnp.array(1.0))
+
+    assert bool(solution.converged)
+    assert bool(solution.linear_converged)
+    assert float(solution.x) == pytest.approx(np.sqrt(2.0), rel=1e-12)
+    assert int(solution.newton_iterations) > 0
+    assert int(solution.linear_iterations) >= int(solution.newton_iterations)
+
+
+def test_newton_krylov_checks_residual_after_last_update():
+    solution = newton_krylov(
+        lambda x: x - 3.0,
+        jnp.array(0.0),
+        rtol=0.0,
+        atol=1e-12,
+        max_steps=1,
+        linear_restart=1,
+        linear_rtol=1e-12,
+        linear_max_restarts=1,
+    )
+
+    assert bool(solution.converged)
+    assert int(solution.newton_iterations) == 1
+    assert float(solution.residual_norm) < 1e-12
+
+
+def test_newton_krylov_reports_linear_failure():
+    solution = newton_krylov(
+        lambda x: x - 1.0,
+        jnp.array(0.0),
+        rtol=0.0,
+        atol=1e-12,
+        max_steps=2,
+        linear_restart=1,
+        linear_max_restarts=0,
+    )
+
+    assert not bool(solution.converged)
+    assert not bool(solution.linear_converged)
+    assert int(solution.linear_iterations) == 0
+
+
+def test_newton_krylov_supports_pytree_preconditioner_and_inner_product():
+    target = (jnp.array([2.0, -4.0]), jnp.array(9.0))
+
+    def residual(value):
+        return 2.0 * value[0] - target[0], 3.0 * value[1] - target[1]
+
+    precond = lambda value: (value[0] / 2.0, value[1] / 3.0)  # noqa: E731
+    inner_product = lambda left, right: (  # noqa: E731
+        jnp.vdot(left[0], 2.0 * right[0]) + jnp.vdot(left[1], right[1])
+    )
+    solution = jax.jit(
+        lambda: newton_krylov(
+            residual,
+            (jnp.zeros(2), jnp.array(0.0)),
+            precond=precond,
+            inner_product=inner_product,
+            rtol=0.0,
+            atol=1e-12,
+            max_steps=2,
+            linear_restart=2,
+            linear_rtol=1e-12,
+            linear_max_restarts=1,
+        )
+    )()
+
+    assert bool(solution.converged)
+    assert np.asarray(solution.x[0]) == pytest.approx([1.0, -2.0])
+    assert float(solution.x[1]) == pytest.approx(3.0)
+    assert int(solution.linear_iterations) == 1

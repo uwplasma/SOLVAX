@@ -1,4 +1,35 @@
-# Implicit differentiation
+# Matrix-free nonlinear solves and implicit differentiation
+
+## Newton--Krylov root solve
+
+`newton_krylov` solves $F(x)=0$ without materializing the Jacobian. Each
+Newton update uses `jax.linearize` for the Jacobian-vector action and restarted
+flexible GMRES for the correction {cite}`knoll2004`. The state and residual may
+be arbitrary matching JAX PyTrees.
+
+```python
+solution = sx.newton_krylov(
+    residual,
+    initial,
+    precond=approximate_inverse,
+    inner_product=weighted_product,
+    rtol=1e-8,
+    max_steps=10,
+    linear_restart=20,
+)
+```
+
+The nonlinear stopping test uses the true residual relative to the initial
+residual. Inspect both `solution.converged` and `solution.linear_converged`, as
+well as `newton_iterations`, `linear_iterations`, and `residual_norm`.
+`inner_product=` controls GMRES orthogonalization and supports weighted or
+distributed reductions; `norm=` may independently define the nonlinear
+residual norm.
+
+For large PDE or kinetic systems, `precond=` should approximate the inverse
+Jacobian action using inexpensive problem structure. Jacobian-free products
+remove matrix storage, but do not by themselves make Krylov convergence
+mesh-independent {cite}`knoll2004`.
 
 Implicit differentiation computes derivatives of a converged equation rather
 than derivatives of the iterations used to solve it. This makes the gradient
@@ -150,6 +181,7 @@ branch. It should not be used to claim differentiability across a branch jump.
 
 ## API summary
 
+- {func}`solvax.implicit.newton_krylov`
 - {func}`solvax.implicit.linear_solve`
 - {func}`solvax.implicit.root_solve`
 - {func}`solvax.pcg.pcg_linear_solve`

@@ -132,6 +132,14 @@ name with `status_name` outside a JAX trace.
 `aitken_fixed_point` returns the iterate, true residual norm, iteration count,
 convergence flag, and final relaxation parameter.
 
+### Newton--Krylov results
+
+`newton_krylov` returns `NewtonKrylovSolution`, containing the final PyTree
+iterate, true nonlinear residual norm, Newton and total GMRES iteration counts,
+and separate nonlinear and linear convergence flags. The solve is matrix-free;
+pass `precond=` for a right preconditioner and `inner_product=` for weighted or
+distributed Krylov products.
+
 ## JAX transforms
 
 All core routines are intended for `jit`; static algorithm sizes such as

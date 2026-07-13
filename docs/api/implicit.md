@@ -1,4 +1,4 @@
-# Implicit differentiation API
+# Implicit solves and differentiation API
 
 ```{eval-rst}
 .. automodule:: solvax.implicit

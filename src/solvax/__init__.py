@@ -41,7 +41,7 @@ from solvax.fixed_point import (
     aitken_relaxation,
     anderson_mixing,
 )
-from solvax.implicit import linear_solve, root_solve
+from solvax.implicit import NewtonKrylovSolution, linear_solve, newton_krylov, root_solve
 from solvax.krylov import KrylovSolution, gcrot, gmres
 from solvax.native import SpluFactorization, splu_solve
 from solvax.operators import (
@@ -101,6 +101,8 @@ __all__ = [
     "pcg_linear_solve",
     "status_name",
     "linear_solve",
+    "NewtonKrylovSolution",
+    "newton_krylov",
     "root_solve",
     "MatrixFreeOperator",
     "SumOperator",
