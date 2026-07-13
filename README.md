@@ -16,11 +16,10 @@ Kronecker approximations, line smoothers), mixed-precision iterative
 refinement, and implicit differentiation of every solve — all
 jit/vmap/grad-transparent, on CPU and GPU.
 
-It fills a gap in the JAX ecosystem: [lineax](https://github.com/patrick-kidger/lineax)
-offers general linear-operator abstractions and standard solvers, but not
-block-structured direct elimination, coarse-operator/multigrid
-preconditioning, or Krylov subspace recycling for parameter continuation.
-`solvax` builds on lineax's operator interface and adds exactly that layer.
+It complements general JAX solver libraries with block-structured direct
+elimination, coarse-operator and multigrid preconditioning, and Krylov
+subspace recycling for parameter continuation. SOLVAX operators are native
+JAX pytrees; no external operator abstraction is required.
 
 ## Install
 

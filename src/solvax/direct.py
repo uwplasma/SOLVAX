@@ -203,21 +203,53 @@ def block_thomas(
     return block_thomas_solve(block_thomas_factor(lower, diag, upper), rhs)
 
 
-def _block_tridiag_matvec(
+def block_tridiag_matvec(
     lower: jax.Array, diag: jax.Array, upper: jax.Array, x: jax.Array
 ) -> jax.Array:
-    """Apply the block-tridiagonal operator to ``x`` in the band layout.
+    """Apply a block-tridiagonal operator without forming a dense matrix.
 
     ``(A x)_k = L_k x_{k-1} + D_k x_k + U_k x_{k+1}``, evaluated for every
     block at once. ``x`` and the result share the layout of the right-hand
-    side, ``(n_blocks, m)`` or ``(n_blocks, m, n_rhs)``. Used to form the
-    working-precision residual of :func:`mixed_precision_block_thomas`.
+    side, ``(n_blocks, m)`` or ``(n_blocks, m, n_rhs)``. This independent
+    operator action is also used by residual diagnostics.
     """
     sub = "kij,kj...->ki..."
     y = jnp.einsum(sub, diag, x)
     y = y.at[1:].add(jnp.einsum(sub, lower[1:], x[:-1]))
     y = y.at[:-1].add(jnp.einsum(sub, upper[:-1], x[1:]))
     return y
+
+
+def block_tridiag_relative_residual(
+    lower: jax.Array,
+    diag: jax.Array,
+    upper: jax.Array,
+    solution: jax.Array,
+    rhs: jax.Array,
+) -> jax.Array:
+    """Return ``||b - A x||_2 / max(||b||_2, tiny)`` per right-hand side.
+
+    A vector right-hand side returns a scalar. Multiple right-hand sides return
+    one value per final column. Every block row is included, so this diagnostic
+    cannot silently omit a truncated high-mode tail.
+    """
+    residual = rhs - block_tridiag_matvec(lower, diag, upper, solution)
+    axes = tuple(range(residual.ndim - 1)) if residual.ndim > 2 else None
+    residual_norm = jnp.linalg.norm(residual, axis=axes)
+    rhs_norm = jnp.linalg.norm(rhs, axis=axes)
+    tiny = jnp.finfo(residual.real.dtype).tiny
+    return residual_norm / jnp.maximum(rhs_norm, tiny)
+
+
+def _solve_matrix_and_rhs(delta, matrix_rhs, rhs):
+    """Apply one LU solve to a matrix block and one or more RHS columns."""
+    vector_rhs = rhs.ndim == 1
+    rhs_columns = rhs[:, None] if vector_rhs else rhs
+    width = matrix_rhs.shape[1]
+    solved = lu_solve(delta, jnp.concatenate([matrix_rhs, rhs_columns], axis=1))
+    solved_matrix = solved[:, :width]
+    solved_rhs = solved[:, width:]
+    return solved_matrix, solved_rhs[:, 0] if vector_rhs else solved_rhs
 
 
 def mixed_precision_block_thomas(
@@ -261,7 +293,7 @@ def mixed_precision_block_thomas(
     """
     residual_dtype = jnp.result_type(rhs)
     factors = block_thomas_factor(lower, diag, upper, factor_dtype=factor_dtype)
-    matvec = lambda x: _block_tridiag_matvec(lower, diag, upper, x)  # noqa: E731
+    matvec = lambda x: block_tridiag_matvec(lower, diag, upper, x)  # noqa: E731
     approx_solve = lambda r: block_thomas_solve(factors, r)  # noqa: E731
     x, _ = iterative_refinement(
         matvec,
@@ -321,8 +353,10 @@ def block_thomas_truncated(
     def head_step(carry, inputs):
         delta_next_lu, delta_next_piv, sigma_next = carry
         d_j, u_j, l_next, b_j = inputs
-        x = lu_solve((delta_next_lu, delta_next_piv), l_next)
-        sigma_j = b_j - u_j @ lu_solve((delta_next_lu, delta_next_piv), sigma_next)
+        x, solved_sigma = _solve_matrix_and_rhs(
+            (delta_next_lu, delta_next_piv), l_next, sigma_next
+        )
+        sigma_j = b_j - u_j @ solved_sigma
         lu_j, piv_j = lu_factor(d_j - u_j @ x)
         return (lu_j, piv_j, sigma_j), (lu_j, piv_j, sigma_j)
 
@@ -422,8 +456,8 @@ def block_thomas_truncated_fn(
         if k == n:
             # Top block couples to nothing above.
             u_j = jnp.where(j == n - 1, jnp.zeros_like(u_j), u_j)
-        x = lu_solve(delta_next, l_next)
-        sigma_j = b_j - u_j @ lu_solve(delta_next, sigma_next)
+        x, solved_sigma = _solve_matrix_and_rhs(delta_next, l_next, sigma_next)
+        sigma_j = b_j - u_j @ solved_sigma
         delta_j = lu_factor(d_j - u_j @ x)
         return (delta_j, l_j, sigma_j), (delta_j[0], delta_j[1], sigma_j, l_j)
 
