@@ -61,6 +61,7 @@ from jax.scipy.linalg import solve_triangular
 
 PyTree = Any
 MatVec = Callable[[PyTree], PyTree]
+InnerProduct = Callable[[PyTree, PyTree], jax.Array]
 
 
 class KrylovSolution(NamedTuple):
@@ -107,15 +108,19 @@ def _tree_dot(left: PyTree, right: PyTree) -> jax.Array:
     return sum(products[1:], products[0])
 
 
-def _tree_norm(value: PyTree) -> jax.Array:
-    return jnp.sqrt(jnp.maximum(jnp.real(_tree_dot(value, value)), 0.0))
+def _tree_norm(value: PyTree, inner_product: InnerProduct) -> jax.Array:
+    return jnp.sqrt(jnp.maximum(jnp.real(inner_product(value, value)), 0.0))
 
 
 def _tree_basis(value: PyTree, size: int) -> PyTree:
     return jax.tree.map(lambda x: jnp.zeros((size, *x.shape), x.dtype), value)
 
 
-def _tree_basis_dot(basis: PyTree, value: PyTree) -> jax.Array:
+def _tree_basis_dot(
+    basis: PyTree, value: PyTree, inner_product: InnerProduct
+) -> jax.Array:
+    if inner_product is not _tree_dot:
+        return jax.vmap(inner_product, in_axes=(0, None))(basis, value)
     products = jax.tree.leaves(
         jax.tree.map(
             lambda vectors, x: jnp.conj(vectors).reshape(vectors.shape[0], -1)
@@ -372,6 +377,7 @@ def _restarted(
 def _pytree_fgmres_cycle(
     matvec: MatVec,
     precond: MatVec,
+    inner_product: InnerProduct,
     residual: PyTree,
     beta: jax.Array,
     tolerance: jax.Array,
@@ -400,13 +406,13 @@ def _pytree_fgmres_cycle(
         z = precond(_tree_basis_get(basis, index))
         applied = matvec(z)
 
-        first = _tree_basis_dot(basis, applied)
+        first = _tree_basis_dot(basis, applied, inner_product)
         applied = _tree_sub(applied, _tree_basis_sum(first, basis))
-        second = _tree_basis_dot(basis, applied)
+        second = _tree_basis_dot(basis, applied, inner_product)
         applied = _tree_sub(applied, _tree_basis_sum(second, basis))
         column = first + second
 
-        next_norm = _tree_norm(applied)
+        next_norm = _tree_norm(applied, inner_product)
         next_vector = jax.tree.map(
             lambda x: x / jnp.where(next_norm > 0, next_norm, 1.0), applied
         )
@@ -472,6 +478,7 @@ def _pytree_gmres(
     b: PyTree,
     x0: PyTree,
     precond: MatVec,
+    inner_product: InnerProduct,
     restart: int,
     tolerance: jax.Array,
     max_restarts: int,
@@ -487,15 +494,20 @@ def _pytree_gmres(
 
     def body_fun(state):
         x, residual, _, iterations, cycles = state
-        residual_norm = _tree_norm(residual)
+        residual_norm = _tree_norm(residual, inner_product)
         correction, used = _pytree_fgmres_cycle(
-            matvec, precond, residual, residual_norm, tolerance, restart, dtype
+            matvec, precond, inner_product, residual, residual_norm,
+            tolerance, restart, dtype
         )
         x = _tree_add_scaled(x, 1.0, correction)
         residual = _tree_sub(b, matvec(x))
-        return x, residual, _tree_norm(residual), iterations + used, cycles + 1
+        return (x, residual, _tree_norm(residual, inner_product),
+                iterations + used, cycles + 1)
 
-    initial = (x0, residual, _tree_norm(residual), jnp.int32(0), jnp.int32(0))
+    initial = (
+        x0, residual, _tree_norm(residual, inner_product),
+        jnp.int32(0), jnp.int32(0),
+    )
     x, _, residual_norm, iterations, _ = lax.while_loop(cond_fun, body_fun, initial)
     return KrylovSolution(x, residual_norm, iterations, residual_norm <= tolerance, None)
 
@@ -506,6 +518,7 @@ def gmres(
     *,
     x0: PyTree | None = None,
     precond: MatVec | None = None,
+    inner_product: InnerProduct | None = None,
     restart: int = 30,
     rtol: float = 1e-8,
     atol: float = 0.0,
@@ -528,6 +541,9 @@ def gmres(
             identity). May be flexible, i.e. nonlinear or changing between
             inner steps — the update uses the stored preconditioned
             vectors.
+        inner_product: optional ``(left, right) -> scalar`` product used for
+            PyTree Arnoldi projections and norms. Defaults to the Euclidean
+            product. Supplying it also selects the PyTree path for array inputs.
         restart: static Arnoldi cycle size ``m``.
         rtol: relative tolerance on ``||b||``.
         atol: absolute tolerance floor.
@@ -536,7 +552,8 @@ def gmres(
     Returns:
         A :class:`KrylovSolution` with ``recycle=None``.
     """
-    if jax.tree.structure(b) != jax.tree.structure(0) or jnp.ndim(b) == 0:
+    if (inner_product is not None or jax.tree.structure(b) != jax.tree.structure(0)
+            or jnp.ndim(b) == 0):
         b = jax.tree.map(jnp.asarray, b)
         structure = jax.tree.structure(b)
         leaves = jax.tree.leaves(b)
@@ -555,9 +572,11 @@ def gmres(
         else:
             x0 = jax.tree.map(lambda x: jnp.asarray(x, dtype), x0)
         precond = _identity if precond is None else precond
-        tol = jnp.maximum(atol, rtol * _tree_norm(b))
+        inner_product = _tree_dot if inner_product is None else inner_product
+        tol = jnp.maximum(atol, rtol * _tree_norm(b, inner_product))
         return _pytree_gmres(
-            matvec, b, x0, precond, restart, tol, max_restarts, dtype, zero_initial
+            matvec, b, x0, precond, inner_product, restart, tol,
+            max_restarts, dtype, zero_initial
         )
 
     b = jnp.asarray(b)
