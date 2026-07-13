@@ -141,6 +141,11 @@ def test_pytree_gmres_validates_tree_structure_and_dtype():
         gmres(lambda x: x, (jnp.ones(2), jnp.ones(1, dtype=jnp.complex64)))
 
 
+def test_scalar_gmres():
+    solution = gmres(lambda x: 2 * x, jnp.asarray(4.0), rtol=1.0e-12)
+    assert np.asarray(solution.x) == pytest.approx(2.0)
+
+
 def test_exact_inverse_preconditioner():
     a, b = random_system(80, seed=3)
     a_inv = jnp.asarray(np.linalg.inv(np.asarray(a)))

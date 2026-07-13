@@ -536,7 +536,7 @@ def gmres(
     Returns:
         A :class:`KrylovSolution` with ``recycle=None``.
     """
-    if jax.tree.structure(b) != jax.tree.structure(0):
+    if jax.tree.structure(b) != jax.tree.structure(0) or jnp.ndim(b) == 0:
         b = jax.tree.map(jnp.asarray, b)
         structure = jax.tree.structure(b)
         leaves = jax.tree.leaves(b)
