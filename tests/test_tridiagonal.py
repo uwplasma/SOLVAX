@@ -11,7 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from solvax import tridiagonal_solve
+from solvax import cyclic_tridiagonal_solve, tridiagonal_solve
 
 jax.config.update("jax_enable_x64", True)
 
@@ -46,6 +46,22 @@ def dense_solve(lower, diag, upper, rhs):
         a = np.diag(diag[(slice(None), *idx)])
         a += np.diag(upper[(slice(None), *idx)][:-1], 1)
         a += np.diag(lower[(slice(None), *idx)][1:], -1)
+        b = rhs[(slice(None), *idx)]
+        out[(slice(None), *idx)] = np.linalg.solve(a, b.reshape(n, -1)).reshape(b.shape)
+    return out
+
+
+def dense_cyclic_solve(lower, diag, upper, rhs):
+    """Dense reference including the two periodic corner coefficients."""
+    lower, diag, upper, rhs = map(np.asarray, (lower, diag, upper, rhs))
+    out = np.zeros_like(rhs)
+    n = diag.shape[0]
+    for idx in np.ndindex(*diag.shape[1:]):
+        a = np.diag(diag[(slice(None), *idx)])
+        a += np.diag(upper[(slice(None), *idx)][:-1], 1)
+        a += np.diag(lower[(slice(None), *idx)][1:], -1)
+        a[0, -1] = lower[(0, *idx)]
+        a[-1, 0] = upper[(-1, *idx)]
         b = rhs[(slice(None), *idx)]
         out[(slice(None), *idx)] = np.linalg.solve(a, b.reshape(n, -1)).reshape(b.shape)
     return out
@@ -171,3 +187,43 @@ def test_multiple_field_axes_solved_together():
     # Cross-check one field slice against a fresh single-field solve.
     x_slice = tridiagonal_solve(lower, diag, upper, rhs[..., 1, 2], method="thomas")
     assert np.allclose(np.asarray(x[..., 1, 2]), np.asarray(x_slice), atol=1e-12)
+
+
+@pytest.mark.parametrize("method", ["thomas", "lax", "auto"])
+@pytest.mark.parametrize("columns,n_fields", [((), None), ((3,), None), ((2,), 4)])
+def test_cyclic_matches_dense(method, columns, n_fields):
+    lower, diag, upper, rhs = make_tridiag(12, columns, n_fields, seed=11)
+    x = cyclic_tridiagonal_solve(lower, diag, upper, rhs, method=method)
+    assert x.shape == rhs.shape
+    assert np.allclose(np.asarray(x), dense_cyclic_solve(lower, diag, upper, rhs), atol=1e-10)
+
+
+def test_cyclic_jit_vmap_and_gradient():
+    systems = [make_tridiag(9, (), None, seed=seed) for seed in range(3)]
+    stacked = [jnp.stack(items) for items in zip(*systems, strict=True)]
+    solve = jax.jit(
+        jax.vmap(lambda lo, di, up, b: cyclic_tridiagonal_solve(lo, di, up, b, method="thomas"))
+    )
+    result = solve(*stacked)
+    for index, system in enumerate(systems):
+        assert np.allclose(np.asarray(result[index]), dense_cyclic_solve(*system), atol=1e-10)
+
+    lower, diag, upper, rhs = systems[0]
+
+    def loss(d):
+        return jnp.sum(cyclic_tridiagonal_solve(lower, d, upper, rhs) ** 2)
+
+    gradient = jax.grad(loss)(diag)
+    step = 1e-6
+    perturbation = jnp.zeros_like(diag).at[4].set(step)
+    finite_difference = (loss(diag + perturbation) - loss(diag - perturbation)) / (2 * step)
+    assert gradient[4] == pytest.approx(finite_difference, rel=1e-5)
+
+
+def test_cyclic_rejects_ambiguous_or_mismatched_shapes():
+    lower, diag, upper, rhs = make_tridiag(2)
+    with pytest.raises(ValueError, match="at least three"):
+        cyclic_tridiagonal_solve(lower, diag, upper, rhs)
+    lower, diag, upper, _ = make_tridiag(4, (2,))
+    with pytest.raises(ValueError, match="must begin"):
+        cyclic_tridiagonal_solve(lower, diag, upper, jnp.ones((4, 3)))

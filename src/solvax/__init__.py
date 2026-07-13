@@ -65,7 +65,7 @@ from solvax.precond import (
     p_multigrid,
 )
 from solvax.refine import as_low_precision, iterative_refinement
-from solvax.tridiagonal import tridiagonal_solve
+from solvax.tridiagonal import cyclic_tridiagonal_solve, tridiagonal_solve
 
 __version__ = "0.7.3"
 
@@ -89,6 +89,7 @@ __all__ = [
     "block_thomas_truncated_fn_with_residual",
     "mixed_precision_block_thomas",
     "tridiagonal_solve",
+    "cyclic_tridiagonal_solve",
     "FixedPointSolution",
     "affine_fixed_point_gmres",
     "aitken_fixed_point",
