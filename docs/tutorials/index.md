@@ -9,6 +9,7 @@ adapt to transport, kinetic, equilibrium, and PDE applications.
 
 structured_system
 matrix_free_pde
+newton_krylov
 differentiable_solve
 ```
 
@@ -18,6 +19,7 @@ differentiable_solve
 |---|---|
 | {doc}`structured_system` | storage, factor reuse, multiple RHS, residual checks, transpose solve |
 | {doc}`matrix_free_pde` | operator action, structured principal-part preconditioner, FGMRES diagnostics |
+| {doc}`newton_krylov` | Jacobian-free Newton-Krylov, structured Jacobian preconditioner, nonlinear/linear convergence flags |
 | {doc}`differentiable_solve` | primal/adjoint separation, implicit VJP, finite-difference validation |
 
 The repository also contains focused scripts in `examples/`, one per major

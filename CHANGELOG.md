@@ -1,9 +1,25 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 - 2026-07-13
 
+- Extended FGMRES beyond flat arrays: `gmres` now solves scalar, array, and
+  arbitrary matching-pytree operands through a leaf-wise Arnoldi basis (no
+  `ravel_pytree`, preserving leaf-level sharding), and accepts an optional
+  `inner_product` callback for weighted or mesh-wide (distributed) products.
+  The optimized flat-array and GCROT paths are unchanged.
+- Added `newton_krylov`, a matrix-free Jacobian-free Newton-Krylov (JFNK) root
+  solver. Jacobian-vector products come from `jax.linearize`; each correction
+  is solved by SOLVAX FGMRES. It supports array or pytree states, right
+  preconditioning, custom inner products, an independent nonlinear norm, and
+  reports separate nonlinear and linear convergence flags.
+- Added `affine_fixed_point_gmres`, which solves an affine fixed-point map
+  `G(x)=Lx+c` as the matrix-free system `(I-L)x=c`, and gave `anderson_mixing`
+  optional spectral condition filtering of ill-conditioned histories.
 - Added a batched, differentiable cyclic-tridiagonal solve that retains the
-  hardware-aware Thomas/cuSPARSE backend through an exact rank-one correction.
+  hardware-aware Thomas/cuSPARSE backend through an exact rank-one
+  (Sherman-Morrison) correction.
+- `lu_solve_banded` now promotes a real right-hand side against complex factors
+  instead of silently truncating the imaginary part.
 
 ## 0.7.0 - 2026-07-12
 

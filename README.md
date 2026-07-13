@@ -71,10 +71,12 @@ Everything is differentiable (`jax.grad` through the solve) and batchable
 | `solvax.precond` | Jacobi/block-Jacobi, coarse-operator LU, alternating-direction line smoothers, p-multigrid V-cycles, nearest-Kronecker, mixed-precision wrappers |
 | `solvax.direct` | Block-tridiagonal Schur elimination (block Thomas): full, factor/solve split, truncated-storage mode |
 | `solvax.banded` | Non-pivoted banded LU with row equilibration + static pivoting; periodic variant via the Woodbury capacitance trick |
-| `solvax.krylov` | Flexible restarted GMRES (CGS2 + Givens) and GCROT-style Krylov subspace recycling for parameter continuation |
+| `solvax.tridiagonal` | Batched scalar tridiagonal solve (reproducible Thomas / fused cuSPARSE backend) and periodic (cyclic) systems via a Sherman--Morrison correction |
+| `solvax.krylov` | Flexible restarted GMRES (CGS2 + Givens) over arrays, scalars and arbitrary pytrees with optional custom inner products, and GCROT-style Krylov subspace recycling for parameter continuation |
 | `solvax.pcg` | Matrix-free pytree PCG with preconditioning, fixed-shape residual history, and explicit convergence/breakdown status |
-| `solvax.fixed_point` | Safeguarded Aitken, bounded-memory Anderson, and matrix-free affine fixed-point FGMRES |
-| `solvax.implicit` | Implicit-function-theorem `linear_solve` and `root_solve` — gradients cost one extra (transposed) solve |
+| `solvax.fixed_point` | Safeguarded Aitken, bounded-memory (condition-filtered) Anderson, and matrix-free affine fixed-point FGMRES |
+| `solvax.implicit` | Matrix-free `newton_krylov` (JFNK) plus implicit-function-theorem `linear_solve` and `root_solve` — gradients cost one extra (transposed) solve |
+| `solvax.autodiff` | Bounded-memory chunked forward/reverse Jacobians (`chunked_jacfwd`/`jacrev`/`jacobian`) with automatic chunk sizing |
 | `solvax.refine` | Mixed-precision iterative refinement (float32 factor, float64 residuals) |
 | `solvax.native` | Host-side SuperLU bridge (non-differentiable, import-guarded) |
 
@@ -87,6 +89,16 @@ batched-LU benchmarks.
 # Preconditioned, recycled Krylov across a parameter scan:
 sol = sx.gcrot(matvec, b, precond=coarse_inverse, m=50, k=10)
 sol2 = sx.gcrot(matvec2, b2, precond=coarse_inverse, recycle=sol.recycle)
+
+# Matrix-free Newton-Krylov (JFNK): Jacobian-vector products via jax.linearize,
+# each correction solved by FGMRES over an array or structured pytree state.
+root = sx.newton_krylov(residual_fn, x0, precond=approx_inverse, rtol=1e-8)
+
+# Weakly contractive affine coupling map G(x) = L x + c, solved as (I - L) x = c:
+fixed = sx.affine_fixed_point_gmres(coupling_map, x0, restart=20)
+
+# Periodic (cyclic) tridiagonal line, corners in lower[0] and upper[-1]:
+x = sx.cyclic_tridiagonal_solve(lower, diag, upper, rhs)
 
 # Differentiable solve wrapping any solver:
 x = sx.linear_solve(matvec, b, solver=lambda mv, rhs: sx.gmres(mv, rhs).x)

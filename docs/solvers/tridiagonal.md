@@ -17,7 +17,8 @@ x = sx.tridiagonal_solve(lower, diag, upper, rhs, method="auto")
 For a periodic line, retain the two corner coefficients in `lower[0]` and
 `upper[-1]` and use `cyclic_tridiagonal_solve`. It applies an exact
 Sherman--Morrison correction through one tridiagonal call with two right-hand
-sides, so the same fused accelerator backend remains available.
+sides, so the same fused accelerator backend remains available. Its derivation
+is given in the cyclic-systems section below.
 
 If `rhs.shape == (n, n_columns, n_fields)`, one call solves
 `n_columns * n_fields` systems. `lower`, `diag`, and `upper` may carry matching
@@ -65,9 +66,54 @@ not necessarily bit for bit.
 
 ## Boundary entries
 
-`lower[0]` and `upper[-1]` do not correspond to matrix entries. Set them to
-zero for clarity, although the algorithms ignore their out-of-domain role.
-Periodic corner coupling is not represented; use periodic banded LU instead.
+For `tridiagonal_solve`, `lower[0]` and `upper[-1]` do not correspond to matrix
+entries. Set them to zero for clarity, although the algorithm ignores their
+out-of-domain role. `cyclic_tridiagonal_solve` reuses those two slots to carry
+the periodic corner coupling (see below).
+
+## Cyclic (periodic) systems
+
+A periodic line couples the two endpoints,
+
+$$
+d_0x_0+u_0x_1+\beta x_{n-1}=b_0,\qquad
+\alpha x_0+\ell_{n-1}x_{n-2}+d_{n-1}x_{n-1}=b_{n-1},
+$$
+
+with the corner entries stored as $\beta=$ `lower[0]` and $\alpha=$
+`upper[-1]`. The matrix is tridiagonal apart from those two corners, so it is a
+rank-one update of an ordinary tridiagonal matrix
+{cite}`press2007,golub2013`. Pick any $\gamma\neq0$ and write
+
+$$
+A=T+uv^{H},\qquad
+u=\gamma e_0+\alpha e_{n-1},\qquad
+v=e_0+\tfrac{\beta}{\gamma}e_{n-1},
+$$
+
+where $T$ equals $A$ with the corners removed and the endpoints shifted,
+$T_{00}=d_0-\gamma$ and $T_{n-1,n-1}=d_{n-1}-\alpha\beta/\gamma$. SOLVAX takes
+$\gamma=-d_0$ (falling back to $\gamma=-1$ when $d_0$ underflows) so the first
+pivot stays well scaled. The Sherman--Morrison identity then gives the solution
+from two ordinary tridiagonal solves $Ty=b$ and $Tz=u$,
+
+$$
+x=y-\frac{v^{H}y}{1+v^{H}z}\,z .
+$$
+
+Both right-hand sides are stacked into a single `tridiagonal_solve` call, so a
+periodic line costs one tridiagonal solve with two columns and inherits the
+same reproducible-Thomas / fused-cuSPARSE `method` selection. The construction
+is exact (not iterative) and fully differentiable.
+
+```python
+x = sx.cyclic_tridiagonal_solve(lower, diag, upper, rhs, method="auto")
+```
+
+Trailing axes of `rhs` are extra right-hand sides solved together, exactly as
+for `tridiagonal_solve`. Use this instead of periodic banded LU when the band
+is a single sub- and superdiagonal; for wider periodic bands use
+{func}`solvax.banded.lu_solve_banded_periodic`.
 
 ## Example: many field-line columns
 
@@ -124,4 +170,5 @@ gradient = jax.grad(loss)(diag)
 - {func}`solvax.tridiagonal.tridiagonal_solve`
 - {func}`solvax.tridiagonal.cyclic_tridiagonal_solve`
 
-Runnable counterpart: `examples/14_tridiagonal_solve.py`.
+Runnable counterparts: `examples/14_tridiagonal_solve.py` and
+`examples/21_cyclic_tridiagonal.py`.
