@@ -29,6 +29,8 @@ or the structured direct solves in ``solvax.direct``).
 
 References
 ----------
+- D. A. Knoll & D. E. Keyes, *Jacobian-free Newton--Krylov methods: a
+  survey of approaches and applications*, J. Comput. Phys. 193, 357 (2004).
 - M. Blondel et al., *Efficient and Modular Implicit Differentiation*,
   NeurIPS 2022, https://arxiv.org/abs/2105.15183.
 - C. S. Skene & K. J. Burns, *Fast adjoints for kinetic solvers*,
@@ -41,9 +43,153 @@ References
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
+
+from solvax.krylov import gmres
+
+PyTree = Any
+InnerProduct = Callable[[PyTree, PyTree], jax.Array]
+
+
+class NewtonKrylovSolution(NamedTuple):
+    """Result of :func:`newton_krylov`."""
+
+    x: PyTree
+    residual_norm: jax.Array
+    newton_iterations: jax.Array
+    linear_iterations: jax.Array
+    converged: jax.Array
+    linear_converged: jax.Array
+
+
+def _tree_dot(left: PyTree, right: PyTree) -> jax.Array:
+    products = jax.tree.leaves(jax.tree.map(jnp.vdot, left, right))
+    return sum(products[1:], products[0])
+
+
+def _tree_norm(value: PyTree, inner_product: InnerProduct) -> jax.Array:
+    return jnp.sqrt(jnp.maximum(jnp.real(inner_product(value, value)), 0.0))
+
+
+def newton_krylov(
+    residual_fn: Callable[[PyTree], PyTree],
+    x0: PyTree,
+    *,
+    precond: Callable[[PyTree], PyTree] | None = None,
+    inner_product: InnerProduct | None = None,
+    norm: Callable[[PyTree], jax.Array] | None = None,
+    rtol: float = 1e-8,
+    atol: float = 0.0,
+    max_steps: int = 20,
+    linear_restart: int = 30,
+    linear_rtol: float = 0.1,
+    linear_atol: float = 0.0,
+    linear_max_restarts: int = 10,
+) -> NewtonKrylovSolution:
+    """Solve a nonlinear system with matrix-free Newton--GMRES.
+
+    Jacobian-vector products are obtained from :func:`jax.linearize`; the
+    Jacobian is never materialised. The nonlinear iteration stops when
+
+    ``norm(residual) <= max(atol, rtol * norm(initial_residual))``.
+
+    Args:
+        residual_fn: nonlinear residual with the same PyTree input/output structure.
+        x0: initial iterate.
+        precond: optional right preconditioner passed to GMRES.
+        inner_product: optional GMRES inner product; useful for weighted or
+            distributed PyTrees.
+        norm: optional nonlinear residual norm. Defaults to the norm induced by
+            ``inner_product``, or the Euclidean PyTree norm when both are omitted.
+        rtol: nonlinear relative residual tolerance.
+        atol: nonlinear absolute residual tolerance.
+        max_steps: maximum Newton updates.
+        linear_restart: GMRES Arnoldi cycle size.
+        linear_rtol: GMRES relative residual tolerance for each Newton update.
+        linear_atol: GMRES absolute residual tolerance.
+        linear_max_restarts: maximum GMRES restart cycles per Newton update.
+
+    Returns:
+        A :class:`NewtonKrylovSolution` with the final iterate and diagnostics.
+    """
+    x0 = jax.tree.map(jnp.asarray, x0)
+    inner_product = _tree_dot if inner_product is None else inner_product
+    norm = (lambda value: _tree_norm(value, inner_product)) if norm is None else norm
+    residual0 = residual_fn(x0)
+    residual_norm0 = norm(residual0)
+    tolerance = jnp.maximum(atol, rtol * residual_norm0)
+
+    def cond_fun(state):
+        return ~state[-1]
+
+    def body_fun(state):
+        x, _, newton_iterations, linear_iterations, linear_converged, _ = state
+        residual, jvp = jax.linearize(residual_fn, x)
+        residual_norm = norm(residual)
+        update = (
+            (residual_norm > tolerance)
+            & (newton_iterations < max_steps)
+            & linear_converged
+        )
+
+        def update_fn(_):
+            linear_solution = gmres(
+                jvp,
+                jax.tree.map(jnp.negative, residual),
+                precond=precond,
+                inner_product=inner_product,
+                restart=linear_restart,
+                rtol=linear_rtol,
+                atol=linear_atol,
+                max_restarts=linear_max_restarts,
+            )
+            next_x = jax.tree.map(
+                lambda value, step: value + step, x, linear_solution.x
+            )
+            return (
+                next_x,
+                jnp.asarray(jnp.inf, residual_norm.dtype),
+                newton_iterations + 1,
+                linear_iterations + linear_solution.iterations,
+                linear_converged & linear_solution.converged,
+                jnp.array(False),
+            )
+
+        def finish_fn(_):
+            return (
+                x,
+                residual_norm,
+                newton_iterations,
+                linear_iterations,
+                linear_converged,
+                jnp.array(True),
+            )
+
+        return jax.lax.cond(update, update_fn, finish_fn, operand=None)
+
+    finished0 = (residual_norm0 <= tolerance) | (max_steps == 0)
+    initial = (
+        x0,
+        residual_norm0,
+        jnp.int32(0),
+        jnp.int32(0),
+        jnp.array(True),
+        finished0,
+    )
+    x, residual_norm, newton_iterations, linear_iterations, linear_converged, _ = (
+        jax.lax.while_loop(cond_fun, body_fun, initial)
+    )
+    return NewtonKrylovSolution(
+        x,
+        residual_norm,
+        newton_iterations,
+        linear_iterations,
+        residual_norm <= tolerance,
+        linear_converged,
+    )
 
 
 def linear_solve(
