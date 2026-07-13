@@ -111,10 +111,11 @@ def tridiagonal_solve(
         ValueError: if ``method`` is not one of ``"auto"``, ``"thomas"``,
             ``"lax"``.
     """
-    lower = jnp.asarray(lower)
-    diag = jnp.asarray(diag)
-    upper = jnp.asarray(upper)
-    rhs = jnp.asarray(rhs)
+    dtype = jnp.result_type(lower, diag, upper, rhs)
+    lower = jnp.asarray(lower, dtype=dtype)
+    diag = jnp.asarray(diag, dtype=dtype)
+    upper = jnp.asarray(upper, dtype=dtype)
+    rhs = jnp.asarray(rhs, dtype=dtype)
     n_rows = int(rhs.shape[0])
     if n_rows == 0:
         return rhs

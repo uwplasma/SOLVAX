@@ -108,6 +108,22 @@ def test_lax_matches_thomas():
     assert np.allclose(np.asarray(x_lax), np.asarray(x_thomas), atol=1e-10)
 
 
+@pytest.mark.parametrize("method", ["thomas", "lax", "auto"])
+def test_complex_rhs_promotes_real_bands_and_is_differentiable(method):
+    lower, diag, upper, rhs = make_tridiag(12, (3,), 2, seed=12)
+    rhs = rhs + 1j * jnp.roll(rhs, 1, axis=0)
+    solve = jax.jit(
+        lambda value: tridiagonal_solve(lower, diag, upper, value, method=method)
+    )
+    solved = solve(rhs)
+    assert solved == pytest.approx(dense_solve(lower, diag, upper, rhs), abs=1.0e-10)
+
+    value, gradient = jax.value_and_grad(
+        lambda scale: jnp.real(jnp.vdot(solve(scale * rhs), solve(scale * rhs)))
+    )(jnp.asarray(1.0))
+    assert gradient == pytest.approx(2.0 * value, rel=1.0e-10)
+
+
 @pytest.mark.parametrize("n", [1, 2])
 def test_small_systems_use_thomas(n):
     # cuSPARSE needs n >= 3; auto/lax on tiny systems fall back to Thomas.
