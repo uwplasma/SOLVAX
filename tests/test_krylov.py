@@ -133,6 +133,22 @@ def test_complex_pytree_gmres_matches_dense_under_jit():
     assert float(solution.residual_norm) <= 1e-11 * float(jnp.linalg.norm(rhs))
 
 
+def test_gmres_accepts_custom_inner_product():
+    matrix, rhs = random_complex_system(7, seed=25)
+    weights = jnp.linspace(1.0, 2.0, rhs.size)
+    def inner_product(left, right):
+        return jnp.vdot(left, weights * right)
+    solution = jax.jit(
+        lambda value: gmres(
+            lambda vector: matrix @ vector, value, restart=7,
+            max_restarts=2, rtol=1e-11, inner_product=inner_product,
+        )
+    )(rhs)
+    reference = np.linalg.solve(np.asarray(matrix), np.asarray(rhs))
+    assert bool(solution.converged)
+    assert np.asarray(solution.x) == pytest.approx(reference, rel=1e-9, abs=1e-9)
+
+
 def test_pytree_gmres_validates_tree_structure_and_dtype():
     rhs = (jnp.ones(2), jnp.ones(1))
     with pytest.raises(ValueError, match="identical pytree structure"):
