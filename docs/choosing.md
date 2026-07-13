@@ -8,6 +8,7 @@ requirements. No solver is uniformly best.
 | Problem structure | First choice | Useful alternative | Main caveat |
 |---|---|---|---|
 | Scalar tridiagonal, many columns | `tridiagonal_solve` | banded LU | no pivoting; requires a stable tridiagonal system |
+| Scalar periodic (cyclic) tridiagonal | `cyclic_tridiagonal_solve` | periodic banded LU | corner coupling limited to one sub- and superdiagonal |
 | Dense block-tridiagonal | block Thomas | GMRES + block-Thomas preconditioner | block elimination assumes nonsingular Schur complements |
 | Narrow nonperiodic band | banded LU | GMRES + banded preconditioner | static rather than dynamic pivoting |
 | Narrow periodic band | periodic banded LU | GMRES with core inverse | low-rank corner model must match the operator |
@@ -15,6 +16,8 @@ requirements. No solver is uniformly best.
 | General nonsymmetric or indefinite | FGMRES | native SuperLU on CPU | memory grows with restart size |
 | Slowly varying sequence | GCROT | warm-started FGMRES | recycle storage and startup QR cost |
 | Contractive nonlinear partitioned map | Aitken | Anderson mixing | neither method makes a noncontractive map globally convergent |
+| Affine (linearized) fixed-point map | `affine_fixed_point_gmres` | Anderson mixing | mapping must be affine over the trial space |
+| Large nonlinear implicit system | `newton_krylov` | Anderson mixing | Jacobian-free, but needs a good Jacobian preconditioner for mesh independence |
 | General sparse CPU solve outside JAX | native SuperLU | FGMRES | no `jit`, `vmap`, or `grad` |
 
 ## Direct versus iterative
