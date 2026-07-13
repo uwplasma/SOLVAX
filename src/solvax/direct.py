@@ -438,13 +438,13 @@ def block_thomas_truncated(
     return jnp.concatenate([x0[None], xs], axis=0)
 
 
-def block_thomas_truncated_fn(
+def _block_thomas_truncated_fn_state(
     block_fn: Callable[[jax.Array], tuple[jax.Array, jax.Array, jax.Array]],
     n_blocks: int,
     rhs_low: jax.Array,
     keep_lowest: int,
-) -> jax.Array:
-    """Truncated block-tridiagonal solve with on-the-fly block assembly.
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Return a generated truncated solution and retained elimination state.
 
     Identical semantics to :func:`block_thomas_truncated`, but the blocks are
     produced per index by ``block_fn(k) -> (lower_k, diag_k, upper_k)`` inside
@@ -527,4 +527,70 @@ def block_thomas_truncated_fn(
     x0 = lu_solve((lus[0], pivs[0]), sigmas[0])
     inputs_up = (lus[1:], pivs[1:], ls[1:], sigmas[1:])
     _, xs = jax.lax.scan(up_step, x0, inputs_up)
-    return jnp.concatenate([x0[None], xs], axis=0)
+    solution = jnp.concatenate([x0[None], xs], axis=0)
+    return solution, lus, pivs, sigmas, ls
+
+
+def block_thomas_truncated_fn(
+    block_fn: Callable[[jax.Array], tuple[jax.Array, jax.Array, jax.Array]],
+    n_blocks: int,
+    rhs_low: jax.Array,
+    keep_lowest: int,
+) -> jax.Array:
+    """Truncated block-tridiagonal solve with on-the-fly block assembly.
+
+    The full band arrays are never materialized, and each block index is
+    assembled once. See :func:`block_thomas_truncated_fn_with_residual` when an
+    algebraic residual of the retained Schur system is also required.
+    """
+    solution, _, _, _, _ = _block_thomas_truncated_fn_state(
+        block_fn, n_blocks, rhs_low, keep_lowest
+    )
+    return solution
+
+
+def block_thomas_truncated_fn_with_residual(
+    block_fn: Callable[[jax.Array], tuple[jax.Array, jax.Array, jax.Array]],
+    n_blocks: int,
+    rhs_low: jax.Array,
+    keep_lowest: int,
+    *,
+    residual_rhs_index: int | None = None,
+) -> tuple[jax.Array, jax.Array]:
+    """Return the generated truncated solution and its Schur-system RMS residual.
+
+    The residual is evaluated from the retained pivoted LU factors as
+    ``L @ (U @ x) - P @ rhs``. It therefore includes the eliminated high-mode
+    tail without reconstructing another solution block or materializing the
+    original diagonal band.
+    """
+    solution, lus, pivs, sigmas, lowers = _block_thomas_truncated_fn_state(
+        block_fn, n_blocks, rhs_low, keep_lowest
+    )
+    effective_rhs = sigmas
+    effective_rhs = effective_rhs.at[1:].add(
+        -jnp.einsum("kij,kj...->ki...", lowers[1:], solution[:-1])
+    )
+
+    if residual_rhs_index is not None:
+        if rhs_low.ndim != 3:
+            raise ValueError("residual_rhs_index requires multiple right-hand sides")
+        if not 0 <= residual_rhs_index < rhs_low.shape[-1]:
+            raise ValueError("residual_rhs_index is out of range")
+        residual_solution = solution[..., residual_rhs_index]
+        residual_rhs = effective_rhs[..., residual_rhs_index]
+    else:
+        residual_solution = solution
+        residual_rhs = effective_rhs
+
+    def factor_residual(lu, piv, value, rhs):
+        size = lu.shape[0]
+        lower = jnp.tril(lu, -1) + jnp.eye(size, dtype=lu.dtype)
+        upper = jnp.triu(lu)
+        permutation = jax.lax.linalg.lu_pivots_to_permutation(piv, size)
+        return lower @ (upper @ value) - rhs[permutation]
+
+    residual = jax.vmap(factor_residual)(
+        lus, pivs, residual_solution, residual_rhs
+    )
+    return solution, jnp.linalg.norm(residual) / jnp.sqrt(residual.size)
