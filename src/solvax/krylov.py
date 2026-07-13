@@ -479,6 +479,7 @@ def gmres_staged(
     atol: float = 0.0,
     max_restarts: int = 50,
     fixed_cycles: bool = False,
+    operator_sharding=None,
 ) -> KrylovSolution:
     """Host-stage FGMRES around opaque compiled operator call boundaries.
 
@@ -488,6 +489,10 @@ def gmres_staged(
     are already compiled multi-device kernels that would be prohibitively
     expensive to inline into a monolithic XLA program.
 
+    Pass ``operator_sharding`` when opaque actions require a different device
+    mesh from ``b``. Inputs are placed on that sharding for each action and
+    exact outputs return to the right-hand side's sharding for Arnoldi work.
+
     By default the host checks the true residual once per restart and exits
     early. Set ``fixed_cycles=True`` when tracing the solver through
     :func:`solvax.linear_solve`; all cycles then execute and reverse-mode uses
@@ -495,11 +500,25 @@ def gmres_staged(
     """
 
     b = jnp.asarray(b)
-    x = jnp.zeros_like(b) if x0 is None else jnp.asarray(x0)
+    state_sharding = getattr(b, "sharding", None)
+
+    def place_on_state(value):
+        return (
+            value
+            if state_sharding is None
+            else jax.device_put(value, state_sharding)
+        )
+
+    def apply_staged(action, value):
+        if operator_sharding is not None:
+            value = jax.device_put(value, operator_sharding)
+        return place_on_state(action(value))
+
+    x = jnp.zeros_like(b) if x0 is None else place_on_state(jnp.asarray(x0))
     precond = _identity if precond is None else precond
     tol = jnp.maximum(atol, rtol * jnp.linalg.norm(b))
     total_iterations = jnp.int32(0)
-    residual = b - matvec(x)
+    residual = b - apply_staged(matvec, x)
     residual_norm = jnp.linalg.norm(residual)
 
     for _ in range(max_restarts):
@@ -521,8 +540,8 @@ def gmres_staged(
             if not fixed_cycles and not bool(active):
                 break
             was_active = active
-            z = precond(V[step])
-            w = matvec(z)
+            z = apply_staged(precond, V[step])
+            w = apply_staged(matvec, z)
             V, Z, R, cs, sn, g, active = _staged_arnoldi_step(
                 jnp.int32(step), active, w, z, V, Z, R, cs, sn, g, tol
             )
@@ -534,7 +553,7 @@ def gmres_staged(
             triangular, jnp.where(used, g[:restart], 0.0), lower=False
         )
         x = x + coefficients @ Z
-        residual = b - matvec(x)
+        residual = b - apply_staged(matvec, x)
         residual_norm = jnp.linalg.norm(residual)
         total_iterations = total_iterations + cycle_iterations
         if not fixed_cycles and bool(residual_norm <= tol):

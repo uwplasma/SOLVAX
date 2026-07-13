@@ -119,6 +119,7 @@ solution = sx.gmres_staged(
     matvec,
     b,
     precond=precond,
+    operator_sharding=replicated,  # optional multi-device action placement
     restart=24,
     max_restarts=8,
     rtol=1e-10,
@@ -129,7 +130,9 @@ This boundary is intended for costly nested or sharded kernels, not small
 operators where host dispatch can dominate. The default checks the true
 residual between restart cycles. Use `fixed_cycles=True` only inside
 {func}`solvax.implicit.linear_solve`; it avoids Python convergence branching
-while implicit differentiation supplies the reverse-mode rule.
+while implicit differentiation supplies the reverse-mode rule. When
+`operator_sharding` is set, Krylov vectors stay on the right-hand side's
+original sharding and visit the operator mesh only for opaque actions.
 
 ## GCROT-style recycling
 
