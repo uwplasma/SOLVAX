@@ -14,6 +14,11 @@ independent right-hand side or coefficient batch.
 x = sx.tridiagonal_solve(lower, diag, upper, rhs, method="auto")
 ```
 
+For a periodic line, retain the two corner coefficients in `lower[0]` and
+`upper[-1]` and use `cyclic_tridiagonal_solve`. It applies an exact
+Sherman--Morrison correction through one tridiagonal call with two right-hand
+sides, so the same fused accelerator backend remains available.
+
 If `rhs.shape == (n, n_columns, n_fields)`, one call solves
 `n_columns * n_fields` systems. `lower`, `diag`, and `upper` may carry matching
 trailing batch axes and are broadcast across extra right-hand-side axes.
@@ -117,5 +122,6 @@ gradient = jax.grad(loss)(diag)
 ## API summary
 
 - {func}`solvax.tridiagonal.tridiagonal_solve`
+- {func}`solvax.tridiagonal.cyclic_tridiagonal_solve`
 
 Runnable counterpart: `examples/14_tridiagonal_solve.py`.

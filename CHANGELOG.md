@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Added a batched, differentiable cyclic-tridiagonal solve that retains the
+  hardware-aware Thomas/cuSPARSE backend through an exact rank-one correction.
+
 ## 0.7.0 - 2026-07-12
 
 - Added opt-in single-reduction PCG for sharded systems. Its algebraically
