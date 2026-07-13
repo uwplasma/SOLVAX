@@ -141,6 +141,19 @@ Each generated block index is assembled exactly once per solve. In the retained
 head, the Schur update and all right-hand-side updates share one multi-column LU
 solve. This matters when block assembly or dense triangular dispatch dominates.
 
+Request a tail-aware algebraic residual without reconstructing another block:
+
+```python
+x_low, residual_l2 = sx.block_thomas_truncated_fn_with_residual(
+    block_fn, n_blocks=N, rhs_low=rhs_low, keep_lowest=K,
+    residual_rhs_index=0,
+)
+```
+
+This evaluates the retained Schur equations from the pivoted LU factors. It
+includes the eliminated tail and does not materialize the diagonal band. Omit
+`residual_rhs_index` to combine all right-hand sides in one RMS diagnostic.
+
 ## Residual gate
 
 Validate a solve with an operator action independent of the factorization:
@@ -209,6 +222,7 @@ defect corrections recover accuracy when the conditioning permits. See
 - {func}`solvax.direct.block_thomas_solve`
 - {func}`solvax.direct.block_thomas_truncated`
 - {func}`solvax.direct.block_thomas_truncated_fn`
+- {func}`solvax.direct.block_thomas_truncated_fn_with_residual`
 - {func}`solvax.direct.mixed_precision_block_thomas`
 
 Runnable counterparts: `examples/01_block_tridiagonal_kinetic.py`,
