@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.1 - 2026-07-13
+
+- Added `solvax.elliptic`: a spectral Fourier--Helmholtz elliptic solve for
+  separable Helmholtz-type problems on a periodic axis and a bounded axis
+  (`build_fourier_helmholtz_operator`, `solve_fourier_helmholtz`,
+  `FourierHelmholtzOperator`). Fourier-transforms the periodic axis and solves
+  the remaining per-mode tridiagonal system in the bounded axis; `jit`/`grad`/
+  `vmap` transparent. This is the `lap phi = rhs` inversion used by reduced
+  drift-plane / vorticity models.
+
 ## 0.8.0 - 2026-07-13
 
 - Extended FGMRES beyond flat arrays: `gmres` now solves scalar, array, and
