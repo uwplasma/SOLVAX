@@ -476,9 +476,10 @@ def _pytree_gmres(
     tolerance: jax.Array,
     max_restarts: int,
     dtype: jnp.dtype,
+    zero_initial: bool,
 ):
     """Restarted FGMRES implementation for matching pytree operands."""
-    residual = _tree_sub(b, matvec(x0))
+    residual = b if zero_initial else _tree_sub(b, matvec(x0))
 
     def cond_fun(state):
         _, _, residual_norm, _, cycles = state
@@ -495,8 +496,7 @@ def _pytree_gmres(
         return x, residual, _tree_norm(residual), iterations + used, cycles + 1
 
     initial = (x0, residual, _tree_norm(residual), jnp.int32(0), jnp.int32(0))
-    x, _, _, iterations, _ = lax.while_loop(cond_fun, body_fun, initial)
-    residual_norm = _tree_norm(_tree_sub(b, matvec(x)))
+    x, _, residual_norm, iterations, _ = lax.while_loop(cond_fun, body_fun, initial)
     return KrylovSolution(x, residual_norm, iterations, residual_norm <= tolerance, None)
 
 
@@ -547,7 +547,8 @@ def gmres(
             leaf.dtype != dtype for leaf in leaves
         ):
             raise ValueError("pytree leaves must have one common inexact dtype")
-        if x0 is None:
+        zero_initial = x0 is None
+        if zero_initial:
             x0 = jax.tree.map(jnp.zeros_like, b)
         elif jax.tree.structure(x0) != structure:
             raise ValueError("x0 and b must have identical pytree structure")
@@ -556,7 +557,7 @@ def gmres(
         precond = _identity if precond is None else precond
         tol = jnp.maximum(atol, rtol * _tree_norm(b))
         return _pytree_gmres(
-            matvec, b, x0, precond, restart, tol, max_restarts, dtype
+            matvec, b, x0, precond, restart, tol, max_restarts, dtype, zero_initial
         )
 
     b = jnp.asarray(b)
