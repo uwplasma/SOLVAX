@@ -17,7 +17,7 @@ pip install "solvax[native]"
 Install a JAX accelerator build separately, following the JAX instructions for
 the target CUDA or TPU platform. SOLVAX does not select the JAX backend.
 
-The v0.7.1 wheel built from this tree is 54 KiB. Core dependencies are JAX and
+The v0.7.2 wheel built from this tree is 54 KiB. Core dependencies are JAX and
 Equinox; SciPy remains optional for the host-side native bridge. SOLVAX does
 not depend on a second linear-operator package, which keeps installation and
 operator ownership explicit.
