@@ -35,6 +35,11 @@ from solvax.direct import (
     block_tridiag_relative_residual,
     mixed_precision_block_thomas,
 )
+from solvax.elliptic import (
+    FourierHelmholtzOperator,
+    build_fourier_helmholtz_operator,
+    solve_fourier_helmholtz,
+)
 from solvax.fixed_point import (
     FixedPointSolution,
     affine_fixed_point_gmres,
@@ -67,7 +72,7 @@ from solvax.precond import (
 from solvax.refine import as_low_precision, iterative_refinement
 from solvax.tridiagonal import cyclic_tridiagonal_solve, tridiagonal_solve
 
-__version__ = "0.8.0"
+__version__ = "0.8.1"
 
 __all__ = [
     "BandedLUFactors",
@@ -88,6 +93,9 @@ __all__ = [
     "block_thomas_truncated_fn",
     "block_thomas_truncated_fn_with_residual",
     "mixed_precision_block_thomas",
+    "FourierHelmholtzOperator",
+    "build_fourier_helmholtz_operator",
+    "solve_fourier_helmholtz",
     "tridiagonal_solve",
     "cyclic_tridiagonal_solve",
     "FixedPointSolution",
