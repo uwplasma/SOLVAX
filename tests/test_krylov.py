@@ -136,7 +136,8 @@ def test_complex_pytree_gmres_matches_dense_under_jit():
 def test_gmres_accepts_custom_inner_product():
     matrix, rhs = random_complex_system(7, seed=25)
     weights = jnp.linspace(1.0, 2.0, rhs.size)
-    inner_product = lambda left, right: jnp.vdot(left, weights * right)
+    def inner_product(left, right):
+        return jnp.vdot(left, weights * right)
     solution = jax.jit(
         lambda value: gmres(
             lambda vector: matrix @ vector, value, restart=7,

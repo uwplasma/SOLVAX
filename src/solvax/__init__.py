@@ -37,6 +37,7 @@ from solvax.direct import (
 )
 from solvax.fixed_point import (
     FixedPointSolution,
+    affine_fixed_point_gmres,
     aitken_fixed_point,
     aitken_relaxation,
     anderson_mixing,
@@ -89,6 +90,7 @@ __all__ = [
     "mixed_precision_block_thomas",
     "tridiagonal_solve",
     "FixedPointSolution",
+    "affine_fixed_point_gmres",
     "aitken_fixed_point",
     "aitken_relaxation",
     "anderson_mixing",

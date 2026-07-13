@@ -13,7 +13,32 @@ r(x)=G(x)-x.
 $$
 
 SOLVAX provides safeguarded vector Aitken relaxation, a bounded-history
-Anderson mixing primitive, and a complete Aitken fixed-point loop.
+Anderson mixing primitive, a complete Aitken fixed-point loop, and matrix-free
+FGMRES for affine maps.
+
+## Affine fixed points with FGMRES
+
+For an affine map $G(x)=Lx+c$, the fixed-point equation is the linear system
+
+$$
+(I-L)\delta=G(x_0)-x_0,\qquad x^*=x_0+\delta.
+$$
+
+`affine_fixed_point_gmres` applies this operator through map evaluations, so no
+matrix or Jacobian is assembled. Array and PyTree states, custom inner
+products, and right preconditioners use the same contracts as `gmres`.
+
+```python
+solution = sx.affine_fixed_point_gmres(
+    mapping,
+    x0,
+    restart=20,
+    rtol=1e-8,
+)
+```
+
+The affine contract is deliberate. For a genuinely nonlinear map, use a
+globalized nonlinear primal solver and `root_solve` for implicit derivatives.
 
 ## Relaxed iteration
 
@@ -149,4 +174,5 @@ $f(x)=G(x)-x$ and wrap the primal solver with
 - {func}`solvax.fixed_point.aitken_relaxation`
 - {func}`solvax.fixed_point.anderson_mixing`
 - {func}`solvax.fixed_point.aitken_fixed_point`
+- {func}`solvax.fixed_point.affine_fixed_point_gmres`
 - {class}`solvax.fixed_point.FixedPointSolution`

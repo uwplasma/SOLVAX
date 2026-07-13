@@ -5,7 +5,12 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from solvax.fixed_point import aitken_fixed_point, aitken_relaxation, anderson_mixing
+from solvax.fixed_point import (
+    affine_fixed_point_gmres,
+    aitken_fixed_point,
+    aitken_relaxation,
+    anderson_mixing,
+)
 from solvax.implicit import root_solve
 
 
@@ -167,6 +172,63 @@ def test_anderson_mixing_accelerates_a_multimode_affine_map():
         x = anderson_mixing(jnp.stack(iterates[-4:]), jnp.stack(residuals[-4:]))
 
     assert x == pytest.approx(target, rel=2.0e-5, abs=2.0e-5)
+
+
+def test_affine_fixed_point_gmres_solves_a_slow_multimode_map():
+    diagonal = jnp.asarray([0.2, 0.95, 0.999])
+    target = jnp.asarray([1.0, -2.0, 0.5])
+
+    solution = affine_fixed_point_gmres(
+        lambda x: diagonal * x + (1.0 - diagonal) * target,
+        jnp.zeros_like(target),
+        restart=3,
+        rtol=1.0e-10,
+        max_restarts=2,
+    )
+
+    assert solution.converged
+    assert solution.iterations <= 3
+    assert solution.x == pytest.approx(target, rel=2.0e-5, abs=2.0e-5)
+
+
+def test_affine_fixed_point_gmres_supports_pytrees_and_custom_inner_products():
+    target = {"flow": jnp.asarray([1.0, -1.0]), "potential": jnp.asarray(0.5)}
+
+    def mapping(state):
+        return {
+            "flow": 0.9 * state["flow"] + 0.1 * target["flow"],
+            "potential": 0.5 * state["potential"] + 0.5 * target["potential"],
+        }
+
+    def inner(left, right):
+        return jnp.vdot(left["flow"], right["flow"]) + 0.25 * jnp.vdot(
+            left["potential"], right["potential"]
+        )
+
+    solution = jax.jit(
+        lambda: affine_fixed_point_gmres(
+            mapping,
+            jax.tree.map(jnp.zeros_like, target),
+            inner_product=inner,
+            restart=2,
+            rtol=1.0e-10,
+        )
+    )()
+
+    assert solution.converged
+    assert solution.x["flow"] == pytest.approx(
+        target["flow"], rel=2.0e-5, abs=2.0e-5
+    )
+    assert solution.x["potential"] == pytest.approx(
+        target["potential"], rel=2.0e-5, abs=2.0e-5
+    )
+
+
+def test_affine_fixed_point_gmres_rejects_structure_changes():
+    with pytest.raises(ValueError, match="preserve"):
+        affine_fixed_point_gmres(
+            lambda x: {"changed": x}, jnp.asarray([0.0]), max_restarts=0
+        )
 
 
 def test_anderson_mixing_is_jittable_safeguarded_and_validated():
