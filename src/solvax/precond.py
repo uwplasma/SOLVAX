@@ -290,25 +290,17 @@ def additive_preconditioner(
 
     def apply(residual: Any) -> Any:
         structure = jax.tree_util.tree_structure(residual)
-        result = preconditioners[0](residual)
-        if jax.tree_util.tree_structure(result) != structure:
+        terms = tuple(preconditioner(residual) for preconditioner in preconditioners)
+        if any(jax.tree_util.tree_structure(term) != structure for term in terms):
             raise ValueError("preconditioners must preserve the input pytree structure")
-        result = jax.tree_util.tree_map(
-            lambda leaf: coefficients[0] * leaf,
-            result,
-        )
-        for coefficient, preconditioner in zip(
-            coefficients[1:], preconditioners[1:], strict=True
-        ):
-            term = preconditioner(residual)
-            if jax.tree_util.tree_structure(term) != structure:
-                raise ValueError("preconditioners must preserve the input pytree structure")
-            result = jax.tree_util.tree_map(
-                lambda total, leaf, coefficient=coefficient: total + coefficient * leaf,
-                result,
-                term,
+
+        def combine(*leaves: jax.Array) -> jax.Array:
+            return sum(
+                coefficient * leaf
+                for coefficient, leaf in zip(coefficients, leaves, strict=True)
             )
-        return result
+
+        return jax.tree_util.tree_map(combine, *terms)
 
     return apply
 
