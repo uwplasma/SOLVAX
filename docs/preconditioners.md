@@ -114,6 +114,32 @@ may implement richer applications. Multigrid quality depends on complementary
 smoothing and coarse correction, not the recursion alone
 {cite}`trottenberg2001`.
 
+## Symmetric Galerkin deflation
+
+PCG needs a fixed symmetric positive-definite preconditioner. Given a symmetric
+smoother $S$, prolongation $P$, and Galerkin coarse operator
+$A_c=P^TAP$, `galerkin_deflation` applies the balanced two-level inverse
+
+$$
+S + (I-SA)P A_c^{-1}P^T(I-AS).
+$$
+
+```python
+coarse_template = jnp.zeros(coarse_shape)
+precond = sx.galerkin_deflation(
+    A_fine,
+    symmetric_smoother,
+    prolong,
+    solve_galerkin_coarse,
+    coarse_template,
+)
+```
+
+Restriction is generated as the exact linear transpose of `prolong`, avoiding
+an inconsistent transfer pair. The caller still owns the symmetry and positive
+definiteness of $A$, $S$, and the coarse solve. Use the general V-cycle with a
+flexible Krylov method when these requirements do not hold.
+
 ## Kronecker preconditioning
 
 For a separable approximation $A\approx A_1\otimes A_2$,
@@ -174,6 +200,7 @@ use is not an improvement. Benchmark complete solves, including setup reuse.
 | changing/inexact nested solve | yes | yes | generally no |
 | line smoother | yes | yes | only if resulting action is SPD |
 | V-cycle | yes | yes | only with a symmetric positive cycle |
+| balanced Galerkin deflation | yes | yes | yes if components are SPD |
 | mixed precision | yes | yes | validate positivity carefully |
 
 ## API summary
@@ -183,6 +210,7 @@ use is not an improvement. Benchmark complete solves, including setup reuse.
 - {func}`solvax.precond.coarse_operator`
 - {func}`solvax.precond.line_smoother`
 - {func}`solvax.precond.p_multigrid`
+- {func}`solvax.precond.galerkin_deflation`
 - {func}`solvax.precond.mixed_precision`
 - {func}`solvax.precond.kronecker_nkp`
 - {func}`solvax.precond.nearest_kronecker`

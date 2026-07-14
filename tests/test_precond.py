@@ -11,6 +11,7 @@ from solvax import (
     block_thomas_factor,
     block_thomas_solve,
     coarse_operator,
+    galerkin_deflation,
     gmres,
     jacobi,
     kronecker_nkp,
@@ -21,6 +22,7 @@ from solvax import (
     mixed_precision,
     nearest_kronecker,
     p_multigrid,
+    pcg,
 )
 
 jax.config.update("jax_enable_x64", True)
@@ -313,6 +315,57 @@ def test_p_multigrid_as_gmres_preconditioner():
     x_ref = np.linalg.solve(np.asarray(mats[0]), np.asarray(b))
     err = np.linalg.norm(np.asarray(pre.x) - x_ref) / np.linalg.norm(x_ref)
     assert err <= 1e-7
+
+
+def test_galerkin_deflation_is_spd_jittable_and_accelerates_pcg():
+    n_fine, n_coarse = 65, 33
+    dense = jnp.asarray(laplacian_1d(n_fine))
+    transfer = np.zeros((n_fine, n_coarse))
+    transfer[2 * np.arange(n_coarse), np.arange(n_coarse)] = 1.0
+    for index in range(n_coarse - 1):
+        transfer[2 * index + 1, index : index + 2] = 0.5
+    transfer = jnp.asarray(transfer)
+
+    matvec = lambda value: dense @ value  # noqa: E731
+    prolong = lambda value: transfer @ value  # noqa: E731
+    coarse_dense = transfer.T @ dense @ transfer
+    coarse_inverse = jnp.linalg.inv(coarse_dense)
+    coarse_solve = lambda value: coarse_inverse @ value  # noqa: E731
+    smoother = lambda value: (2.0 / 3.0) * value / jnp.diag(dense)  # noqa: E731
+    precond = galerkin_deflation(
+        matvec,
+        smoother,
+        prolong,
+        coarse_solve,
+        jnp.zeros(n_coarse),
+    )
+
+    rng = np.random.default_rng(7)
+    left = jnp.asarray(rng.standard_normal(n_fine))
+    right = jnp.asarray(rng.standard_normal(n_fine))
+    assert jnp.vdot(left, precond(right)) == pytest.approx(
+        jnp.vdot(precond(left), right), abs=1e-12
+    )
+
+    # Materializing this small test operator verifies positive definiteness;
+    # production applications remain matrix-free.
+    precond_dense = jax.vmap(precond)(jnp.eye(n_fine)).T
+    assert np.linalg.eigvalsh(np.asarray(precond_dense)).min() > 0.0
+    np.testing.assert_allclose(jax.jit(precond)(right), precond(right), rtol=1e-13)
+
+    rhs = jnp.asarray(rng.standard_normal(n_fine))
+    plain = pcg(matvec, rhs, rtol=1e-10, max_steps=100)
+    accelerated = pcg(
+        matvec, rhs, precond=precond, rtol=1e-10, max_steps=100
+    )
+    assert bool(plain.converged) and bool(accelerated.converged)
+    assert int(accelerated.iterations) < int(plain.iterations) // 3
+    np.testing.assert_allclose(
+        accelerated.x,
+        np.linalg.solve(np.asarray(dense), np.asarray(rhs)),
+        rtol=1e-9,
+        atol=1e-9,
+    )
 
 
 def kron_system(na=8, nb=6, seed=7):

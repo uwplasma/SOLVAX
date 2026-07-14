@@ -62,6 +62,7 @@ from solvax.pcg import PCGDiagnostics, PCGSolution, pcg, pcg_linear_solve, statu
 from solvax.precond import (
     block_jacobi,
     coarse_operator,
+    galerkin_deflation,
     jacobi,
     kronecker_nkp,
     line_smoother,
@@ -124,6 +125,7 @@ __all__ = [
     "jacobi",
     "block_jacobi",
     "coarse_operator",
+    "galerkin_deflation",
     "line_smoother",
     "p_multigrid",
     "mixed_precision",

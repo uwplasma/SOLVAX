@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Added `galerkin_deflation`, a balanced symmetry-preserving Galerkin coarse
+  correction for fixed SPD preconditioners used with PCG.
+
 ## 0.8.1 - 2026-07-13
 
 - Added `solvax.elliptic`: a spectral Fourier--Helmholtz elliptic solve for

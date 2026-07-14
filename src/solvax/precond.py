@@ -27,6 +27,9 @@ The catalogue, roughly in order of increasing structure exploited:
   (pre-smooth, restrict residual, recurse, prolong correction,
   post-smooth), physics-agnostic: all matvecs, transfers, and smoothers
   are injected. Covers h- and p-/spectral coarsening alike.
+- :func:`galerkin_deflation` — balance a symmetric smoother around an
+  adjoint-transfer Galerkin coarse correction, preserving the symmetry
+  required by conjugate-gradient methods.
 - :func:`mixed_precision` — run any preconditioner in low precision;
   flexible GMRES tolerates the inexactness and the outer residual is
   still accumulated in working precision (Carson & Higham).
@@ -325,6 +328,47 @@ def p_multigrid(
         for _ in range(cycles - 1):
             x = x + vcycle(0, b - matvecs[0](x))
         return x
+
+    return apply
+
+
+def galerkin_deflation(
+    matvec: MatVec,
+    smoother: MatVec,
+    prolong: MatVec,
+    coarse_solve: MatVec,
+    coarse_template: jax.Array,
+) -> MatVec:
+    """Build a symmetry-preserving Galerkin deflation preconditioner.
+
+    Restriction is the exact transpose of ``prolong``. For symmetric
+    ``matvec``, ``smoother``, and ``coarse_solve``, the balanced operator
+
+    ``S + (I - S A) P A_c^-1 P.T (I - A S)``
+
+    is symmetric and therefore suitable for PCG. The caller constructs and
+    factors the Galerkin coarse operator ``A_c = P.T A P`` once; applications
+    require one smoothing solve, one coarse solve, and one balancing solve.
+
+    Args:
+        matvec: fine operator ``v -> A v``.
+        smoother: symmetric fine approximate inverse ``v -> S v``.
+        prolong: coarse-to-fine linear transfer ``v -> P v``.
+        coarse_solve: coarse inverse ``v -> A_c^-1 v``.
+        coarse_template: zero-like coarse array used to transpose ``prolong``.
+
+    Returns:
+        A callable applying the balanced fine-plus-coarse inverse.
+    """
+    coarse_template = jnp.asarray(coarse_template)
+
+    def restrict(fine: jax.Array) -> jax.Array:
+        return jax.linear_transpose(prolong, coarse_template)(fine)[0]
+
+    def apply(residual: jax.Array) -> jax.Array:
+        fine = smoother(residual)
+        coarse = prolong(coarse_solve(restrict(residual - matvec(fine))))
+        return fine + coarse - smoother(matvec(coarse))
 
     return apply
 
