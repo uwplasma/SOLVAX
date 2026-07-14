@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.2 - 2026-07-14
 
 - Added `galerkin_deflation`, a balanced symmetry-preserving Galerkin coarse
   correction for fixed SPD preconditioners used with PCG.
