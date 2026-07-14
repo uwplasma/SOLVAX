@@ -60,6 +60,7 @@ from solvax.operators import (
 )
 from solvax.pcg import PCGDiagnostics, PCGSolution, pcg, pcg_linear_solve, status_name
 from solvax.precond import (
+    additive_preconditioner,
     block_jacobi,
     coarse_operator,
     galerkin_deflation,
@@ -122,6 +123,7 @@ __all__ = [
     "BlockTridiagonalOperator",
     "BorderedOperator",
     "schur_projected_precond",
+    "additive_preconditioner",
     "jacobi",
     "block_jacobi",
     "coarse_operator",

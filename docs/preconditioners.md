@@ -83,6 +83,22 @@ The line inverses often use `tridiagonal_solve` or banded LU. Alternating
 directions treats mixed anisotropy better than a single line family
 {cite}`trottenberg2001`.
 
+## Symmetric additive composition
+
+For fixed self-adjoint positive-definite inverse actions $B_i$ and positive
+weights $w_i$, the sum $B=\sum_i w_iB_i$ remains self-adjoint positive definite
+and is therefore suitable for PCG. `additive_preconditioner` defaults to the
+arithmetic mean and accepts arrays or arbitrary matching pytrees:
+
+```python
+precond = sx.additive_preconditioner([x_line_inverse, y_line_inverse])
+solution = sx.pcg(matvec, rhs, precond=precond)
+```
+
+This composes existing axis, block, or Schwarz inverse actions; geometry and
+component construction stay with the caller. Use positive custom weights only
+after verifying that every component is symmetric positive definite.
+
 ## Multigrid V-cycle
 
 Let level $\ell$ have operator $A_\ell$, smoother $S_\ell$, restriction
@@ -198,6 +214,7 @@ use is not an improvement. Benchmark complete solves, including setup reuse.
 | Jacobi | yes | yes | yes if positive |
 | Block Jacobi | yes | yes | yes if HPD |
 | changing/inexact nested solve | yes | yes | generally no |
+| positive additive composition | yes | yes | yes if components are SPD |
 | line smoother | yes | yes | only if resulting action is SPD |
 | V-cycle | yes | yes | only with a symmetric positive cycle |
 | balanced Galerkin deflation | yes | yes | yes if components are SPD |
@@ -209,6 +226,7 @@ use is not an improvement. Benchmark complete solves, including setup reuse.
 - {func}`solvax.precond.block_jacobi`
 - {func}`solvax.precond.coarse_operator`
 - {func}`solvax.precond.line_smoother`
+- {func}`solvax.precond.additive_preconditioner`
 - {func}`solvax.precond.p_multigrid`
 - {func}`solvax.precond.galerkin_deflation`
 - {func}`solvax.precond.mixed_precision`

@@ -12,8 +12,8 @@
 re-implementing: structured direct solves (batched dense LU, block-tridiagonal
 Schur elimination with truncated storage), preconditioned and recycled Krylov
 methods, physics-agnostic preconditioners (coarse-operator LU, p-multigrid,
-Kronecker approximations, line smoothers), mixed-precision iterative
-refinement, and implicit differentiation of every solve — all
+Kronecker approximations, symmetric additive and line smoothers),
+mixed-precision iterative refinement, and implicit differentiation of every solve — all
 jit/vmap/grad-transparent, on CPU and GPU.
 
 It complements general JAX solver libraries with block-structured direct
@@ -68,7 +68,7 @@ Everything is differentiable (`jax.grad` through the solve) and batchable
 | Module | Contents |
 |---|---|
 | `solvax.operators` | Matrix-free, sum, Kronecker, block-tridiagonal and bordered (constraint-row) operator containers with closed-form transposes |
-| `solvax.precond` | Jacobi/block-Jacobi, coarse-operator LU, alternating-direction line smoothers, p-multigrid V-cycles, nearest-Kronecker, mixed-precision wrappers |
+| `solvax.precond` | Jacobi/block-Jacobi, symmetric additive and alternating-direction line composition, p-multigrid V-cycles, nearest-Kronecker, mixed-precision wrappers |
 | `solvax.direct` | Block-tridiagonal Schur elimination (block Thomas): full, factor/solve split, truncated-storage mode |
 | `solvax.banded` | Non-pivoted banded LU with row equilibration + static pivoting; periodic variant via the Woodbury capacitance trick |
 | `solvax.tridiagonal` | Batched scalar tridiagonal solve (reproducible Thomas / fused cuSPARSE backend) and periodic (cyclic) systems via a Sherman--Morrison correction |

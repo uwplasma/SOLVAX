@@ -23,6 +23,9 @@ The catalogue, roughly in order of increasing structure exploited:
       x <- x + omega_i * M_i^{-1} (b - A x),
 
   the classic remedy for anisotropic coupling (Trottenberg et al., ch. 5).
+- :func:`additive_preconditioner` — a positive weighted sum of symmetric
+  positive component inverse actions, suitable for PCG and additive line or
+  Schwarz preconditioning on arrays and arbitrary pytrees.
 - :func:`p_multigrid` — a V-cycle over caller-supplied levels
   (pre-smooth, restrict residual, recurse, prolong correction,
   post-smooth), physics-agnostic: all matvecs, transfers, and smoothers
@@ -69,7 +72,9 @@ References
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Sequence
+from typing import Any
 
 import equinox as eqx
 import jax
@@ -79,6 +84,7 @@ from jax.scipy.linalg import lu_factor, lu_solve
 from solvax.refine import as_low_precision
 
 MatVec = Callable[[jax.Array], jax.Array]
+PytreePreconditioner = Callable[[Any], Any]
 
 
 class _Jacobi(eqx.Module):
@@ -238,6 +244,71 @@ def line_smoother(
                 if step < n_corrections:  # last residual update is unused
                     r = b - matvec(x)
         return x
+
+    return apply
+
+
+def additive_preconditioner(
+    preconditioners: Sequence[PytreePreconditioner],
+    *,
+    weights: Sequence[float] | None = None,
+) -> PytreePreconditioner:
+    """Combine symmetric positive inverse actions without breaking PCG.
+
+    Returns ``sum_i weights[i] * preconditioners[i](residual)``. The default
+    is the arithmetic mean, which keeps the action's scale independent of the
+    number of components. Positive weights preserve self-adjoint positive
+    definiteness when every component has those properties, making this the
+    PCG-safe counterpart to multiplicative :func:`line_smoother` for additive
+    line, block, or Schwarz preconditioners.
+
+    Inputs and component results may be arrays or matching arbitrary pytrees.
+    The combination is pure JAX tree arithmetic, so JIT, differentiation, and
+    the input leaves' device placement are preserved. The caller owns the
+    component symmetry and positivity; this function validates only weights
+    and pytree structure.
+
+    Args:
+        preconditioners: nonempty sequence of fixed inverse actions.
+        weights: optional finite positive weights, one per action. Defaults to
+            equal weights summing to one.
+
+    Returns:
+        A callable with the same pytree input and output structure.
+    """
+    preconditioners = tuple(preconditioners)
+    if not preconditioners:
+        raise ValueError("preconditioners must contain at least one action")
+    if weights is None:
+        coefficients = (1.0 / len(preconditioners),) * len(preconditioners)
+    else:
+        coefficients = tuple(float(weight) for weight in weights)
+        if len(coefficients) != len(preconditioners):
+            raise ValueError("weights must match len(preconditioners)")
+        if any(not math.isfinite(weight) or weight <= 0.0 for weight in coefficients):
+            raise ValueError("weights must be finite and positive")
+
+    def apply(residual: Any) -> Any:
+        structure = jax.tree_util.tree_structure(residual)
+        result = preconditioners[0](residual)
+        if jax.tree_util.tree_structure(result) != structure:
+            raise ValueError("preconditioners must preserve the input pytree structure")
+        result = jax.tree_util.tree_map(
+            lambda leaf: coefficients[0] * leaf,
+            result,
+        )
+        for coefficient, preconditioner in zip(
+            coefficients[1:], preconditioners[1:], strict=True
+        ):
+            term = preconditioner(residual)
+            if jax.tree_util.tree_structure(term) != structure:
+                raise ValueError("preconditioners must preserve the input pytree structure")
+            result = jax.tree_util.tree_map(
+                lambda total, leaf, coefficient=coefficient: total + coefficient * leaf,
+                result,
+                term,
+            )
+        return result
 
     return apply
 
