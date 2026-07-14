@@ -198,7 +198,9 @@ def linear_solve(
     solver: Callable,
     *,
     transpose_matvec: Callable | None = None,
-) -> jax.Array:
+    transpose_solver: Callable | None = None,
+    has_aux: bool = False,
+) -> Any:
     """Differentiable linear solve with a user-supplied black-box solver.
 
     Solves ``matvec(x) = b`` by calling ``solver(matvec, b)``, and registers
@@ -212,30 +214,42 @@ def linear_solve(
             should be closed over so gradients can flow to them.
         b: right-hand side.
         solver: callable ``solver(matvec, b) -> x``, e.g. a lambda around a
-            Krylov method or a dense solve. It is treated as a black box
-            (never differentiated through), but must be traceable by JAX.
+            Krylov method or a dense solve. With ``has_aux=True``, it must
+            instead return ``(x, aux)``. It is treated as a black box (never
+            differentiated through), but must be traceable by JAX.
         transpose_matvec: optional callable computing ``A^T @ y`` for the
             adjoint solve. If omitted, the transpose obtained from
             ``jax.linear_transpose`` of ``matvec`` is used.
+        transpose_solver: optional solver for the transposed system. Defaults
+            to ``solver``. With ``has_aux=True``, it must also return
+            ``(x, aux)``.
+        has_aux: whether both solver callbacks return auxiliary data alongside
+            the solution. The forward auxiliary data is returned with ``x``.
 
     Returns:
         The solution ``x``, differentiable w.r.t. the parameters of
-        ``matvec`` and ``b``.
+        ``matvec`` and ``b``. When ``has_aux=True``, returns ``(x, aux)``
+        using the forward solver's auxiliary data.
     """
+    transpose_solver = solver if transpose_solver is None else transpose_solver
     if transpose_matvec is None:
         # custom_linear_solve hands transpose_solve the linear transpose of
-        # matvec (computed with jax.linear_transpose); reuse the same solver.
+        # matvec (computed with jax.linear_transpose).
         def _transpose_solve(vecmat, y):
-            return solver(vecmat, y)
+            return transpose_solver(vecmat, y)
 
     else:
 
         def _transpose_solve(vecmat, y):
             del vecmat  # user-supplied transpose is presumed cheaper/exact
-            return solver(transpose_matvec, y)
+            return transpose_solver(transpose_matvec, y)
 
     return jax.lax.custom_linear_solve(
-        matvec, b, solve=solver, transpose_solve=_transpose_solve
+        matvec,
+        b,
+        solve=solver,
+        transpose_solve=_transpose_solve,
+        has_aux=has_aux,
     )
 
 

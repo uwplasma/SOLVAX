@@ -54,20 +54,30 @@ def solve_with_gmres(operator, rhs):
         atol=1e-13,
         max_restarts=20,
     )
-    return solution.x
+    return solution.x, (
+        solution.residual_norm,
+        solution.iterations,
+        solution.converged,
+    )
 ```
 
-`linear_solve` expects the solver to return the array, not the result object.
-In production, run a separate diagnostic solve during validation or use
-`pcg_linear_solve` when its HPD assumptions hold and retained diagnostics are
-needed.
+Pass `has_aux=True` to retain these forward diagnostics. The primal and
+transpose callbacks must then both return `(solution, auxiliary_data)` with
+matching auxiliary structure. A dedicated `transpose_solver` can use a zero
+initial guess or adjoint preconditioner without changing the forward policy.
 
 ## 3. Implicit objective
 
 ```python
 def objective(theta):
     matvec, _ = make_operator(theta)
-    x = sx.linear_solve(matvec, b, solve_with_gmres)
+    x, _ = sx.linear_solve(
+        matvec,
+        b,
+        solve_with_gmres,
+        transpose_solver=solve_with_gmres,
+        has_aux=True,
+    )
     return 0.5 * jnp.vdot(x, W * x).real
 
 theta = 0.7

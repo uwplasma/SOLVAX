@@ -77,13 +77,20 @@ the forward solver used.
 
 ```python
 def solver(operator, rhs):
-    return sx.gmres(operator, rhs, rtol=1e-11).x
+    solution = sx.gmres(operator, rhs, rtol=1e-11)
+    return solution.x, (
+        solution.residual_norm,
+        solution.iterations,
+        solution.converged,
+    )
 
-x = sx.linear_solve(
+x, diagnostics = sx.linear_solve(
     matvec,
     b,
     solver,
     transpose_matvec=adjoint_matvec,  # optional
+    transpose_solver=solver,           # optional; defaults to solver
+    has_aux=True,
 )
 ```
 
@@ -91,14 +98,18 @@ Inputs:
 
 - `matvec`: linear action closing over differentiable parameters;
 - `b`: right-hand side;
-- `solver`: callable `(operator, rhs) -> x` traceable by JAX;
-- `transpose_matvec`: optional explicit adjoint action.
+- `solver`: callable `(operator, rhs) -> x` traceable by JAX, or
+  `(operator, rhs) -> (x, aux)` when `has_aux=True`;
+- `transpose_matvec`: optional explicit adjoint action;
+- `transpose_solver`: optional dedicated solver for the transposed system;
+- `has_aux`: return the forward solver's auxiliary diagnostics with `x`.
 
 If no explicit transpose is supplied, JAX constructs the linear transpose of
-`matvec`. The same solver callable is used for the transposed action, so it must
-be suitable for both primal and adjoint systems. For nonsymmetric problems,
-preconditioners may need separate adjoint forms; close that policy into a
-solver or supply a dedicated wrapper.
+`matvec`. By default the same solver callable is used for the transposed action.
+For nonsymmetric problems, pass `transpose_solver` when the adjoint needs a
+different initial guess, preconditioner, or stopping policy. With
+`has_aux=True`, both callbacks return `(x, aux)`; the public result retains the
+forward diagnostics.
 
 For complex programs, `linear_solve` follows JAX's transpose/cotangent
 semantics rather than independently imposing a Hermitian-adjoint convention.

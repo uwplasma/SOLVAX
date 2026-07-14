@@ -64,6 +64,13 @@ solution = sx.gmres(
 | `rtol`, `atol` | true residual stopping tolerances |
 | `max_restarts` | maximum number of Arnoldi cycles |
 
+The optimized array path expects a flat one-dimensional right-hand side. For
+a three-dimensional field, either flatten before calling `gmres` and reshape
+the solution afterward, or supply an `inner_product` such as
+`lambda left, right: jnp.vdot(left, right)`. Supplying `inner_product` selects
+the shape-general PyTree path and the operator, initial guess, and
+preconditioner must preserve that array/PyTree structure.
+
 ### Output
 
 `KrylovSolution` contains `x`, true `residual_norm`, total inner
