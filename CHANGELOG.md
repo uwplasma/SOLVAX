@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.4 - 2026-07-14
+
+- Extended `linear_solve` with an independent `transpose_solver` and optional
+  `has_aux` diagnostics while preserving implicit JVP and VJP behavior.
+
+## 0.8.3 - 2026-07-14
+
+- Added `additive_preconditioner`, a positive weighted combination of
+  inverse actions for symmetry-preserving additive line, block, and Schwarz
+  preconditioning on arrays or arbitrary PyTrees.
+
 ## 0.8.2 - 2026-07-14
 
 - Added `galerkin_deflation`, a balanced symmetry-preserving Galerkin coarse
