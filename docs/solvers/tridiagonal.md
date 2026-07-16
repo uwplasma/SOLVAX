@@ -60,11 +60,12 @@ The work is $O(n)$ per system and storage is $O(n)$; no pivoting occurs
 Systems with fewer than three rows use Thomas because accelerator kernels may
 require a larger minimum dimension.
 
-For real bands and a complex right-hand side, SOLVAX packs the real and
-imaginary parts as two real fields. This keeps real band storage and the fused
-accelerator backend. Genuinely complex bands use portable Thomas arithmetic
-for every method because the fused JAX primitive is real-only on supported JAX
-releases.
+For real bands and a complex right-hand side, SOLVAX solves the real and
+imaginary parts independently. This keeps real band storage and the fast fused
+accelerator kernel; packing them as a multiple-right-hand-side field is avoided
+because supported GPU backends can lower that layout poorly. Genuinely complex
+bands use portable Thomas arithmetic for every method because the fused JAX
+primitive is real-only on supported JAX releases.
 
 The Thomas arithmetic order is fixed and therefore reproducible on a fixed
 backend. The fused and Thomas paths should agree to floating-point accuracy,

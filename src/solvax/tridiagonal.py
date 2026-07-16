@@ -87,9 +87,9 @@ def tridiagonal_solve(
     ``upper`` share the *system* shape (leading axis ``n`` plus any batch
     columns); ``rhs`` may carry **extra trailing axes** beyond that shape —
     stacked right-hand sides / fields — which are all solved in a single pass.
-    Real bands with a complex ``rhs`` are packed as two real fields, preserving
-    the fused real accelerator path without storing or factoring complex bands.
-    Genuinely complex bands use the portable Thomas implementation.
+    Real bands with a complex ``rhs`` use independent real and imaginary solves,
+    preserving real storage and fused accelerator kernels. Genuinely complex
+    bands use the portable Thomas implementation.
 
     Args:
         lower: sub-diagonal, couples row ``j`` to ``j-1``; ``lower[0]``
@@ -131,18 +131,13 @@ def tridiagonal_solve(
     rhs_is_complex = jnp.issubdtype(rhs.dtype, jnp.complexfloating)
     if rhs_is_complex and not bands_are_complex:
         # A real matrix acts independently on the real and imaginary parts.
-        # Keeping both as one trailing real field axis preserves the vendor
-        # batched kernel and avoids doubling band storage on accelerators.
         dtype = jnp.result_type(lower, diag, upper, rhs.real)
-        packed_rhs = jnp.stack((rhs.real, rhs.imag), axis=-1).astype(dtype)
-        packed = tridiagonal_solve(
-            lower.astype(dtype),
-            diag.astype(dtype),
-            upper.astype(dtype),
-            packed_rhs,
-            method=method,
-        )
-        return lax.complex(packed[..., 0], packed[..., 1])
+        bands = tuple(value.astype(dtype) for value in (lower, diag, upper))
+
+        def solve(value):
+            return tridiagonal_solve(*bands, value.astype(dtype), method=method)
+
+        return lax.complex(solve(rhs.real), solve(rhs.imag))
 
     dtype = jnp.result_type(lower, diag, upper, rhs)
     lower = lower.astype(dtype)
