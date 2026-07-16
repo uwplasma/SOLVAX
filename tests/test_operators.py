@@ -291,6 +291,70 @@ def test_schur_precond_requires_square_schur():
         schur_projected_precond(lambda v: a_inv_mat @ v, b_cols, c_rows[:1])
 
 
+def _bordered_dense(a, b_cols, c_rows, d_block):
+    return np.block(
+        [
+            [np.asarray(a), np.asarray(b_cols)],
+            [np.asarray(c_rows), np.asarray(d_block)],
+        ]
+    )
+
+
+def test_schur_projected_precond_nonzero_d_exact_inverse():
+    # General bordered matrix [[A, B], [C, D]] with a nonzero border-border D
+    # (a quasineutrality/potential border). With an exact A^{-1} the projected
+    # Schur preconditioner is the exact inverse of the whole bordered system.
+    a, b_cols, c_rows = make_bordered(n=40, p=3, seed=12)
+    n, p = b_cols.shape
+    rng = np.random.default_rng(12)
+    d_block = jnp.asarray(0.5 * rng.standard_normal((p, p)))
+    dense = _bordered_dense(a, b_cols, c_rows, d_block)
+    rhs = rng.standard_normal(n + p)
+    x_ref = np.linalg.solve(dense, rhs)
+
+    a_inv_mat = jnp.asarray(np.linalg.inv(np.asarray(a)))
+    precond = schur_projected_precond(
+        lambda v: a_inv_mat @ v, b_cols, c_rows, d_block=d_block
+    )
+    x = np.asarray(precond(jnp.asarray(rhs)))
+    assert np.linalg.norm(x - x_ref) / np.linalg.norm(x_ref) <= 1e-10
+
+
+def test_schur_projected_precond_nonzero_d_gmres_one_shot():
+    # As a right-preconditioner the nonzero-D border is eliminated exactly, so
+    # GMRES on the full bordered operator converges in one effective step.
+    a, b_cols, c_rows = make_bordered(n=40, p=3, seed=14)
+    n, p = b_cols.shape
+    rng = np.random.default_rng(14)
+    d_block = jnp.asarray(0.5 * rng.standard_normal((p, p)))
+    dense = jnp.asarray(_bordered_dense(a, b_cols, c_rows, d_block))
+    op = MatrixFreeOperator(apply=lambda v: dense @ v, shape=(n + p, n + p))
+    rhs = jnp.asarray(rng.standard_normal(n + p))
+    x_ref = np.linalg.solve(np.asarray(dense), np.asarray(rhs))
+
+    a_inv_mat = jnp.asarray(np.linalg.inv(np.asarray(a)))
+    precond = schur_projected_precond(
+        lambda v: a_inv_mat @ v, b_cols, c_rows, d_block=d_block
+    )
+    sol = gmres(op, rhs, precond=precond, rtol=1e-12, restart=10)
+    assert bool(sol.converged)
+    assert int(sol.iterations) <= 3
+    assert np.linalg.norm(np.asarray(sol.x) - x_ref) / np.linalg.norm(x_ref) <= 1e-10
+
+
+def test_schur_projected_precond_d_none_matches_zero_d():
+    # d_block=None (the pure saddle point [[A, B], [C, 0]]) is exactly the
+    # explicit zero-D path — backward compatibility of the new argument.
+    a, b_cols, c_rows = make_bordered(n=24, p=2, seed=13)
+    n, p = b_cols.shape
+    a_inv_mat = jnp.asarray(np.linalg.inv(np.asarray(a)))
+    a_inv = lambda v: a_inv_mat @ v  # noqa: E731
+    r = jnp.asarray(np.random.default_rng(13).standard_normal(n + p))
+    none_out = schur_projected_precond(a_inv, b_cols, c_rows)(r)
+    zero_out = schur_projected_precond(a_inv, b_cols, c_rows, d_block=jnp.zeros((p, p)))(r)
+    assert np.allclose(np.asarray(none_out), np.asarray(zero_out), atol=1e-12)
+
+
 # --------------------------------------------------------------- Composition
 
 

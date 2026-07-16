@@ -411,26 +411,32 @@ class BorderedOperator(_LinearOperator):
 
 
 def schur_projected_precond(
-    a_inv: Callable, b_cols: jax.Array, c_rows: jax.Array
+    a_inv: Callable,
+    b_cols: jax.Array,
+    c_rows: jax.Array,
+    d_block: jax.Array | None = None,
 ) -> Callable:
     """Preconditioner for a bordered system from an approximate inverse of ``A``.
 
     Given ``a_inv ~ A^{-1}`` for the principal block alone, forms the small
-    dense Schur complement ``S = C A^{-1} B`` once (``p`` applications of
-    ``a_inv`` to the columns of ``B``, then an LU factorization of the
-    ``q x p`` result, which must be square) and returns the projection
+    dense Schur complement of the border once (``p`` applications of ``a_inv``
+    to the columns of ``B``, then an LU factorization of the ``q x p`` result,
+    which must be square) and returns the projection
 
         y = S^{-1} (C a_inv(r_x) - r_y),    x = a_inv(r_x - B y),
 
-    i.e. the exact inverse of ``[[A, B], [C, 0]]`` with ``A^{-1}``
-    replaced by ``a_inv`` throughout (Benzi, Golub & Liesen, Acta
-    Numerica 2005, section 5). With ``a_inv`` exact, the preconditioned
-    operator is the identity and GMRES converges in one iteration; with an
-    approximate ``a_inv``, the border is still eliminated exactly through
-    the projected Schur system, so a preconditioner built for the physics
-    block ``A`` preconditions the full constrained system. Each
-    application costs two calls to ``a_inv`` plus one small triangular
-    solve.
+    i.e. the exact inverse of the bordered (KKT-like) matrix ``[[A, B], [C, D]]``
+    with ``A^{-1}`` replaced by ``a_inv`` throughout (Benzi, Golub & Liesen,
+    Acta Numerica 2005, section 5).  The border-border block ``D`` defaults to
+    zero (the constraint/saddle-point case ``[[A, B], [C, 0]]``); pass a nonzero
+    ``d_block`` for a general bordered system (e.g. a quasineutrality /
+    potential border that couples the border unknowns to themselves), in which
+    case the Schur complement is ``S = C A^{-1} B - D``.  With ``a_inv`` exact,
+    the preconditioned operator is the identity and GMRES converges in one
+    iteration; with an approximate ``a_inv``, the border is still eliminated
+    exactly through the projected Schur system, so a preconditioner built for
+    the physics block ``A`` preconditions the full bordered system.  Each
+    application costs two calls to ``a_inv`` plus one small triangular solve.
 
     Args:
         a_inv: callable ``r -> A^{-1} r`` (approximate is fine) on flat
@@ -438,14 +444,19 @@ def schur_projected_precond(
         b_cols: border columns ``B``, shape ``(n, p)``.
         c_rows: border rows ``C``, shape ``(p, n)`` — the Schur complement
             must be square.
+        d_block: optional border-border block ``D``, shape ``(p, p)``; when
+            ``None`` (default) the border is the pure ``[[A, B], [C, 0]]``
+            saddle point.
 
     Returns:
         A callable ``[r_x, r_y] -> [x, y]`` on concatenated ``(n + p,)``
         vectors, suitable as ``precond=`` for :func:`solvax.krylov.gmres`
-        on the matching :class:`BorderedOperator`.
+        on the matching bordered operator.
     """
     ainv_b = jax.vmap(a_inv, in_axes=1, out_axes=1)(b_cols)
     schur = c_rows @ ainv_b
+    if d_block is not None:
+        schur = schur - d_block
     if schur.shape[0] != schur.shape[1]:
         raise ValueError(f"Schur complement must be square; got shape {schur.shape}")
     schur_lu = lu_factor(schur)
