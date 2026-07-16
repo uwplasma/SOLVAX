@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.8.4 - 2026-07-14
+## 0.8.4 - 2026-07-15
 
 - Extended `linear_solve` with an independent `transpose_solver` and optional
   `has_aux` diagnostics while preserving implicit JVP and VJP behavior.
