@@ -70,6 +70,10 @@ The Thomas arithmetic order is fixed and therefore reproducible on a fixed
 backend. The fused and Thomas paths should agree to floating-point accuracy,
 not necessarily bit for bit.
 
+The fused primitive is wrapped in an implicit linear solve, supplying forward-
+and reverse-mode derivatives even on supported JAX versions whose primitive
+does not define its own differentiation rule.
+
 ## Boundary entries
 
 For `tridiagonal_solve`, `lower[0]` and `upper[-1]` do not correspond to matrix

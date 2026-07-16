@@ -210,11 +210,12 @@ def test_jit_static_method():
     assert np.allclose(np.asarray(x), dense_solve(lower, diag, upper, rhs), atol=1e-10)
 
 
-def test_gradient_through_solve():
+@pytest.mark.parametrize("method", ["thomas", "lax"])
+def test_gradient_through_solve(method):
     lower, diag, upper, rhs = make_tridiag(8, (), None, seed=8)
 
     def loss(d):
-        return jnp.sum(tridiagonal_solve(lower, d, upper, rhs, method="thomas") ** 2)
+        return jnp.sum(tridiagonal_solve(lower, d, upper, rhs, method=method) ** 2)
 
     g = jax.grad(loss)(diag)
     eps = 1e-6

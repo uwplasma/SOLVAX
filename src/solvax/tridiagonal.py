@@ -221,6 +221,34 @@ def cyclic_tridiagonal_solve(
 
 
 def _lax_solve(lower: jax.Array, diag: jax.Array, upper: jax.Array, rhs: jax.Array) -> jax.Array:
+    """Differentiable wrapper around the fused tridiagonal primitive."""
+
+    def matvec(value):
+        extra = (1,) * (value.ndim - diag.ndim)
+        lo = lower.reshape(lower.shape + extra)
+        middle = diag.reshape(diag.shape + extra)
+        up = upper.reshape(upper.shape + extra)
+        result = middle * value
+        result = result.at[1:].add(lo[1:] * value[:-1])
+        return result.at[:-1].add(up[:-1] * value[1:])
+
+    def solve(_, value):
+        return _lax_solve_raw(lower, diag, upper, value)
+
+    transpose_lower = jnp.concatenate((jnp.zeros_like(upper[:1]), upper[:-1]))
+    transpose_upper = jnp.concatenate((lower[1:], jnp.zeros_like(lower[:1])))
+
+    def transpose_solve(_, value):
+        return _lax_solve_raw(transpose_lower, diag, transpose_upper, value)
+
+    return lax.custom_linear_solve(
+        matvec, rhs, solve=solve, transpose_solve=transpose_solve
+    )
+
+
+def _lax_solve_raw(
+    lower: jax.Array, diag: jax.Array, upper: jax.Array, rhs: jax.Array
+) -> jax.Array:
     """Fused batched solve via :func:`jax.lax.linalg.tridiagonal_solve`.
 
     Maps the leading-axis / trailing-column layout onto the ``lax.linalg``
