@@ -99,6 +99,22 @@ This composes existing axis, block, or Schwarz inverse actions; geometry and
 component construction stay with the caller. Use positive custom weights only
 after verifying that every component is symmetric positive definite.
 
+For structured arrays, SOLVAX can build those components directly from
+nonperiodic tridiagonal bands and an optional cyclic final axis:
+
+```python
+precond = sx.additive_tridiagonal_line_preconditioner(
+    diagonal,
+    [(0, lower_x, upper_x), (1, lower_y, upper_y)],
+    periodic_last_axis=(lower_z, upper_z),
+)
+solution = sx.pcg(matvec, rhs, precond=precond)
+```
+
+All arrays retain their original layout outside each batched line solve. The
+builder is JIT- and gradient-transparent; the caller remains responsible for
+coefficient boundary entries and component positive definiteness.
+
 ## Multigrid V-cycle
 
 Let level $\ell$ have operator $A_\ell$, smoother $S_\ell$, restriction

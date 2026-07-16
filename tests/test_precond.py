@@ -8,6 +8,7 @@ from jax.scipy.linalg import lu_factor
 
 from solvax import (
     additive_preconditioner,
+    additive_tridiagonal_line_preconditioner,
     block_jacobi,
     block_thomas_factor,
     block_thomas_solve,
@@ -24,6 +25,7 @@ from solvax import (
     nearest_kronecker,
     p_multigrid,
     pcg,
+    tridiagonal_solve,
 )
 
 jax.config.update("jax_enable_x64", True)
@@ -276,6 +278,47 @@ def test_additive_preconditioner_supports_pytree_jit_grad_and_placement():
     )
     leaves = jax.tree_util.tree_leaves(jax.jit(preconditioner)(placed))
     assert all(leaf.devices() == {device} for leaf in leaves)
+
+
+def test_additive_tridiagonal_lines_match_explicit_axis_solves():
+    shape = (3, 4, 2)
+    diagonal = jnp.full(shape, 5.0)
+    lower_x = jnp.full(shape, -0.4).at[0].set(0.0)
+    upper_x = jnp.full(shape, -0.4).at[-1].set(0.0)
+    lower_y = jnp.full(shape, -0.7).at[:, 0].set(0.0)
+    upper_y = jnp.full(shape, -0.7).at[:, -1].set(0.0)
+    rhs = jnp.arange(np.prod(shape), dtype=float).reshape(shape) / 10.0
+    precondition = additive_tridiagonal_line_preconditioner(
+        diagonal, ((0, lower_x, upper_x), (1, lower_y, upper_y))
+    )
+
+    def solve_axis(axis, lower, upper):
+        order = (axis,) + tuple(i for i in range(3) if i != axis)
+        inverse = tuple(order.index(i) for i in range(3))
+        solved = tridiagonal_solve(*(jnp.transpose(x, order)
+            for x in (lower, diagonal, upper, rhs)))
+        return jnp.transpose(solved, inverse)
+
+    expected = 0.5 * (solve_axis(0, lower_x, upper_x)
+        + solve_axis(1, lower_y, upper_y))
+    np.testing.assert_allclose(jax.jit(precondition)(rhs), expected)
+
+
+def test_additive_tridiagonal_periodic_line_is_dense_exact_and_differentiable():
+    weights = jnp.asarray([0.4, 0.7, 0.5, 0.9, 0.6])
+    lower, upper = -jnp.roll(weights, 1), -weights
+    diagonal = 1.0 + weights + jnp.roll(weights, 1)
+    rhs = jnp.asarray([0.3, -0.1, 0.8, 0.2, -0.4])
+    solve = additive_tridiagonal_line_preconditioner(
+        diagonal, (), periodic_last_axis=(lower, upper))
+    dense = jnp.diag(diagonal)
+    dense = dense.at[jnp.arange(1, 5), jnp.arange(4)].set(lower[1:])
+    dense = dense.at[jnp.arange(4), jnp.arange(1, 5)].set(upper[:-1])
+    dense = dense.at[0, -1].set(lower[0]).at[-1, 0].set(upper[-1])
+    np.testing.assert_allclose(jax.jit(solve)(rhs), jnp.linalg.solve(dense, rhs))
+    objective = lambda scale: jnp.sum(solve(scale * rhs) ** 2)  # noqa: E731
+    value, gradient = jax.value_and_grad(objective)(jnp.asarray(1.0))
+    assert gradient == pytest.approx(2.0 * value, rel=1.0e-12)
 
 
 def poisson_hierarchy():

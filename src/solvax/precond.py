@@ -82,6 +82,7 @@ import jax.numpy as jnp
 from jax.scipy.linalg import lu_factor, lu_solve
 
 from solvax.refine import as_low_precision
+from solvax.tridiagonal import cyclic_tridiagonal_solve, tridiagonal_solve
 
 MatVec = Callable[[jax.Array], jax.Array]
 PytreePreconditioner = Callable[[Any], Any]
@@ -303,6 +304,60 @@ def additive_preconditioner(
         return jax.tree_util.tree_map(combine, *terms)
 
     return apply
+
+
+def additive_tridiagonal_line_preconditioner(
+    diagonal: jax.Array,
+    directions: Sequence[tuple[int, jax.Array, jax.Array]],
+    *,
+    periodic_last_axis: tuple[jax.Array, jax.Array] | None = None,
+) -> MatVec:
+    """Build an additive inverse from batched tridiagonal grid-line solves.
+
+    Each ``(axis, lower, upper)`` entry defines ordinary tridiagonal lines
+    along one array axis. Optionally, ``periodic_last_axis`` adds a cyclic
+    solve along the final axis. Component inverses are combined with
+    :func:`additive_preconditioner`, so their arithmetic mean is fixed,
+    symmetric, differentiable, and suitable for PCG when each line operator
+    is symmetric positive definite.
+
+    Args:
+        diagonal: shared cell diagonal with the same shape as a residual.
+        directions: axis and lower/upper bands for each nonperiodic line set.
+        periodic_last_axis: optional lower/upper bands for cyclic final-axis
+            lines, including their two corner couplings.
+
+    Returns:
+        A JIT- and differentiation-transparent additive inverse action.
+    """
+    diagonal = jnp.asarray(diagonal)
+    line_solves = []
+    for axis, lower, upper in directions:
+        axis %= diagonal.ndim
+        permutation = (axis,) + tuple(i for i in range(diagonal.ndim) if i != axis)
+        inverse = tuple(permutation.index(i) for i in range(diagonal.ndim))
+
+        def solve_line(residual, lower=lower, upper=upper,
+                       permutation=permutation, inverse=inverse):
+            solved = tridiagonal_solve(
+                jnp.transpose(lower, permutation), jnp.transpose(diagonal, permutation),
+                jnp.transpose(upper, permutation), jnp.transpose(residual, permutation),
+            )
+            return jnp.transpose(solved, inverse)
+
+        line_solves.append(solve_line)
+    if periodic_last_axis is not None:
+        lower, upper = periodic_last_axis
+
+        def solve_periodic(residual: jax.Array) -> jax.Array:
+            solved = cyclic_tridiagonal_solve(
+                jnp.moveaxis(lower, -1, 0), jnp.moveaxis(diagonal, -1, 0),
+                jnp.moveaxis(upper, -1, 0), jnp.moveaxis(residual, -1, 0),
+            )
+            return jnp.moveaxis(solved, 0, -1)
+
+        line_solves.append(solve_periodic)
+    return additive_preconditioner(line_solves)
 
 
 def p_multigrid(
