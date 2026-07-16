@@ -68,10 +68,11 @@ Everything is differentiable (`jax.grad` through the solve) and batchable
 | Module | Contents |
 |---|---|
 | `solvax.operators` | Matrix-free, sum, Kronecker, block-tridiagonal and bordered (constraint-row) operator containers with closed-form transposes |
-| `solvax.precond` | Jacobi/block-Jacobi, symmetric additive and alternating-direction line composition, p-multigrid V-cycles, nearest-Kronecker, mixed-precision wrappers |
+| `solvax.precond` | Jacobi/block-Jacobi, coarse-operator LU, Galerkin-deflation coarse correction, symmetric additive and alternating-direction line composition, p-multigrid V-cycles, nearest-Kronecker, mixed-precision wrappers |
 | `solvax.direct` | Block-tridiagonal Schur elimination (block Thomas): full, factor/solve split, truncated-storage mode |
 | `solvax.banded` | Non-pivoted banded LU with row equilibration + static pivoting; periodic variant via the Woodbury capacitance trick |
 | `solvax.tridiagonal` | Batched scalar tridiagonal solve (reproducible Thomas / fused cuSPARSE backend) and periodic (cyclic) systems via a Sherman--Morrison correction |
+| `solvax.elliptic` | Spectral Fourier--Helmholtz solve for separable periodic-by-bounded elliptic problems — the drift-plane / vorticity `lap phi = rhs` inversion, one FFT + one batched tridiagonal sweep |
 | `solvax.krylov` | Flexible restarted GMRES (CGS2 + Givens) over arrays, scalars and arbitrary pytrees with optional custom inner products, and GCROT-style Krylov subspace recycling for parameter continuation |
 | `solvax.pcg` | Matrix-free pytree PCG with preconditioning, fixed-shape residual history, and explicit convergence/breakdown status |
 | `solvax.fixed_point` | Safeguarded Aitken, bounded-memory (condition-filtered) Anderson, and matrix-free affine fixed-point FGMRES |

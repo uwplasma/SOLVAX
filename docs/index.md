@@ -70,6 +70,7 @@ methods
 solvers/block_tridiagonal
 solvers/banded
 solvers/tridiagonal
+solvers/elliptic
 ```
 
 ```{toctree}
@@ -105,6 +106,10 @@ tutorials/index
 :caption: Reference
 
 api
+release-notes-0.8.4
+release-notes-0.8.3
+release-notes-0.8.2
+release-notes-0.8.1
 release-notes-0.8.0
 release-notes-0.7.3
 release-notes-0.7.2
