@@ -127,6 +127,11 @@ precond = sx.schur_projected_precond(a_inv, b_columns, c_rows)
 solution = sx.gmres(K, rhs, precond=precond)
 ```
 
+For a general bordered matrix $[[A,B],[C,D]]$ whose border unknowns couple to
+themselves (e.g. a quasineutrality or potential border), pass the small dense
+block as `d_block=`; the Schur complement becomes $S=C\widetilde A^{-1}B-D$
+and the projection is otherwise unchanged.
+
 It is exact when `a_inv` is $A^{-1}$ and the dense Schur complement is solved
 exactly. With an approximate inverse, it is a constraint-aware preconditioner
 for saddle-point systems {cite}`benzi2005`.
