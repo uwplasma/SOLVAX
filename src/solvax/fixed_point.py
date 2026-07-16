@@ -56,36 +56,28 @@ def aitken_relaxation(
     return jnp.clip(candidate, min_relaxation, max_relaxation)
 
 
-def anderson_mixing(
-    iterates: jax.Array,
+def anderson_weights(
     residuals: jax.Array,
     *,
     regularization: float = 1.0e-8,
-    damping: float = 1.0,
     condition_limit: float | None = None,
 ) -> jax.Array:
-    """Return a regularized Anderson update from a bounded fixed-point history.
+    """Return safeguarded affine weights for an Anderson residual history.
 
-    ``residuals[i]`` must equal ``mapping(iterates[i]) - iterates[i]``. The
-    result is a residual-minimizing affine combination of the mapped points.
-    Keeping map evaluation and stopping outside this primitive lets applications
-    retain their own expensive subsystem solves and physical convergence gates.
+    The leading axis indexes history. Reuse the returned one-dimensional
+    weights with ``tensordot`` to mix mapped histories whose trailing shapes
+    differ, such as coupled fields and conservative flux state.
     """
 
     if regularization < 0.0:
         raise ValueError("regularization must be non-negative")
-    if not 0.0 <= damping <= 1.0:
-        raise ValueError("damping must lie in [0, 1]")
     if condition_limit is not None and condition_limit < 1.0:
         raise ValueError("condition_limit must be at least one")
-    iterates = jnp.asarray(iterates)
     residuals = jnp.asarray(residuals)
-    if iterates.shape != residuals.shape:
-        raise ValueError("iterate and residual histories must have identical shapes")
-    if iterates.ndim < 1 or iterates.shape[0] < 1:
+    if residuals.ndim < 1 or residuals.shape[0] < 1:
         raise ValueError("Anderson history must contain at least one entry")
 
-    history_size = iterates.shape[0]
+    history_size = residuals.shape[0]
     flat_residuals = residuals.reshape((history_size, -1))
     gram = jnp.conj(flat_residuals) @ flat_residuals.T
     real_dtype = jnp.real(residuals).dtype
@@ -117,7 +109,36 @@ def anderson_mixing(
     valid = jnp.all(jnp.isfinite(weights)) & (
         jnp.abs(denominator) > jnp.finfo(real_dtype).tiny
     )
-    weights = jnp.where(valid, weights / jnp.where(valid, denominator, 1.0), fallback)
+    return jnp.where(valid, weights / jnp.where(valid, denominator, 1.0), fallback)
+
+
+def anderson_mixing(
+    iterates: jax.Array,
+    residuals: jax.Array,
+    *,
+    regularization: float = 1.0e-8,
+    damping: float = 1.0,
+    condition_limit: float | None = None,
+) -> jax.Array:
+    """Return a regularized Anderson update from a bounded fixed-point history.
+
+    ``residuals[i]`` must equal ``mapping(iterates[i]) - iterates[i]``. The
+    result is a residual-minimizing affine combination of the mapped points.
+    Keeping map evaluation and stopping outside this primitive lets applications
+    retain their own expensive subsystem solves and physical convergence gates.
+    """
+
+    if not 0.0 <= damping <= 1.0:
+        raise ValueError("damping must lie in [0, 1]")
+    iterates = jnp.asarray(iterates)
+    residuals = jnp.asarray(residuals)
+    if iterates.shape != residuals.shape:
+        raise ValueError("iterate and residual histories must have identical shapes")
+    weights = anderson_weights(
+        residuals,
+        regularization=regularization,
+        condition_limit=condition_limit,
+    )
     mapped = iterates + residuals
     accelerated = jnp.tensordot(weights, mapped, axes=(0, 0))
     return (1.0 - damping) * mapped[-1] + damping * accelerated

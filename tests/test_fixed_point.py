@@ -5,6 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from solvax import anderson_weights
 from solvax.fixed_point import (
     affine_fixed_point_gmres,
     aitken_fixed_point,
@@ -12,6 +13,8 @@ from solvax.fixed_point import (
     anderson_mixing,
 )
 from solvax.implicit import root_solve
+
+jax.config.update("jax_enable_x64", True)
 
 
 def test_aitken_fixed_point_accelerates_slow_affine_vector_map():
@@ -72,9 +75,8 @@ def test_complex_anderson_uses_hermitian_residual_gram_matrix():
         [[0.3 + 0.2j, -0.1j], [-0.2 + 0.1j, 0.4j], [0.1 - 0.3j, 0.2]]
     )
     regularization = 1.0e-6
-    result = anderson_mixing(
-        iterates, residuals, regularization=regularization, damping=1.0
-    )
+    result = anderson_mixing(iterates, residuals, regularization=regularization)
+    actual_weights = anderson_weights(residuals, regularization=regularization)
 
     flat = np.asarray(residuals)
     gram = np.conj(flat) @ flat.T
@@ -83,7 +85,30 @@ def test_complex_anderson_uses_hermitian_residual_gram_matrix():
     weights = np.linalg.solve(system, np.ones(len(flat), dtype=complex))
     weights /= np.sum(weights)
     expected = weights @ np.asarray(iterates + residuals)
+    assert actual_weights == pytest.approx(weights, rel=1.0e-6, abs=1.0e-6)
     assert np.asarray(result) == pytest.approx(expected, rel=1.0e-6, abs=1.0e-6)
+
+
+def test_anderson_weights_mix_differently_shaped_histories_and_differentiate():
+    residuals = jnp.asarray(
+        [[0.3, -0.1, 0.2, 0.4], [0.1, 0.2, -0.3, 0.2], [-0.2, 0.1, 0.1, -0.1]]
+    )
+    velocity = jnp.arange(36.0).reshape((3, 2, 2, 3)) / 20.0
+    flux = jnp.arange(72.0).reshape((3, 3, 2, 4)) / 30.0
+    inlet = jnp.arange(12.0).reshape((3, 2, 2)) / 10.0
+
+    weights = jax.jit(anderson_weights)(residuals)
+    mixed = tuple(
+        jnp.tensordot(weights, history, axes=(0, 0))
+        for history in (velocity, flux, inlet)
+    )
+    assert jnp.sum(weights) == pytest.approx(1.0)
+    assert tuple(value.shape for value in mixed) == ((2, 2, 3), (3, 2, 4), (2, 2))
+    assert mixed[0] == pytest.approx(np.tensordot(weights, velocity, axes=(0, 0)))
+    sensitivity = jax.grad(
+        lambda shift: anderson_weights(residuals.at[1, 0].add(shift))[0]
+    )(0.0)
+    assert jnp.isfinite(sensitivity)
 
 
 def test_aitken_fixed_point_reports_nonconvergence_without_nan():
@@ -271,4 +296,7 @@ def test_anderson_falls_back_when_affine_weights_are_degenerate():
         iterates, residuals, regularization=0.0, condition_limit=1.0e4
     )
 
+    assert anderson_weights(
+        residuals, regularization=0.0, condition_limit=1.0e4
+    ) == pytest.approx([0.0, 1.0])
     assert candidate == pytest.approx(iterates[-1])

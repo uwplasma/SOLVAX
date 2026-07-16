@@ -46,6 +46,7 @@ from solvax.fixed_point import (
     aitken_fixed_point,
     aitken_relaxation,
     anderson_mixing,
+    anderson_weights,
 )
 from solvax.implicit import NewtonKrylovSolution, linear_solve, newton_krylov, root_solve
 from solvax.krylov import KrylovSolution, gcrot, gmres
@@ -105,6 +106,7 @@ __all__ = [
     "aitken_fixed_point",
     "aitken_relaxation",
     "anderson_mixing",
+    "anderson_weights",
     "KrylovSolution",
     "gmres",
     "gcrot",

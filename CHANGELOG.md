@@ -1,9 +1,11 @@
 # Changelog
 
-## 0.8.4 - 2026-07-14
+## 0.8.4 - 2026-07-15
 
 - Extended `linear_solve` with an independent `transpose_solver` and optional
   `has_aux` diagnostics while preserving implicit JVP and VJP behavior.
+- Exposed safeguarded Anderson weights for reuse across differently shaped
+  coupled-state histories.
 
 ## 0.8.3 - 2026-07-14
 

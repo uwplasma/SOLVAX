@@ -133,6 +133,16 @@ x_next = sx.anderson_mixing(
 )
 ```
 
+When several mapped quantities must use identical affine coefficients, compute
+the weights once from the residual-bearing state and apply them along each
+history axis. The trailing shapes may differ:
+
+```python
+weights = sx.anderson_weights(residuals, condition_limit=1e6)
+mixed_velocity = jnp.tensordot(weights, mapped_velocity, axes=(0, 0))
+mixed_flux = jnp.tensordot(weights, mapped_flux, axes=(0, 0))
+```
+
 `condition_limit` optionally filters residual-history singular directions
 before solving the affine-weight system. This prevents nearly dependent map
 histories from squaring an already large condition number in the Gram solve.
@@ -179,6 +189,7 @@ $f(x)=G(x)-x$ and wrap the primal solver with
 ## API summary
 
 - {func}`solvax.fixed_point.aitken_relaxation`
+- {func}`solvax.fixed_point.anderson_weights`
 - {func}`solvax.fixed_point.anderson_mixing`
 - {func}`solvax.fixed_point.aitken_fixed_point`
 - {func}`solvax.fixed_point.affine_fixed_point_gmres`
