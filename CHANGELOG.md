@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.8.5 - 2026-07-16
+
 - Added `additive_tridiagonal_line_preconditioner` for differentiable additive
   line inverses over nonperiodic array axes and an optional cyclic final axis.
 - `schur_projected_precond` accepts an optional border-border block

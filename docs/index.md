@@ -106,6 +106,7 @@ tutorials/index
 :caption: Reference
 
 api
+release-notes-0.8.5
 release-notes-0.8.4
 release-notes-0.8.3
 release-notes-0.8.2
