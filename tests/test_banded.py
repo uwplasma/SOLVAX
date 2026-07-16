@@ -93,6 +93,15 @@ def test_factor_solve_reuse():
     assert np.allclose(np.asarray(x1), np.linalg.solve(dense, np.asarray(rhs)), atol=1e-12)
 
 
+def test_complex_factors_promote_real_rhs():
+    bands, rhs, _ = make_banded(16, 1, 1, seed=12)
+    bands = bands.astype(complex).at[0, 1:].add(0.2j)
+    solution = lu_solve_banded(lu_factor_banded(bands, 1, 1), rhs)
+    expected = scipy.linalg.solve_banded((1, 1), np.asarray(bands), np.asarray(rhs))
+    assert jnp.iscomplexobj(solution)
+    assert np.allclose(np.asarray(solution), expected, atol=1e-12)
+
+
 def test_tiny_pivot_clamped():
     n = 8
     bands, rhs, dense = make_banded(n, 1, 1, seed=3)

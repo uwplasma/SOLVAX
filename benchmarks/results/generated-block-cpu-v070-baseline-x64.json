@@ -1,0 +1,44 @@
+{
+  "benchmark": "generated_truncated_block_thomas",
+  "block_size": 195,
+  "compile_seconds": 0.24177962495014071,
+  "device": "TFRT_CPU_0",
+  "dtype": "float64",
+  "executable_memory": {
+    "argument_size_in_bytes": 9360,
+    "output_size_in_bytes": 9360,
+    "alias_size_in_bytes": 0,
+    "temp_size_in_bytes": 3362056,
+    "generated_code_size_in_bytes": 0
+  },
+  "first_execute_seconds": 0.024465959053486586,
+  "grid": {
+    "n_theta": 13,
+    "n_zeta": 15,
+    "n_xi": 32
+  },
+  "implementation": {
+    "benchmark_sha256": "887e8d1d248b92251876885244be6a9145512c8bcfe7700c800f5dfe2c22d28d",
+    "direct_sha256": "9484124bc27c71549a57fc28429d2ae4404e2237df0e84f30ba6589a7fc8d6f1",
+    "solvax_version": "0.7.0"
+  },
+  "jax_version": "0.9.2",
+  "jaxlib_version": "0.9.2",
+  "keep_lowest": 3,
+  "n_blocks": 33,
+  "n_rhs": 2,
+  "platform": "macOS-14.4.1-arm64-arm-64bit",
+  "python_version": "3.11.14",
+  "relative_error_vs_materialized": 0.0,
+  "repeats": 7,
+  "warm_median_seconds": 0.020531583111733198,
+  "warm_samples_seconds": [
+    0.019346332643181086,
+    0.020531583111733198,
+    0.020144457928836346,
+    0.021165584214031696,
+    0.020421250257641077,
+    0.02054854203015566,
+    0.020640125032514334
+  ]
+}

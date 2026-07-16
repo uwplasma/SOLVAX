@@ -12,15 +12,14 @@
 re-implementing: structured direct solves (batched dense LU, block-tridiagonal
 Schur elimination with truncated storage), preconditioned and recycled Krylov
 methods, physics-agnostic preconditioners (coarse-operator LU, p-multigrid,
-Kronecker approximations, line smoothers), mixed-precision iterative
-refinement, and implicit differentiation of every solve — all
+Kronecker approximations, symmetric additive and line smoothers),
+mixed-precision iterative refinement, and implicit differentiation of every solve — all
 jit/vmap/grad-transparent, on CPU and GPU.
 
-It fills a gap in the JAX ecosystem: [lineax](https://github.com/patrick-kidger/lineax)
-offers general linear-operator abstractions and standard solvers, but not
-block-structured direct elimination, coarse-operator/multigrid
-preconditioning, or Krylov subspace recycling for parameter continuation.
-`solvax` builds on lineax's operator interface and adds exactly that layer.
+It complements general JAX solver libraries with block-structured direct
+elimination, coarse-operator and multigrid preconditioning, and Krylov
+subspace recycling for parameter continuation. SOLVAX operators are native
+JAX pytrees; no external operator abstraction is required.
 
 ## Install
 
@@ -41,6 +40,9 @@ x = sx.block_thomas(lower, diag, upper, rhs)
 solution = sx.pcg(matvec, rhs, precond=preconditioner, rtol=1e-10)
 assert solution.converged
 
+# Solve an expensive affine coupling map without assembling its Jacobian
+coupled = sx.affine_fixed_point_gmres(coupling_sweep, initial_state)
+
 # Same diagnostics, but gradients use an implicit primal/transpose solve
 implicit_solution = sx.pcg_linear_solve(matvec, rhs, precond=preconditioner)
 
@@ -48,6 +50,10 @@ implicit_solution = sx.pcg_linear_solve(matvec, rhs, precond=preconditioner)
 factors = sx.block_thomas_factor(lower, diag, upper)
 x1 = sx.block_thomas_solve(factors, rhs1)
 x2 = sx.block_thomas_solve(factors, rhs2)
+
+# Generate each block once when reusable factors are needed without a stored
+# diagonal band.
+generated_factors = sx.block_thomas_factor_fn(block_fn, n_blocks=N)
 
 # Memory-truncated mode: rhs nonzero only in the lowest K blocks and only the
 # lowest K solution blocks needed -> O(K m^2) memory, independent of N.
@@ -62,25 +68,37 @@ Everything is differentiable (`jax.grad` through the solve) and batchable
 | Module | Contents |
 |---|---|
 | `solvax.operators` | Matrix-free, sum, Kronecker, block-tridiagonal and bordered (constraint-row) operator containers with closed-form transposes |
-| `solvax.precond` | Jacobi/block-Jacobi, coarse-operator LU, alternating-direction line smoothers, p-multigrid V-cycles, nearest-Kronecker, mixed-precision wrappers |
+| `solvax.precond` | Jacobi/block-Jacobi, symmetric additive and alternating-direction line composition, p-multigrid V-cycles, nearest-Kronecker, mixed-precision wrappers |
 | `solvax.direct` | Block-tridiagonal Schur elimination (block Thomas): full, factor/solve split, truncated-storage mode |
 | `solvax.banded` | Non-pivoted banded LU with row equilibration + static pivoting; periodic variant via the Woodbury capacitance trick |
-| `solvax.krylov` | Flexible restarted GMRES (CGS2 + Givens) and GCROT-style Krylov subspace recycling for parameter continuation |
+| `solvax.tridiagonal` | Batched scalar tridiagonal solve (reproducible Thomas / fused cuSPARSE backend) and periodic (cyclic) systems via a Sherman--Morrison correction |
+| `solvax.krylov` | Flexible restarted GMRES (CGS2 + Givens) over arrays, scalars and arbitrary pytrees with optional custom inner products, and GCROT-style Krylov subspace recycling for parameter continuation |
 | `solvax.pcg` | Matrix-free pytree PCG with preconditioning, fixed-shape residual history, and explicit convergence/breakdown status |
-| `solvax.fixed_point` | Safeguarded Aitken and bounded-memory Anderson acceleration |
-| `solvax.implicit` | Implicit-function-theorem `linear_solve` and `root_solve` — gradients cost one extra (transposed) solve |
+| `solvax.fixed_point` | Safeguarded Aitken, bounded-memory (condition-filtered) Anderson, and matrix-free affine fixed-point FGMRES |
+| `solvax.implicit` | Matrix-free `newton_krylov` (JFNK) plus implicit-function-theorem `linear_solve` and `root_solve` — gradients cost one extra (transposed) solve |
+| `solvax.autodiff` | Bounded-memory chunked forward/reverse Jacobians (`chunked_jacfwd`/`jacrev`/`jacobian`) with automatic chunk sizing |
 | `solvax.refine` | Mixed-precision iterative refinement (float32 factor, float64 residuals) |
 | `solvax.native` | Host-side SuperLU bridge (non-differentiable, import-guarded) |
 
 Complex-valued GMRES/GCROT, tridiagonal solves, and fixed-point acceleration
 use Hermitian inner products and real-valued safeguards. Remaining roadmap:
-harmonic-Ritz recycle selection, pytree GMRES/GCROT operands, and expanded GPU
+harmonic-Ritz recycle selection, pytree GCROT operands, and expanded GPU
 batched-LU benchmarks.
 
 ```python
 # Preconditioned, recycled Krylov across a parameter scan:
 sol = sx.gcrot(matvec, b, precond=coarse_inverse, m=50, k=10)
 sol2 = sx.gcrot(matvec2, b2, precond=coarse_inverse, recycle=sol.recycle)
+
+# Matrix-free Newton-Krylov (JFNK): Jacobian-vector products via jax.linearize,
+# each correction solved by FGMRES over an array or structured pytree state.
+root = sx.newton_krylov(residual_fn, x0, precond=approx_inverse, rtol=1e-8)
+
+# Weakly contractive affine coupling map G(x) = L x + c, solved as (I - L) x = c:
+fixed = sx.affine_fixed_point_gmres(coupling_map, x0, restart=20)
+
+# Periodic (cyclic) tridiagonal line, corners in lower[0] and upper[-1]:
+x = sx.cyclic_tridiagonal_solve(lower, diag, upper, rhs)
 
 # Differentiable solve wrapping any solver:
 x = sx.linear_solve(matvec, b, solver=lambda mv, rhs: sx.gmres(mv, rhs).x)

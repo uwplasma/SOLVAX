@@ -7,10 +7,12 @@ import pytest
 from jax.scipy.linalg import lu_factor
 
 from solvax import (
+    additive_preconditioner,
     block_jacobi,
     block_thomas_factor,
     block_thomas_solve,
     coarse_operator,
+    galerkin_deflation,
     gmres,
     jacobi,
     kronecker_nkp,
@@ -21,6 +23,7 @@ from solvax import (
     mixed_precision,
     nearest_kronecker,
     p_multigrid,
+    pcg,
 )
 
 jax.config.update("jax_enable_x64", True)
@@ -212,6 +215,69 @@ def test_line_smoother_omega_sequence_and_sweeps():
     assert iters < 20
 
 
+def test_additive_preconditioner_is_spd_and_pcg_safe():
+    first = jnp.diag(jnp.asarray([0.5, 0.25, 0.2]))
+    second = jnp.asarray(
+        [[0.4, 0.1, 0.0], [0.1, 0.5, 0.1], [0.0, 0.1, 0.3]]
+    )
+    components = [lambda value: first @ value, lambda value: second @ value]
+    residual = jnp.asarray([0.2, -0.4, 0.8])
+
+    mean = additive_preconditioner(components)
+    np.testing.assert_allclose(mean(residual), 0.5 * (first + second) @ residual)
+
+    weighted = additive_preconditioner(components, weights=[0.25, 0.75])
+    dense = jax.vmap(weighted)(jnp.eye(3)).T
+    np.testing.assert_allclose(dense, 0.25 * first + 0.75 * second)
+    np.testing.assert_allclose(dense, dense.T)
+    assert np.linalg.eigvalsh(np.asarray(dense)).min() > 0.0
+
+    operator = jnp.linalg.inv(dense)
+    solution = pcg(
+        lambda value: operator @ value,
+        residual,
+        precond=weighted,
+        rtol=1e-12,
+        max_steps=4,
+    )
+    assert bool(solution.converged)
+    assert int(solution.iterations) == 1
+    np.testing.assert_allclose(solution.x, dense @ residual, rtol=1e-12, atol=1e-12)
+
+
+def test_additive_preconditioner_supports_pytree_jit_grad_and_placement():
+    tree = {"field": jnp.asarray([0.5, -1.0]), "gauge": (jnp.asarray(0.25),)}
+
+    def scaled(scale):
+        scale_tree = lambda value: jax.tree_util.tree_map(  # noqa: E731
+            lambda leaf: scale * leaf, value
+        )
+        double_tree = lambda value: jax.tree_util.tree_map(  # noqa: E731
+            lambda leaf: 2.0 * leaf, value
+        )
+        return additive_preconditioner([scale_tree, double_tree])(tree)
+
+    applied = jax.jit(scaled)(jnp.asarray(1.0))
+    expected = jax.tree_util.tree_map(lambda leaf: 1.5 * leaf, tree)
+    jax.tree_util.tree_map(np.testing.assert_allclose, applied, expected)
+
+    objective = lambda scale: sum(  # noqa: E731
+        jnp.sum(leaf**2) for leaf in jax.tree_util.tree_leaves(scaled(scale))
+    )
+    assert jax.jit(jax.grad(objective))(1.0) == pytest.approx(1.96875)
+
+    device = jax.devices()[0]
+    placed = jax.tree_util.tree_map(lambda leaf: jax.device_put(leaf, device), tree)
+    preconditioner = additive_preconditioner(
+        [
+            lambda value: value,
+            lambda value: jax.tree_util.tree_map(lambda leaf: 2.0 * leaf, value),
+        ]
+    )
+    leaves = jax.tree_util.tree_leaves(jax.jit(preconditioner)(placed))
+    assert all(leaf.devices() == {device} for leaf in leaves)
+
+
 def poisson_hierarchy():
     """Three-level 1-D Poisson hierarchy on grids of 129, 65 and 33 points.
 
@@ -315,6 +381,57 @@ def test_p_multigrid_as_gmres_preconditioner():
     assert err <= 1e-7
 
 
+def test_galerkin_deflation_is_spd_jittable_and_accelerates_pcg():
+    n_fine, n_coarse = 65, 33
+    dense = jnp.asarray(laplacian_1d(n_fine))
+    transfer = np.zeros((n_fine, n_coarse))
+    transfer[2 * np.arange(n_coarse), np.arange(n_coarse)] = 1.0
+    for index in range(n_coarse - 1):
+        transfer[2 * index + 1, index : index + 2] = 0.5
+    transfer = jnp.asarray(transfer)
+
+    matvec = lambda value: dense @ value  # noqa: E731
+    prolong = lambda value: transfer @ value  # noqa: E731
+    coarse_dense = transfer.T @ dense @ transfer
+    coarse_inverse = jnp.linalg.inv(coarse_dense)
+    coarse_solve = lambda value: coarse_inverse @ value  # noqa: E731
+    smoother = lambda value: (2.0 / 3.0) * value / jnp.diag(dense)  # noqa: E731
+    precond = galerkin_deflation(
+        matvec,
+        smoother,
+        prolong,
+        coarse_solve,
+        jnp.zeros(n_coarse),
+    )
+
+    rng = np.random.default_rng(7)
+    left = jnp.asarray(rng.standard_normal(n_fine))
+    right = jnp.asarray(rng.standard_normal(n_fine))
+    assert jnp.vdot(left, precond(right)) == pytest.approx(
+        jnp.vdot(precond(left), right), abs=1e-12
+    )
+
+    # Materializing this small test operator verifies positive definiteness;
+    # production applications remain matrix-free.
+    precond_dense = jax.vmap(precond)(jnp.eye(n_fine)).T
+    assert np.linalg.eigvalsh(np.asarray(precond_dense)).min() > 0.0
+    np.testing.assert_allclose(jax.jit(precond)(right), precond(right), rtol=1e-13)
+
+    rhs = jnp.asarray(rng.standard_normal(n_fine))
+    plain = pcg(matvec, rhs, rtol=1e-10, max_steps=100)
+    accelerated = pcg(
+        matvec, rhs, precond=precond, rtol=1e-10, max_steps=100
+    )
+    assert bool(plain.converged) and bool(accelerated.converged)
+    assert int(accelerated.iterations) < int(plain.iterations) // 3
+    np.testing.assert_allclose(
+        accelerated.x,
+        np.linalg.solve(np.asarray(dense), np.asarray(rhs)),
+        rtol=1e-9,
+        atol=1e-9,
+    )
+
+
 def kron_system(na=8, nb=6, seed=7):
     rng = np.random.default_rng(seed)
     a = np.eye(na) + 0.5 * rng.standard_normal((na, na)) / np.sqrt(na)
@@ -406,6 +523,14 @@ def test_builder_validation():
         block_jacobi(jnp.eye(3))
     with pytest.raises(ValueError, match="at least one"):
         line_smoother(lambda v: v, [])
+    with pytest.raises(ValueError, match="at least one"):
+        additive_preconditioner([])
+    with pytest.raises(ValueError, match="match len"):
+        additive_preconditioner([lambda value: value], weights=[0.5, 0.5])
+    with pytest.raises(ValueError, match="finite and positive"):
+        additive_preconditioner([lambda value: value], weights=[0.0])
+    with pytest.raises(ValueError, match="pytree structure"):
+        additive_preconditioner([lambda value: (value,)])(jnp.ones(2))
     with pytest.raises(ValueError, match="match len"):
         line_smoother(lambda v: v, [lambda v: v], omega=[0.5, 0.5])
     with pytest.raises(ValueError, match="equal length"):

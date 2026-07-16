@@ -51,6 +51,8 @@ References
   (tridiagonal / banded Gaussian elimination).
 - NVIDIA cuSPARSE ``gtsv2`` batched tridiagonal solver, exposed in JAX as
   :func:`jax.lax.linalg.tridiagonal_solve`.
+- W. H. Press et al., *Numerical Recipes*, 3rd ed., section 2.7.3 — cyclic
+  tridiagonal systems as a rank-one correction.
 """
 
 from __future__ import annotations
@@ -120,25 +122,79 @@ def tridiagonal_solve(
     if n_rows == 0:
         return rhs
     if method not in ("auto", "thomas", "lax"):
-        raise ValueError(
-            f"unknown method {method!r}; expected 'auto', 'thomas' or 'lax'"
-        )
+        raise ValueError(f"unknown method {method!r}; expected 'auto', 'thomas' or 'lax'")
     if method == "thomas" or n_rows < 3:
         return _thomas_solve(lower, diag, upper, rhs)
     if method == "lax":
         return _lax_solve(lower, diag, upper, rhs)
     if _platform_dependent is not None:
-        return _platform_dependent(
-            lower, diag, upper, rhs, cpu=_thomas_solve, default=_lax_solve
-        )
+        return _platform_dependent(lower, diag, upper, rhs, cpu=_thomas_solve, default=_lax_solve)
     if jax.default_backend() == "cpu":  # pragma: no cover - old-jax fallback
         return _thomas_solve(lower, diag, upper, rhs)
     return _lax_solve(lower, diag, upper, rhs)  # pragma: no cover
 
 
-def _lax_solve(
-    lower: jax.Array, diag: jax.Array, upper: jax.Array, rhs: jax.Array
+def cyclic_tridiagonal_solve(
+    lower: jax.Array,
+    diag: jax.Array,
+    upper: jax.Array,
+    rhs: jax.Array,
+    *,
+    method: str = "auto",
 ) -> jax.Array:
+    """Solve periodic tridiagonal systems along the leading axis.
+
+    ``lower[0]`` couples row zero to the last unknown and ``upper[-1]``
+    couples the last row to unknown zero. A Sherman--Morrison correction turns
+    the periodic system into one ordinary tridiagonal solve with two stacked
+    right-hand sides, retaining the backend selected by
+    :func:`tridiagonal_solve`.
+
+    The system arrays have shape ``(n, *columns)``. ``rhs`` may append extra
+    trailing field axes, which are solved simultaneously.
+    """
+    lower = jnp.broadcast_to(jnp.asarray(lower), jnp.shape(diag))
+    diag = jnp.asarray(diag)
+    upper = jnp.broadcast_to(jnp.asarray(upper), diag.shape)
+    rhs = jnp.asarray(rhs)
+    if diag.shape[0] < 3:
+        raise ValueError("cyclic tridiagonal systems require at least three rows")
+    if rhs.ndim < diag.ndim or rhs.shape[: diag.ndim] != diag.shape:
+        raise ValueError("rhs must begin with the cyclic tridiagonal system shape")
+
+    # Numerical Recipes names the bottom-left corner alpha and top-right beta;
+    # the public band arrays store those at upper[-1] and lower[0].
+    alpha, beta = upper[-1], lower[0]
+    eps = jnp.asarray(_PIVOT_EPS, dtype=diag.dtype)
+    gamma = jnp.where(jnp.abs(diag[0]) > eps, -diag[0], -jnp.ones_like(diag[0]))
+    core_diag = diag.at[0].set(diag[0] - gamma)
+    core_diag = core_diag.at[-1].set(diag[-1] - alpha * beta / gamma)
+    core_lower = lower.at[0].set(0.0)
+    core_upper = upper.at[-1].set(0.0)
+
+    correction_rhs = jnp.zeros_like(diag).at[0].set(gamma).at[-1].set(alpha)
+    extra_axes = rhs.ndim - diag.ndim
+    correction_rhs = jnp.broadcast_to(
+        correction_rhs.reshape(correction_rhs.shape + (1,) * extra_axes), rhs.shape
+    )
+    solved = tridiagonal_solve(
+        core_lower,
+        core_diag,
+        core_upper,
+        jnp.stack((rhs, correction_rhs), axis=-1),
+        method=method,
+    )
+    solution, correction = solved[..., 0], solved[..., 1]
+    corner_shape = alpha.shape + (1,) * extra_axes
+    beta_rhs = beta.reshape(corner_shape)
+    gamma_rhs = gamma.reshape(corner_shape)
+    scale = (solution[0] + beta_rhs * solution[-1] / gamma_rhs) / (
+        1.0 + correction[0] + beta_rhs * correction[-1] / gamma_rhs
+    )
+    return solution - correction * scale[None, ...]
+
+
+def _lax_solve(lower: jax.Array, diag: jax.Array, upper: jax.Array, rhs: jax.Array) -> jax.Array:
     """Fused batched solve via :func:`jax.lax.linalg.tridiagonal_solve`.
 
     Maps the leading-axis / trailing-column layout onto the ``lax.linalg``
@@ -155,7 +211,7 @@ def _lax_solve(
     du = du.at[-1].set(0.0)
     eps = jnp.asarray(_PIVOT_EPS, dtype=rhs.dtype)
     d = jnp.where(d != 0.0, d, eps)
-    tail = rhs.shape[d.ndim:]
+    tail = rhs.shape[d.ndim :]
     n_fields = int(np.prod(tail, dtype=np.int64)) if tail else 1
     rhs_in = rhs.reshape(d.shape + (n_fields,))
     solution_t = jax.lax.linalg.tridiagonal_solve(
@@ -167,9 +223,7 @@ def _lax_solve(
     return jnp.moveaxis(solution_t, -2, 0).reshape(rhs.shape)
 
 
-def _thomas_solve(
-    lower: jax.Array, diag: jax.Array, upper: jax.Array, rhs: jax.Array
-) -> jax.Array:
+def _thomas_solve(lower: jax.Array, diag: jax.Array, upper: jax.Array, rhs: jax.Array) -> jax.Array:
     """Two-sweep ``lax.scan`` Thomas elimination (bit-reproducible)."""
     if rhs.ndim > diag.ndim:
         expand = (1,) * (rhs.ndim - diag.ndim)

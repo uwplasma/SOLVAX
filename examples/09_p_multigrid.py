@@ -40,9 +40,17 @@ for i in range(n_c):
 P = jnp.asarray(P)
 R = 0.5 * P.T
 
-matvec_f = lambda v: A_f @ v
 A_c_inv = np.linalg.inv(A_c)
-coarse_solve = lambda r: jnp.asarray(A_c_inv) @ r
+
+
+def matvec_f(v):
+    return A_f @ v
+
+
+def coarse_solve(r):
+    return jnp.asarray(A_c_inv) @ r
+
+
 smoother = jnp.diag(A_f)  # one damped-Jacobi sweep per visit
 
 precond = sx.p_multigrid(

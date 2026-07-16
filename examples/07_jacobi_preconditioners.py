@@ -31,7 +31,11 @@ for k in range(n_blocks):
 A = jnp.asarray(A)
 blocks = jnp.asarray(np.stack(blocks))
 b = jnp.ones(n)
-matvec = lambda v: A @ v
+
+
+def matvec(v):
+    return A @ v
+
 
 opts = dict(restart=40, rtol=1e-10, max_restarts=30)
 plain = sx.gmres(matvec, b, **opts)

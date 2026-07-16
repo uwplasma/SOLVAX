@@ -41,7 +41,10 @@ for i in range(nx):
             A[p, p + 1] = -wy
 A = jnp.asarray(A)
 b = jnp.ones(n)
-matvec = lambda v: A @ v
+
+
+def matvec(v):
+    return A @ v
 
 
 def x_line_solve(r):

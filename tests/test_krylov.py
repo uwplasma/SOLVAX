@@ -106,6 +106,62 @@ def test_complex_gcrot_recycle_preserves_accuracy():
     assert np.asarray(second.x) == pytest.approx(reference, rel=1.0e-9, abs=1.0e-9)
 
 
+def test_complex_pytree_gmres_matches_dense_under_jit():
+    matrix, rhs = random_complex_system(7, seed=24)
+    blocks = ((matrix[:4, :4], matrix[:4, 4:]),
+              (matrix[4:, :4], matrix[4:, 4:]))
+    tree_rhs = (rhs[:4].reshape(2, 2), {"field": rhs[4:]})
+
+    def matvec(value):
+        distribution, fields = value
+        x = distribution.reshape(-1)
+        field = fields["field"]
+        return (
+            (blocks[0][0] @ x + blocks[0][1] @ field).reshape(2, 2),
+            {"field": blocks[1][0] @ x + blocks[1][1] @ field},
+        )
+
+    solution = jax.jit(
+        lambda value: gmres(matvec, value, restart=5, max_restarts=4, rtol=1e-11)
+    )(tree_rhs)
+    flat_solution = np.concatenate(
+        [np.asarray(solution.x[0]).reshape(-1), np.asarray(solution.x[1]["field"])]
+    )
+    reference = np.linalg.solve(np.asarray(matrix), np.asarray(rhs))
+    assert bool(solution.converged)
+    assert flat_solution == pytest.approx(reference, rel=1e-9, abs=1e-9)
+    assert float(solution.residual_norm) <= 1e-11 * float(jnp.linalg.norm(rhs))
+
+
+def test_gmres_accepts_custom_inner_product():
+    matrix, rhs = random_complex_system(7, seed=25)
+    weights = jnp.linspace(1.0, 2.0, rhs.size)
+    def inner_product(left, right):
+        return jnp.vdot(left, weights * right)
+    solution = jax.jit(
+        lambda value: gmres(
+            lambda vector: matrix @ vector, value, restart=7,
+            max_restarts=2, rtol=1e-11, inner_product=inner_product,
+        )
+    )(rhs)
+    reference = np.linalg.solve(np.asarray(matrix), np.asarray(rhs))
+    assert bool(solution.converged)
+    assert np.asarray(solution.x) == pytest.approx(reference, rel=1e-9, abs=1e-9)
+
+
+def test_pytree_gmres_validates_tree_structure_and_dtype():
+    rhs = (jnp.ones(2), jnp.ones(1))
+    with pytest.raises(ValueError, match="identical pytree structure"):
+        gmres(lambda x: x, rhs, x0={"different": jnp.ones(3)})
+    with pytest.raises(ValueError, match="common inexact dtype"):
+        gmres(lambda x: x, (jnp.ones(2), jnp.ones(1, dtype=jnp.complex64)))
+
+
+def test_scalar_gmres():
+    solution = gmres(lambda x: 2 * x, jnp.asarray(4.0), rtol=1.0e-12)
+    assert np.asarray(solution.x) == pytest.approx(2.0)
+
+
 def test_exact_inverse_preconditioner():
     a, b = random_system(80, seed=3)
     a_inv = jnp.asarray(np.linalg.inv(np.asarray(a)))

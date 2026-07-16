@@ -17,6 +17,11 @@ pip install "solvax[native]"
 Install a JAX accelerator build separately, following the JAX instructions for
 the target CUDA or TPU platform. SOLVAX does not select the JAX backend.
 
+The v0.7.3 wheel built from this tree is 54 KiB. Core dependencies are JAX and
+Equinox; SciPy remains optional for the host-side native bridge. SOLVAX does
+not depend on a second linear-operator package, which keeps installation and
+operator ownership explicit.
+
 ## The operator contract
 
 Most iterative SOLVAX routines accept a callable `matvec` implementing
@@ -34,9 +39,9 @@ def matvec(v):
 
 This contract supports dense arrays, stencil applications, spectral
 transforms, and nested solver calls without changing the outer method. GMRES
-and GCROT currently operate on flat one-dimensional arrays. PCG accepts an
-arbitrary JAX pytree, provided `matvec`, `precond`, `b`, and `x0` all preserve
-the same tree structure.
+and PCG accept arbitrary JAX pytrees, provided `matvec`, `precond`, `b`, and
+`x0` all preserve the same tree structure. GCROT currently operates on flat
+one-dimensional arrays.
 
 ## Preconditioner contract
 
@@ -93,8 +98,8 @@ $\max(\lVert x_0\rVert_2,1)$.
 |---|---|
 | `block_thomas*` | `(n_blocks, block_size[, n_rhs])` |
 | `tridiagonal_solve` | system dimension first; all trailing axes are batched |
-| `gmres`, `gcrot` | flat `(n,)` vector |
-| `pcg` | array or arbitrary matching pytree |
+| `gmres`, `pcg` | array or arbitrary matching pytree |
+| `gcrot` | flat `(n,)` vector |
 | `anderson_mixing` | history on axis 0 |
 | `chunked_jacfwd/rev` | same output layout as the corresponding JAX transform |
 
@@ -126,6 +131,14 @@ name with `status_name` outside a JAX trace.
 
 `aitken_fixed_point` returns the iterate, true residual norm, iteration count,
 convergence flag, and final relaxation parameter.
+
+### Newton--Krylov results
+
+`newton_krylov` returns `NewtonKrylovSolution`, containing the final PyTree
+iterate, true nonlinear residual norm, Newton and total GMRES iteration counts,
+and separate nonlinear and linear convergence flags. The solve is matrix-free;
+pass `precond=` for a right preconditioner and `inner_product=` for weighted or
+distributed Krylov products.
 
 ## JAX transforms
 

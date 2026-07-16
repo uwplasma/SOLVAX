@@ -109,6 +109,58 @@ def block_thomas_factor(
     return BlockTridiagFactors(delta_lu, delta_piv, lower, upper)
 
 
+def block_thomas_factor_fn(
+    block_fn: Callable[[jax.Array], tuple[jax.Array, jax.Array, jax.Array]],
+    n_blocks: int,
+    factor_dtype=None,
+) -> BlockTridiagFactors:
+    """Factor generated block rows once for reusable primal/transpose solves.
+
+    Unlike :func:`block_thomas_factor`, this entry point never materializes the
+    diagonal band. ``block_fn`` is evaluated exactly once per block index; the
+    returned state stores Schur LU factors and the two off-diagonal bands needed
+    by :func:`block_thomas_solve`.
+
+    Args:
+        block_fn: maps a traced int32 index to ``(lower, diagonal, upper)``
+            blocks of identical square shape.
+        n_blocks: static positive number of block rows.
+        factor_dtype: optional lower precision for Schur LU factorizations, with
+            the same contract as :func:`block_thomas_factor`.
+
+    Returns:
+        Reusable factors accepted by :func:`block_thomas_solve`, including its
+        exact ``transpose=True`` path.
+    """
+    if n_blocks < 1:
+        raise ValueError("n_blocks must be positive")
+
+    l_last, d_last, u_last = block_fn(jnp.int32(n_blocks - 1))
+    work = jnp.result_type(d_last)
+    fdt = work if factor_dtype is None else factor_dtype
+    last = lu_factor(d_last.astype(fdt))
+
+    def down_step(carry, index):
+        delta_next, l_next = carry
+        lower, diagonal, upper = block_fn(index)
+        solved_lower = lu_solve(delta_next, l_next.astype(fdt)).astype(work)
+        delta = lu_factor((diagonal - upper @ solved_lower).astype(fdt))
+        return (delta, lower), (delta[0], delta[1], lower, upper)
+
+    _, (lus, pivs, lowers, uppers) = jax.lax.scan(
+        down_step,
+        (last, l_last),
+        jnp.arange(n_blocks - 1, dtype=jnp.int32),
+        reverse=True,
+    )
+    return BlockTridiagFactors(
+        delta_lu=jnp.concatenate([lus, last[0][None]], axis=0),
+        delta_piv=jnp.concatenate([pivs, last[1][None]], axis=0),
+        lower=jnp.concatenate([lowers, l_last[None]], axis=0),
+        upper=jnp.concatenate([uppers, u_last[None]], axis=0),
+    )
+
+
 def block_thomas_solve(
     factors: BlockTridiagFactors, rhs: jax.Array, transpose: bool = False
 ) -> jax.Array:
@@ -203,21 +255,53 @@ def block_thomas(
     return block_thomas_solve(block_thomas_factor(lower, diag, upper), rhs)
 
 
-def _block_tridiag_matvec(
+def block_tridiag_matvec(
     lower: jax.Array, diag: jax.Array, upper: jax.Array, x: jax.Array
 ) -> jax.Array:
-    """Apply the block-tridiagonal operator to ``x`` in the band layout.
+    """Apply a block-tridiagonal operator without forming a dense matrix.
 
     ``(A x)_k = L_k x_{k-1} + D_k x_k + U_k x_{k+1}``, evaluated for every
     block at once. ``x`` and the result share the layout of the right-hand
-    side, ``(n_blocks, m)`` or ``(n_blocks, m, n_rhs)``. Used to form the
-    working-precision residual of :func:`mixed_precision_block_thomas`.
+    side, ``(n_blocks, m)`` or ``(n_blocks, m, n_rhs)``. This independent
+    operator action is also used by residual diagnostics.
     """
     sub = "kij,kj...->ki..."
     y = jnp.einsum(sub, diag, x)
     y = y.at[1:].add(jnp.einsum(sub, lower[1:], x[:-1]))
     y = y.at[:-1].add(jnp.einsum(sub, upper[:-1], x[1:]))
     return y
+
+
+def block_tridiag_relative_residual(
+    lower: jax.Array,
+    diag: jax.Array,
+    upper: jax.Array,
+    solution: jax.Array,
+    rhs: jax.Array,
+) -> jax.Array:
+    """Return ``||b - A x||_2 / max(||b||_2, tiny)`` per right-hand side.
+
+    A vector right-hand side returns a scalar. Multiple right-hand sides return
+    one value per final column. Every block row is included, so this diagnostic
+    cannot silently omit a truncated high-mode tail.
+    """
+    residual = rhs - block_tridiag_matvec(lower, diag, upper, solution)
+    axes = tuple(range(residual.ndim - 1)) if residual.ndim > 2 else None
+    residual_norm = jnp.linalg.norm(residual, axis=axes)
+    rhs_norm = jnp.linalg.norm(rhs, axis=axes)
+    tiny = jnp.finfo(residual.real.dtype).tiny
+    return residual_norm / jnp.maximum(rhs_norm, tiny)
+
+
+def _solve_matrix_and_rhs(delta, matrix_rhs, rhs):
+    """Apply one LU solve to a matrix block and one or more RHS columns."""
+    vector_rhs = rhs.ndim == 1
+    rhs_columns = rhs[:, None] if vector_rhs else rhs
+    width = matrix_rhs.shape[1]
+    solved = lu_solve(delta, jnp.concatenate([matrix_rhs, rhs_columns], axis=1))
+    solved_matrix = solved[:, :width]
+    solved_rhs = solved[:, width:]
+    return solved_matrix, solved_rhs[:, 0] if vector_rhs else solved_rhs
 
 
 def mixed_precision_block_thomas(
@@ -261,7 +345,7 @@ def mixed_precision_block_thomas(
     """
     residual_dtype = jnp.result_type(rhs)
     factors = block_thomas_factor(lower, diag, upper, factor_dtype=factor_dtype)
-    matvec = lambda x: _block_tridiag_matvec(lower, diag, upper, x)  # noqa: E731
+    matvec = lambda x: block_tridiag_matvec(lower, diag, upper, x)  # noqa: E731
     approx_solve = lambda r: block_thomas_solve(factors, r)  # noqa: E731
     x, _ = iterative_refinement(
         matvec,
@@ -321,8 +405,10 @@ def block_thomas_truncated(
     def head_step(carry, inputs):
         delta_next_lu, delta_next_piv, sigma_next = carry
         d_j, u_j, l_next, b_j = inputs
-        x = lu_solve((delta_next_lu, delta_next_piv), l_next)
-        sigma_j = b_j - u_j @ lu_solve((delta_next_lu, delta_next_piv), sigma_next)
+        x, solved_sigma = _solve_matrix_and_rhs(
+            (delta_next_lu, delta_next_piv), l_next, sigma_next
+        )
+        sigma_j = b_j - u_j @ solved_sigma
         lu_j, piv_j = lu_factor(d_j - u_j @ x)
         return (lu_j, piv_j, sigma_j), (lu_j, piv_j, sigma_j)
 
@@ -352,13 +438,13 @@ def block_thomas_truncated(
     return jnp.concatenate([x0[None], xs], axis=0)
 
 
-def block_thomas_truncated_fn(
+def _block_thomas_truncated_fn_state(
     block_fn: Callable[[jax.Array], tuple[jax.Array, jax.Array, jax.Array]],
     n_blocks: int,
     rhs_low: jax.Array,
     keep_lowest: int,
-) -> jax.Array:
-    """Truncated block-tridiagonal solve with on-the-fly block assembly.
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Return a generated truncated solution and retained elimination state.
 
     Identical semantics to :func:`block_thomas_truncated`, but the blocks are
     produced per index by ``block_fn(k) -> (lower_k, diag_k, upper_k)`` inside
@@ -422,8 +508,8 @@ def block_thomas_truncated_fn(
         if k == n:
             # Top block couples to nothing above.
             u_j = jnp.where(j == n - 1, jnp.zeros_like(u_j), u_j)
-        x = lu_solve(delta_next, l_next)
-        sigma_j = b_j - u_j @ lu_solve(delta_next, sigma_next)
+        x, solved_sigma = _solve_matrix_and_rhs(delta_next, l_next, sigma_next)
+        sigma_j = b_j - u_j @ solved_sigma
         delta_j = lu_factor(d_j - u_j @ x)
         return (delta_j, l_j, sigma_j), (delta_j[0], delta_j[1], sigma_j, l_j)
 
@@ -441,4 +527,70 @@ def block_thomas_truncated_fn(
     x0 = lu_solve((lus[0], pivs[0]), sigmas[0])
     inputs_up = (lus[1:], pivs[1:], ls[1:], sigmas[1:])
     _, xs = jax.lax.scan(up_step, x0, inputs_up)
-    return jnp.concatenate([x0[None], xs], axis=0)
+    solution = jnp.concatenate([x0[None], xs], axis=0)
+    return solution, lus, pivs, sigmas, ls
+
+
+def block_thomas_truncated_fn(
+    block_fn: Callable[[jax.Array], tuple[jax.Array, jax.Array, jax.Array]],
+    n_blocks: int,
+    rhs_low: jax.Array,
+    keep_lowest: int,
+) -> jax.Array:
+    """Truncated block-tridiagonal solve with on-the-fly block assembly.
+
+    The full band arrays are never materialized, and each block index is
+    assembled once. See :func:`block_thomas_truncated_fn_with_residual` when an
+    algebraic residual of the retained Schur system is also required.
+    """
+    solution, _, _, _, _ = _block_thomas_truncated_fn_state(
+        block_fn, n_blocks, rhs_low, keep_lowest
+    )
+    return solution
+
+
+def block_thomas_truncated_fn_with_residual(
+    block_fn: Callable[[jax.Array], tuple[jax.Array, jax.Array, jax.Array]],
+    n_blocks: int,
+    rhs_low: jax.Array,
+    keep_lowest: int,
+    *,
+    residual_rhs_index: int | None = None,
+) -> tuple[jax.Array, jax.Array]:
+    """Return the generated truncated solution and its Schur-system RMS residual.
+
+    The residual is evaluated from the retained pivoted LU factors as
+    ``L @ (U @ x) - P @ rhs``. It therefore includes the eliminated high-mode
+    tail without reconstructing another solution block or materializing the
+    original diagonal band.
+    """
+    solution, lus, pivs, sigmas, lowers = _block_thomas_truncated_fn_state(
+        block_fn, n_blocks, rhs_low, keep_lowest
+    )
+    effective_rhs = sigmas
+    effective_rhs = effective_rhs.at[1:].add(
+        -jnp.einsum("kij,kj...->ki...", lowers[1:], solution[:-1])
+    )
+
+    if residual_rhs_index is not None:
+        if rhs_low.ndim != 3:
+            raise ValueError("residual_rhs_index requires multiple right-hand sides")
+        if not 0 <= residual_rhs_index < rhs_low.shape[-1]:
+            raise ValueError("residual_rhs_index is out of range")
+        residual_solution = solution[..., residual_rhs_index]
+        residual_rhs = effective_rhs[..., residual_rhs_index]
+    else:
+        residual_solution = solution
+        residual_rhs = effective_rhs
+
+    def factor_residual(lu, piv, value, rhs):
+        size = lu.shape[0]
+        lower = jnp.tril(lu, -1) + jnp.eye(size, dtype=lu.dtype)
+        upper = jnp.triu(lu)
+        permutation = jax.lax.linalg.lu_pivots_to_permutation(piv, size)
+        return lower @ (upper @ value) - rhs[permutation]
+
+    residual = jax.vmap(factor_residual)(
+        lus, pivs, residual_solution, residual_rhs
+    )
+    return solution, jnp.linalg.norm(residual) / jnp.sqrt(residual.size)

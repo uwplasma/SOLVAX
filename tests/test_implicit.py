@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from solvax import linear_solve, root_solve
+from solvax import gmres, linear_solve, newton_krylov, root_solve
 
 jax.config.update("jax_enable_x64", True)
 
@@ -101,6 +101,99 @@ def test_linear_solve_explicit_transpose_nonsymmetric():
     assert np.allclose(np.asarray(g_b), fd_b, rtol=1e-5, atol=1e-8)
 
 
+def test_linear_solve_gmres_aux_nonsymmetric_jit_jvp_vjp():
+    diffusion = jnp.array(
+        [
+            [2.0, -1.0, 0.0, 0.0],
+            [-1.0, 2.0, -1.0, 0.0],
+            [0.0, -1.0, 2.0, -1.0],
+            [0.0, 0.0, -1.0, 2.0],
+        ]
+    )
+    convection = jnp.array(
+        [
+            [1.0, 1.0, 0.0, 0.0],
+            [-1.0, 0.0, 1.0, 0.0],
+            [0.0, -1.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0, -1.0],
+        ]
+    )
+    rhs = jnp.array([1.0, -2.0, 0.5, 3.0])
+    cotangent = jnp.array([0.2, -0.4, 0.7, 1.1])
+
+    def solve_with_diagnostics(operator, linear_rhs):
+        solution = gmres(
+            operator,
+            linear_rhs,
+            restart=4,
+            rtol=1.0e-13,
+            atol=1.0e-13,
+            max_restarts=2,
+        )
+        diagnostics = (
+            solution.residual_norm,
+            solution.iterations,
+            solution.converged,
+        )
+        return solution.x, diagnostics
+
+    def solve(alpha):
+        matrix = jnp.eye(4) + 0.1 * diffusion + alpha * convection
+        return linear_solve(
+            lambda vector: matrix @ vector,
+            rhs,
+            solve_with_diagnostics,
+            transpose_solver=solve_with_diagnostics,
+            has_aux=True,
+        )
+
+    alpha = 0.07
+    matrix = jnp.eye(4) + 0.1 * diffusion + alpha * convection
+    expected = jnp.linalg.solve(matrix, rhs)
+    (actual, diagnostics) = jax.jit(solve)(alpha)
+    residual_norm, iterations, converged = diagnostics
+
+    assert np.allclose(actual, expected, rtol=1.0e-12, atol=1.0e-12)
+    assert float(residual_norm) < 1.0e-12
+    assert 0 < int(iterations) <= 4
+    assert bool(converged)
+
+    _, tangent = jax.jvp(lambda value: solve(value)[0], (alpha,), (1.0,))
+    expected_tangent = jnp.linalg.solve(matrix, -convection @ expected)
+    assert np.allclose(tangent, expected_tangent, rtol=1.0e-11, atol=1.0e-12)
+
+    gradient = jax.grad(lambda value: cotangent @ solve(value)[0])(alpha)
+    adjoint = jnp.linalg.solve(matrix.T, cotangent)
+    expected_gradient = -adjoint @ (convection @ expected)
+    assert float(gradient) == pytest.approx(float(expected_gradient), rel=1.0e-11)
+
+
+def test_linear_solve_uses_distinct_transpose_solver():
+    matrix = jnp.array([[3.0, 1.0], [-2.0, 4.0]])
+    rhs = jnp.array([1.0, -0.5])
+    cotangent = jnp.array([0.25, 2.0])
+
+    # Deliberately ignores the supplied operator, so it is valid only for the
+    # forward system. Reusing it for the transpose would produce a wrong VJP.
+    def forward_solver(operator, linear_rhs):
+        del operator
+        return jnp.linalg.solve(matrix, linear_rhs)
+
+    def transpose_solver(operator, linear_rhs):
+        return dense_solver(operator, linear_rhs)
+
+    def objective(linear_rhs):
+        solved = linear_solve(
+            lambda vector: matrix @ vector,
+            linear_rhs,
+            forward_solver,
+            transpose_solver=transpose_solver,
+        )
+        return cotangent @ solved
+
+    assert np.allclose(jax.grad(objective)(rhs), jnp.linalg.solve(matrix.T, cotangent))
+
+
 def test_adjoint_costs_one_extra_transposed_solve():
     # Count *executions* of the solver (a Python-side counter would count
     # traces: custom_linear_solve stages both solve and transpose_solve
@@ -192,3 +285,88 @@ def test_root_solve_custom_tangent_solve():
     g = jax.jacobian(root)(p)
     expected = np.diag(1.0 / (3.0 * np.cbrt(np.asarray(p)) ** 2))
     assert np.allclose(np.asarray(g), expected, rtol=1e-8)
+
+
+def test_newton_krylov_scalar_converges_under_jit():
+    solution = jax.jit(
+        lambda initial: newton_krylov(
+            lambda x: x**2 - 2.0,
+            initial,
+            rtol=1e-12,
+            atol=1e-12,
+            max_steps=8,
+            linear_restart=1,
+            linear_rtol=1e-12,
+            linear_max_restarts=2,
+        )
+    )(jnp.array(1.0))
+
+    assert bool(solution.converged)
+    assert bool(solution.linear_converged)
+    assert float(solution.x) == pytest.approx(np.sqrt(2.0), rel=1e-12)
+    assert int(solution.newton_iterations) > 0
+    assert int(solution.linear_iterations) >= int(solution.newton_iterations)
+
+
+def test_newton_krylov_checks_residual_after_last_update():
+    solution = newton_krylov(
+        lambda x: x - 3.0,
+        jnp.array(0.0),
+        rtol=0.0,
+        atol=1e-12,
+        max_steps=1,
+        linear_restart=1,
+        linear_rtol=1e-12,
+        linear_max_restarts=1,
+    )
+
+    assert bool(solution.converged)
+    assert int(solution.newton_iterations) == 1
+    assert float(solution.residual_norm) < 1e-12
+
+
+def test_newton_krylov_reports_linear_failure():
+    solution = newton_krylov(
+        lambda x: x - 1.0,
+        jnp.array(0.0),
+        rtol=0.0,
+        atol=1e-12,
+        max_steps=2,
+        linear_restart=1,
+        linear_max_restarts=0,
+    )
+
+    assert not bool(solution.converged)
+    assert not bool(solution.linear_converged)
+    assert int(solution.linear_iterations) == 0
+
+
+def test_newton_krylov_supports_pytree_preconditioner_and_inner_product():
+    target = (jnp.array([2.0, -4.0]), jnp.array(9.0))
+
+    def residual(value):
+        return 2.0 * value[0] - target[0], 3.0 * value[1] - target[1]
+
+    precond = lambda value: (value[0] / 2.0, value[1] / 3.0)  # noqa: E731
+    inner_product = lambda left, right: (  # noqa: E731
+        jnp.vdot(left[0], 2.0 * right[0]) + jnp.vdot(left[1], right[1])
+    )
+    solution = jax.jit(
+        lambda: newton_krylov(
+            residual,
+            (jnp.zeros(2), jnp.array(0.0)),
+            precond=precond,
+            inner_product=inner_product,
+            rtol=0.0,
+            atol=1e-12,
+            max_steps=2,
+            linear_restart=2,
+            linear_rtol=1e-12,
+            linear_max_restarts=1,
+        )
+    )()
+
+    assert bool(solution.converged)
+    assert np.asarray(solution.x[0]) == pytest.approx([1.0, -2.0])
+    assert float(solution.x[1]) == pytest.approx(3.0)
+    assert int(solution.linear_iterations) == 1

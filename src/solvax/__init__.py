@@ -26,18 +26,28 @@ from solvax.direct import (
     BlockTridiagFactors,
     block_thomas,
     block_thomas_factor,
+    block_thomas_factor_fn,
     block_thomas_solve,
     block_thomas_truncated,
     block_thomas_truncated_fn,
+    block_thomas_truncated_fn_with_residual,
+    block_tridiag_matvec,
+    block_tridiag_relative_residual,
     mixed_precision_block_thomas,
+)
+from solvax.elliptic import (
+    FourierHelmholtzOperator,
+    build_fourier_helmholtz_operator,
+    solve_fourier_helmholtz,
 )
 from solvax.fixed_point import (
     FixedPointSolution,
+    affine_fixed_point_gmres,
     aitken_fixed_point,
     aitken_relaxation,
     anderson_mixing,
 )
-from solvax.implicit import linear_solve, root_solve
+from solvax.implicit import NewtonKrylovSolution, linear_solve, newton_krylov, root_solve
 from solvax.krylov import KrylovSolution, gcrot, gmres
 from solvax.native import SpluFactorization, splu_solve
 from solvax.operators import (
@@ -50,8 +60,10 @@ from solvax.operators import (
 )
 from solvax.pcg import PCGDiagnostics, PCGSolution, pcg, pcg_linear_solve, status_name
 from solvax.precond import (
+    additive_preconditioner,
     block_jacobi,
     coarse_operator,
+    galerkin_deflation,
     jacobi,
     kronecker_nkp,
     line_smoother,
@@ -60,9 +72,9 @@ from solvax.precond import (
     p_multigrid,
 )
 from solvax.refine import as_low_precision, iterative_refinement
-from solvax.tridiagonal import tridiagonal_solve
+from solvax.tridiagonal import cyclic_tridiagonal_solve, tridiagonal_solve
 
-__version__ = "0.7.0"
+__version__ = "0.8.4"
 
 __all__ = [
     "BandedLUFactors",
@@ -73,14 +85,23 @@ __all__ = [
     "lu_solve_banded",
     "lu_solve_banded_periodic",
     "BlockTridiagFactors",
+    "block_tridiag_matvec",
+    "block_tridiag_relative_residual",
     "block_thomas",
     "block_thomas_factor",
+    "block_thomas_factor_fn",
     "block_thomas_solve",
     "block_thomas_truncated",
     "block_thomas_truncated_fn",
+    "block_thomas_truncated_fn_with_residual",
     "mixed_precision_block_thomas",
+    "FourierHelmholtzOperator",
+    "build_fourier_helmholtz_operator",
+    "solve_fourier_helmholtz",
     "tridiagonal_solve",
+    "cyclic_tridiagonal_solve",
     "FixedPointSolution",
+    "affine_fixed_point_gmres",
     "aitken_fixed_point",
     "aitken_relaxation",
     "anderson_mixing",
@@ -93,6 +114,8 @@ __all__ = [
     "pcg_linear_solve",
     "status_name",
     "linear_solve",
+    "NewtonKrylovSolution",
+    "newton_krylov",
     "root_solve",
     "MatrixFreeOperator",
     "SumOperator",
@@ -100,9 +123,11 @@ __all__ = [
     "BlockTridiagonalOperator",
     "BorderedOperator",
     "schur_projected_precond",
+    "additive_preconditioner",
     "jacobi",
     "block_jacobi",
     "coarse_operator",
+    "galerkin_deflation",
     "line_smoother",
     "p_multigrid",
     "mixed_precision",

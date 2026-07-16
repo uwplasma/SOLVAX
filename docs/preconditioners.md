@@ -83,6 +83,22 @@ The line inverses often use `tridiagonal_solve` or banded LU. Alternating
 directions treats mixed anisotropy better than a single line family
 {cite}`trottenberg2001`.
 
+## Symmetric additive composition
+
+For fixed self-adjoint positive-definite inverse actions $B_i$ and positive
+weights $w_i$, the sum $B=\sum_i w_iB_i$ remains self-adjoint positive definite
+and is therefore suitable for PCG. `additive_preconditioner` defaults to the
+arithmetic mean and accepts arrays or arbitrary matching pytrees:
+
+```python
+precond = sx.additive_preconditioner([x_line_inverse, y_line_inverse])
+solution = sx.pcg(matvec, rhs, precond=precond)
+```
+
+This composes existing axis, block, or Schwarz inverse actions; geometry and
+component construction stay with the caller. Use positive custom weights only
+after verifying that every component is symmetric positive definite.
+
 ## Multigrid V-cycle
 
 Let level $\ell$ have operator $A_\ell$, smoother $S_\ell$, restriction
@@ -113,6 +129,32 @@ Arrays supplied as smoothers are interpreted as diagonal smoothers; callables
 may implement richer applications. Multigrid quality depends on complementary
 smoothing and coarse correction, not the recursion alone
 {cite}`trottenberg2001`.
+
+## Symmetric Galerkin deflation
+
+PCG needs a fixed symmetric positive-definite preconditioner. Given a symmetric
+smoother $S$, prolongation $P$, and Galerkin coarse operator
+$A_c=P^TAP$, `galerkin_deflation` applies the balanced two-level inverse
+
+$$
+S + (I-SA)P A_c^{-1}P^T(I-AS).
+$$
+
+```python
+coarse_template = jnp.zeros(coarse_shape)
+precond = sx.galerkin_deflation(
+    A_fine,
+    symmetric_smoother,
+    prolong,
+    solve_galerkin_coarse,
+    coarse_template,
+)
+```
+
+Restriction is generated as the exact linear transpose of `prolong`, avoiding
+an inconsistent transfer pair. The caller still owns the symmetry and positive
+definiteness of $A$, $S$, and the coarse solve. Use the general V-cycle with a
+flexible Krylov method when these requirements do not hold.
 
 ## Kronecker preconditioning
 
@@ -172,8 +214,10 @@ use is not an improvement. Benchmark complete solves, including setup reuse.
 | Jacobi | yes | yes | yes if positive |
 | Block Jacobi | yes | yes | yes if HPD |
 | changing/inexact nested solve | yes | yes | generally no |
+| positive additive composition | yes | yes | yes if components are SPD |
 | line smoother | yes | yes | only if resulting action is SPD |
 | V-cycle | yes | yes | only with a symmetric positive cycle |
+| balanced Galerkin deflation | yes | yes | yes if components are SPD |
 | mixed precision | yes | yes | validate positivity carefully |
 
 ## API summary
@@ -182,7 +226,9 @@ use is not an improvement. Benchmark complete solves, including setup reuse.
 - {func}`solvax.precond.block_jacobi`
 - {func}`solvax.precond.coarse_operator`
 - {func}`solvax.precond.line_smoother`
+- {func}`solvax.precond.additive_preconditioner`
 - {func}`solvax.precond.p_multigrid`
+- {func}`solvax.precond.galerkin_deflation`
 - {func}`solvax.precond.mixed_precision`
 - {func}`solvax.precond.kronecker_nkp`
 - {func}`solvax.precond.nearest_kronecker`

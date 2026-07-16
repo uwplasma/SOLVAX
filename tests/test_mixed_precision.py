@@ -18,7 +18,7 @@ from solvax import (
     block_thomas_solve,
     mixed_precision_block_thomas,
 )
-from solvax.direct import _block_tridiag_matvec
+from solvax.direct import block_tridiag_matvec
 
 jax.config.update("jax_enable_x64", True)
 
@@ -35,7 +35,7 @@ def make_system(n_blocks, m, n_rhs=None, seed=0, dominance=4.0):
 
 
 def resid_norm(lower, diag, upper, x, rhs):
-    return float(jnp.linalg.norm(_block_tridiag_matvec(lower, diag, upper, x) - rhs))
+    return float(jnp.linalg.norm(block_tridiag_matvec(lower, diag, upper, x) - rhs))
 
 
 @pytest.mark.parametrize("n_rhs", [None, 3])
