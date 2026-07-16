@@ -9,6 +9,7 @@ requirements. No solver is uniformly best.
 |---|---|---|---|
 | Scalar tridiagonal, many columns | `tridiagonal_solve` | banded LU | no pivoting; requires a stable tridiagonal system |
 | Scalar periodic (cyclic) tridiagonal | `cyclic_tridiagonal_solve` | periodic banded LU | corner coupling limited to one sub- and superdiagonal |
+| Separable Helmholtz on periodic x bounded grid | `solve_fourier_helmholtz` | FGMRES + line preconditioner | coefficients must be independent of the periodic axis |
 | Dense block-tridiagonal | block Thomas | GMRES + block-Thomas preconditioner | block elimination assumes nonsingular Schur complements |
 | Narrow nonperiodic band | banded LU | GMRES + banded preconditioner | static rather than dynamic pivoting |
 | Narrow periodic band | periodic banded LU | GMRES with core inverse | low-rank corner model must match the operator |

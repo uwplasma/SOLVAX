@@ -9,6 +9,7 @@ field reference.
 
 api/operators
 api/direct
+api/elliptic
 api/krylov
 api/pcg
 api/fixed_point
