@@ -87,6 +87,9 @@ def tridiagonal_solve(
     ``upper`` share the *system* shape (leading axis ``n`` plus any batch
     columns); ``rhs`` may carry **extra trailing axes** beyond that shape —
     stacked right-hand sides / fields — which are all solved in a single pass.
+    Real bands with a complex ``rhs`` are packed as two real fields, preserving
+    the fused real accelerator path without storing or factoring complex bands.
+    Genuinely complex bands use the portable Thomas implementation.
 
     Args:
         lower: sub-diagonal, couples row ``j`` to ``j-1``; ``lower[0]``
@@ -106,6 +109,9 @@ def tridiagonal_solve(
               otherwise, chosen with :func:`jax.lax.platform_dependent`;
               systems with ``n < 3`` always use Thomas.
 
+            Complex coefficient matrices use Thomas for every method because
+            the fused JAX primitive is real-only on supported JAX releases.
+
     Returns:
         The solution with the same shape as ``rhs``.
 
@@ -113,17 +119,37 @@ def tridiagonal_solve(
         ValueError: if ``method`` is not one of ``"auto"``, ``"thomas"``,
             ``"lax"``.
     """
-    dtype = jnp.result_type(lower, diag, upper, rhs)
-    lower = jnp.asarray(lower, dtype=dtype)
-    diag = jnp.asarray(diag, dtype=dtype)
-    upper = jnp.asarray(upper, dtype=dtype)
-    rhs = jnp.asarray(rhs, dtype=dtype)
+    lower, diag, upper, rhs = map(jnp.asarray, (lower, diag, upper, rhs))
     n_rows = int(rhs.shape[0])
     if n_rows == 0:
         return rhs
     if method not in ("auto", "thomas", "lax"):
         raise ValueError(f"unknown method {method!r}; expected 'auto', 'thomas' or 'lax'")
-    if method == "thomas" or n_rows < 3:
+
+    band_dtype = jnp.result_type(lower, diag, upper)
+    bands_are_complex = jnp.issubdtype(band_dtype, jnp.complexfloating)
+    rhs_is_complex = jnp.issubdtype(rhs.dtype, jnp.complexfloating)
+    if rhs_is_complex and not bands_are_complex:
+        # A real matrix acts independently on the real and imaginary parts.
+        # Keeping both as one trailing real field axis preserves the vendor
+        # batched kernel and avoids doubling band storage on accelerators.
+        dtype = jnp.result_type(lower, diag, upper, rhs.real)
+        packed_rhs = jnp.stack((rhs.real, rhs.imag), axis=-1).astype(dtype)
+        packed = tridiagonal_solve(
+            lower.astype(dtype),
+            diag.astype(dtype),
+            upper.astype(dtype),
+            packed_rhs,
+            method=method,
+        )
+        return lax.complex(packed[..., 0], packed[..., 1])
+
+    dtype = jnp.result_type(lower, diag, upper, rhs)
+    lower = lower.astype(dtype)
+    diag = diag.astype(dtype)
+    upper = upper.astype(dtype)
+    rhs = rhs.astype(dtype)
+    if bands_are_complex or method == "thomas" or n_rows < 3:
         return _thomas_solve(lower, diag, upper, rhs)
     if method == "lax":
         return _lax_solve(lower, diag, upper, rhs)

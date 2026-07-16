@@ -125,7 +125,7 @@ def test_lax_matches_thomas():
 
 
 @pytest.mark.parametrize("method", ["thomas", "lax", "auto"])
-def test_complex_rhs_promotes_real_bands_and_is_differentiable(method):
+def test_complex_rhs_preserves_real_bands_and_is_differentiable(method):
     lower, diag, upper, rhs = make_tridiag(12, (3,), 2, seed=12)
     rhs = rhs + 1j * jnp.roll(rhs, 1, axis=0)
     solve = jax.jit(
@@ -138,6 +138,36 @@ def test_complex_rhs_promotes_real_bands_and_is_differentiable(method):
         lambda scale: jnp.real(jnp.vdot(solve(scale * rhs), solve(scale * rhs)))
     )(jnp.asarray(1.0))
     assert gradient == pytest.approx(2.0 * value, rel=1.0e-10)
+
+
+@pytest.mark.parametrize("method", ["thomas", "lax", "auto"])
+def test_complex_bands_use_portable_dense_equivalent(method):
+    lower, diag, upper, rhs = make_tridiag(10, (2,), 2, seed=13)
+    lower = lower + 0.05j * jnp.roll(lower, 1, axis=0)
+    diag = diag + 0.2j
+    upper = upper - 0.05j * jnp.roll(upper, -1, axis=0)
+    solved = jax.jit(
+        lambda value: tridiagonal_solve(lower, diag, upper, value, method=method)
+    )(rhs + 0.1j * rhs)
+    assert solved == pytest.approx(
+        dense_solve(lower, diag, upper, rhs + 0.1j * rhs), abs=1.0e-10
+    )
+
+
+def test_complex64_rhs_supports_forward_and_reverse_transforms():
+    lower, diag, upper, rhs = make_tridiag(9, (2,), seed=15)
+    lower, diag, upper, rhs = (value.astype(jnp.float32) for value in (lower, diag, upper, rhs))
+    rhs = rhs.astype(jnp.complex64) * (1.0 + 0.2j)
+
+    def solve(value):
+        return tridiagonal_solve(lower, diag, upper, value, method="lax")
+
+    solved, tangent = jax.jvp(solve, (rhs,), (0.1 * rhs,))
+    _, pullback = jax.vjp(solve, rhs)
+    assert solved.dtype == jnp.complex64
+    assert solved == pytest.approx(dense_solve(lower, diag, upper, rhs), abs=2.0e-5)
+    assert tangent == pytest.approx(0.1 * solved, abs=2.0e-6)
+    assert pullback(solved)[0].shape == rhs.shape
 
 
 @pytest.mark.parametrize("n", [1, 2])
@@ -234,6 +264,16 @@ def test_cyclic_jit_vmap_and_gradient():
     perturbation = jnp.zeros_like(diag).at[4].set(step)
     finite_difference = (loss(diag + perturbation) - loss(diag - perturbation)) / (2 * step)
     assert gradient[4] == pytest.approx(finite_difference, rel=1e-5)
+
+
+@pytest.mark.parametrize("method", ["thomas", "lax", "auto"])
+def test_cyclic_complex_rhs_matches_dense(method):
+    lower, diag, upper, rhs = make_tridiag(10, (2,), 2, seed=14)
+    rhs = rhs + 1j * jnp.roll(rhs, 1, axis=0)
+    solved = jax.jit(
+        lambda value: cyclic_tridiagonal_solve(lower, diag, upper, value, method=method)
+    )(rhs)
+    assert solved == pytest.approx(dense_cyclic_solve(lower, diag, upper, rhs), abs=1.0e-10)
 
 
 def test_cyclic_rejects_ambiguous_or_mismatched_shapes():
