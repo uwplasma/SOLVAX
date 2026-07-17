@@ -82,7 +82,10 @@ import jax.numpy as jnp
 from jax.scipy.linalg import lu_factor, lu_solve
 
 from solvax.refine import as_low_precision
-from solvax.tridiagonal import cyclic_tridiagonal_solve, tridiagonal_solve
+from solvax.tridiagonal import (
+    _reusable_tridiagonal_solver,
+    cyclic_tridiagonal_solve,
+)
 
 MatVec = Callable[[jax.Array], jax.Array]
 PytreePreconditioner = Callable[[Any], Any]
@@ -336,16 +339,13 @@ def additive_tridiagonal_line_preconditioner(
         axis %= diagonal.ndim
         permutation = (axis,) + tuple(i for i in range(diagonal.ndim) if i != axis)
         inverse = tuple(permutation.index(i) for i in range(diagonal.ndim))
+        solve = _reusable_tridiagonal_solver(*(jnp.transpose(value, permutation)
+            for value in (lower, diagonal, upper)))
 
-        def solve_line(residual, lower=lower, upper=upper,
+        def solve_line(residual, solve=solve,
                        permutation=permutation, inverse=inverse):
             with jax.named_scope("solvax.line_preconditioner.tridiagonal_solve"):
-                solved = tridiagonal_solve(
-                    jnp.transpose(lower, permutation),
-                    jnp.transpose(diagonal, permutation),
-                    jnp.transpose(upper, permutation),
-                    jnp.transpose(residual, permutation),
-                )
+                solved = solve(jnp.transpose(residual, permutation))
             return jnp.transpose(solved, inverse)
 
         line_solves.append(solve_line)

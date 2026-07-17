@@ -312,3 +312,61 @@ def _thomas_solve(lower: jax.Array, diag: jax.Array, upper: jax.Array, rhs: jax.
     x_last = x[-1]
     _, x_body = lax.scan(backward, x_last, (upper_norm[:-1], x[:-1]), reverse=True)
     return jnp.concatenate([x_body, x_last[None, ...]], axis=0)
+
+
+def _reusable_tridiagonal_solver(lower, diag, upper):
+    """Cache CPU Thomas factors while retaining the fused accelerator path."""
+    lower, diag, upper = map(jnp.asarray, (lower, diag, upper))
+    band_dtype = jnp.result_type(lower, diag, upper)
+    lower, diag, upper = (value.astype(band_dtype)
+        for value in (lower, diag, upper))
+    eps = jnp.asarray(_PIVOT_EPS, dtype=band_dtype)
+    pivot0 = jnp.where(diag[0] != 0.0, diag[0], eps)
+    upper0 = upper[0] / pivot0
+
+    def eliminate(previous, values):
+        upper_j, diagonal_j, lower_j = values
+        pivot = diagonal_j - previous * lower_j
+        pivot = jnp.where(pivot != 0.0, pivot, eps)
+        normalized = upper_j / pivot
+        return normalized, (normalized, pivot)
+
+    _, (upper_rest, pivot_rest) = lax.scan(
+        eliminate, upper0, (upper[1:], diag[1:], lower[1:]))
+    normalized_upper = jnp.concatenate((upper0[None], upper_rest))
+    pivots = jnp.concatenate((pivot0[None], pivot_rest))
+
+    def thomas(rhs):
+        first = rhs[0] / pivots[0]
+
+        def forward(previous, values):
+            lower_j, pivot_j, rhs_j = values
+            result = (rhs_j - previous * lower_j) / pivot_j
+            return result, result
+
+        _, rest = lax.scan(forward, first, (lower[1:], pivots[1:], rhs[1:]))
+        values = jnp.concatenate((first[None], rest))
+
+        def backward(following, values):
+            upper_j, value_j = values
+            result = value_j - upper_j * following
+            return result, result
+
+        _, body = lax.scan(backward, values[-1],
+            (normalized_upper[:-1], values[:-1]), reverse=True)
+        return jnp.concatenate((body, values[-1:]))
+
+    def solve(rhs):
+        rhs = jnp.asarray(rhs)
+        if rhs.dtype != band_dtype:
+            return tridiagonal_solve(lower, diag, upper, rhs)
+        if jnp.issubdtype(band_dtype, jnp.complexfloating) or rhs.shape[0] < 3:
+            return thomas(rhs)
+        if _platform_dependent is not None:
+            return _platform_dependent(rhs, cpu=thomas,
+                default=lambda value: _lax_solve(lower, diag, upper, value))
+        if jax.default_backend() == "cpu":  # pragma: no cover - old JAX
+            return thomas(rhs)
+        return _lax_solve(lower, diag, upper, rhs)  # pragma: no cover
+
+    return solve

@@ -304,6 +304,30 @@ def test_additive_tridiagonal_lines_match_explicit_axis_solves():
     np.testing.assert_allclose(jax.jit(precondition)(rhs), expected)
 
 
+def test_additive_tridiagonal_reuse_preserves_vmap_and_grad():
+    shape = (3, 4, 2)
+    rhs = jnp.arange(2 * np.prod(shape), dtype=float).reshape((2, *shape)) / 10.0
+    def solve(scale, value, reuse):
+        diagonal = jnp.full(shape, 4.0 + scale)
+        lower = jnp.full(shape, -0.3 * scale).at[:, 0].set(0.0)
+        upper = jnp.full(shape, -0.3 * scale).at[:, -1].set(0.0)
+        if reuse:
+            return additive_tridiagonal_line_preconditioner(
+                diagonal, ((1, lower, upper),))(value)
+        arrays = (lower, diagonal, upper, value)
+        return jnp.transpose(tridiagonal_solve(
+            *(jnp.transpose(array, (1, 0, 2)) for array in arrays),
+            method="thomas"), (1, 0, 2))
+    def objective(scale, reuse):
+        mapped = jax.vmap(lambda value: solve(scale, value, reuse))(rhs)
+        return jnp.sum(mapped**2)
+    actual = jax.jit(jax.vmap(lambda value: solve(1.25, value, True)))(rhs)
+    expected = jax.vmap(lambda value: solve(1.25, value, False))(rhs)
+    np.testing.assert_allclose(actual, expected)
+    np.testing.assert_allclose(jax.value_and_grad(objective)(1.25, True),
+        jax.value_and_grad(objective)(1.25, False), rtol=1.0e-12, atol=1.0e-12)
+
+
 def test_additive_tridiagonal_periodic_line_is_dense_exact_and_differentiable():
     weights = jnp.asarray([0.4, 0.7, 0.5, 0.9, 0.6])
     lower, upper = -jnp.roll(weights, 1), -weights
