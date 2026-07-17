@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.8.6 - 2026-07-17
+
 - `tridiagonal_solve` and `cyclic_tridiagonal_solve` accept complex operands:
   real bands with a complex right-hand side solve the real and imaginary parts
   independently (keeping real band storage and the fused accelerator kernel),

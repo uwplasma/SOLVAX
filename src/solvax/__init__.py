@@ -76,7 +76,7 @@ from solvax.precond import (
 from solvax.refine import as_low_precision, iterative_refinement
 from solvax.tridiagonal import cyclic_tridiagonal_solve, tridiagonal_solve
 
-__version__ = "0.8.5"
+__version__ = "0.8.6"
 
 __all__ = [
     "BandedLUFactors",
