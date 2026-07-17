@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `tridiagonal_solve` and `cyclic_tridiagonal_solve` accept complex operands:
+  real bands with a complex right-hand side solve the real and imaginary parts
+  independently (keeping real band storage and the fused accelerator kernel),
+  while genuinely complex bands use the portable Thomas path. The fused
+  primitive is wrapped in an implicit linear solve, so the `"lax"` backend is
+  now forward- and reverse-differentiable.
+
 ## 0.8.5 - 2026-07-16
 
 - Added `additive_tridiagonal_line_preconditioner` for differentiable additive
