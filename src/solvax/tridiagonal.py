@@ -87,6 +87,9 @@ def tridiagonal_solve(
     ``upper`` share the *system* shape (leading axis ``n`` plus any batch
     columns); ``rhs`` may carry **extra trailing axes** beyond that shape —
     stacked right-hand sides / fields — which are all solved in a single pass.
+    Real bands with a complex ``rhs`` use independent real and imaginary solves,
+    preserving real storage and fused accelerator kernels. Genuinely complex
+    bands use the portable Thomas implementation.
 
     Args:
         lower: sub-diagonal, couples row ``j`` to ``j-1``; ``lower[0]``
@@ -106,6 +109,9 @@ def tridiagonal_solve(
               otherwise, chosen with :func:`jax.lax.platform_dependent`;
               systems with ``n < 3`` always use Thomas.
 
+            Complex coefficient matrices use Thomas for every method because
+            the fused JAX primitive is real-only on supported JAX releases.
+
     Returns:
         The solution with the same shape as ``rhs``.
 
@@ -113,16 +119,32 @@ def tridiagonal_solve(
         ValueError: if ``method`` is not one of ``"auto"``, ``"thomas"``,
             ``"lax"``.
     """
-    lower = jnp.asarray(lower)
-    diag = jnp.asarray(diag)
-    upper = jnp.asarray(upper)
-    rhs = jnp.asarray(rhs)
+    lower, diag, upper, rhs = map(jnp.asarray, (lower, diag, upper, rhs))
     n_rows = int(rhs.shape[0])
     if n_rows == 0:
         return rhs
     if method not in ("auto", "thomas", "lax"):
         raise ValueError(f"unknown method {method!r}; expected 'auto', 'thomas' or 'lax'")
-    if method == "thomas" or n_rows < 3:
+
+    band_dtype = jnp.result_type(lower, diag, upper)
+    bands_are_complex = jnp.issubdtype(band_dtype, jnp.complexfloating)
+    rhs_is_complex = jnp.issubdtype(rhs.dtype, jnp.complexfloating)
+    if rhs_is_complex and not bands_are_complex:
+        # A real matrix acts independently on the real and imaginary parts.
+        dtype = jnp.result_type(lower, diag, upper, rhs.real)
+        bands = tuple(value.astype(dtype) for value in (lower, diag, upper))
+
+        def solve(value):
+            return tridiagonal_solve(*bands, value.astype(dtype), method=method)
+
+        return lax.complex(solve(rhs.real), solve(rhs.imag))
+
+    dtype = jnp.result_type(lower, diag, upper, rhs)
+    lower = lower.astype(dtype)
+    diag = diag.astype(dtype)
+    upper = upper.astype(dtype)
+    rhs = rhs.astype(dtype)
+    if bands_are_complex or method == "thomas" or n_rows < 3:
         return _thomas_solve(lower, diag, upper, rhs)
     if method == "lax":
         return _lax_solve(lower, diag, upper, rhs)
@@ -194,6 +216,34 @@ def cyclic_tridiagonal_solve(
 
 
 def _lax_solve(lower: jax.Array, diag: jax.Array, upper: jax.Array, rhs: jax.Array) -> jax.Array:
+    """Differentiable wrapper around the fused tridiagonal primitive."""
+
+    def matvec(value):
+        extra = (1,) * (value.ndim - diag.ndim)
+        lo = lower.reshape(lower.shape + extra)
+        middle = diag.reshape(diag.shape + extra)
+        up = upper.reshape(upper.shape + extra)
+        result = middle * value
+        result = result.at[1:].add(lo[1:] * value[:-1])
+        return result.at[:-1].add(up[:-1] * value[1:])
+
+    def solve(_, value):
+        return _lax_solve_raw(lower, diag, upper, value)
+
+    transpose_lower = jnp.concatenate((jnp.zeros_like(upper[:1]), upper[:-1]))
+    transpose_upper = jnp.concatenate((lower[1:], jnp.zeros_like(lower[:1])))
+
+    def transpose_solve(_, value):
+        return _lax_solve_raw(transpose_lower, diag, transpose_upper, value)
+
+    return lax.custom_linear_solve(
+        matvec, rhs, solve=solve, transpose_solve=transpose_solve
+    )
+
+
+def _lax_solve_raw(
+    lower: jax.Array, diag: jax.Array, upper: jax.Array, rhs: jax.Array
+) -> jax.Array:
     """Fused batched solve via :func:`jax.lax.linalg.tridiagonal_solve`.
 
     Maps the leading-axis / trailing-column layout onto the ``lax.linalg``

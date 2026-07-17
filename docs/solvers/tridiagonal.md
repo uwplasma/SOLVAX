@@ -60,9 +60,20 @@ The work is $O(n)$ per system and storage is $O(n)$; no pivoting occurs
 Systems with fewer than three rows use Thomas because accelerator kernels may
 require a larger minimum dimension.
 
+For real bands and a complex right-hand side, SOLVAX solves the real and
+imaginary parts independently. This keeps real band storage and the fast fused
+accelerator kernel; packing them as a multiple-right-hand-side field is avoided
+because supported GPU backends can lower that layout poorly. Genuinely complex
+bands use portable Thomas arithmetic for every method because the fused JAX
+primitive is real-only on supported JAX releases.
+
 The Thomas arithmetic order is fixed and therefore reproducible on a fixed
 backend. The fused and Thomas paths should agree to floating-point accuracy,
 not necessarily bit for bit.
+
+The fused primitive is wrapped in an implicit linear solve, supplying forward-
+and reverse-mode derivatives even on supported JAX versions whose primitive
+does not define its own differentiation rule.
 
 ## Boundary entries
 
@@ -86,7 +97,7 @@ rank-one update of an ordinary tridiagonal matrix
 {cite}`press2007,golub2013`. Pick any $\gamma\neq0$ and write
 
 $$
-A=T+uv^{H},\qquad
+A=T+uv^{T},\qquad
 u=\gamma e_0+\alpha e_{n-1},\qquad
 v=e_0+\tfrac{\beta}{\gamma}e_{n-1},
 $$
@@ -98,7 +109,7 @@ pivot stays well scaled. The Sherman--Morrison identity then gives the solution
 from two ordinary tridiagonal solves $Ty=b$ and $Tz=u$,
 
 $$
-x=y-\frac{v^{H}y}{1+v^{H}z}\,z .
+x=y-\frac{v^{T}y}{1+v^{T}z}\,z .
 $$
 
 Both right-hand sides are stacked into a single `tridiagonal_solve` call, so a
