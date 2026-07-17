@@ -68,9 +68,24 @@ def _tree_sub(left: PyTree, right: PyTree) -> PyTree:
     return jax.tree.map(lambda x, y: x - y, left, right)
 
 
+def _pcg_matvec(matvec: MatVec, value: PyTree) -> PyTree:
+    """Apply the operator under a stable profiler scope."""
+    with jax.named_scope("solvax.pcg.matvec"):
+        return matvec(value)
+
+
+def _pcg_precondition(precond: MatVec, value: PyTree) -> PyTree:
+    """Apply the preconditioner under a stable profiler scope."""
+    with jax.named_scope("solvax.pcg.preconditioner"):
+        return precond(value)
+
+
 def _tree_dot(left: PyTree, right: PyTree) -> jax.Array:
-    products = jax.tree.leaves(jax.tree.map(lambda x, y: jnp.vdot(x, y), left, right))
-    return jnp.real(sum(products[1:], products[0]))
+    with jax.named_scope("solvax.pcg.inner_product_reduction"):
+        products = jax.tree.leaves(
+            jax.tree.map(lambda x, y: jnp.vdot(x, y), left, right)
+        )
+        return jnp.real(sum(products[1:], products[0]))
 
 
 def _tree_norm(value: PyTree) -> jax.Array:
@@ -80,7 +95,8 @@ def _tree_norm(value: PyTree) -> jax.Array:
 def _tree_multi_dot(*pairs: tuple[PyTree, PyTree]) -> jax.Array:
     """Evaluate independent inner products in one XLA reduction stage."""
 
-    return jnp.stack([_tree_dot(left, right) for left, right in pairs])
+    with jax.named_scope("solvax.pcg.batched_inner_product_reductions"):
+        return jnp.stack([_tree_dot(left, right) for left, right in pairs])
 
 
 def _identity(value: PyTree) -> PyTree:
@@ -101,9 +117,9 @@ def _single_reduction_pcg(
 ) -> PCGSolution:
     """PETSc-style PCG rearrangement with one reduction stage per step."""
 
-    residual0 = _tree_sub(b, matvec(x0))
-    z0 = precond(residual0)
-    applied0 = matvec(z0)
+    residual0 = _tree_sub(b, _pcg_matvec(matvec, x0))
+    z0 = _pcg_precondition(precond, residual0)
+    applied0 = _pcg_matvec(matvec, z0)
     rho0, delta0, residual_squared0 = _tree_multi_dot(
         (residual0, z0), (z0, applied0), (residual0, residual0)
     )
@@ -133,8 +149,8 @@ def _single_reduction_pcg(
         alpha = jnp.where(curvature > 0.0, rho / safe_curvature, 0.0)
         x_next = _tree_add_scaled(x, alpha, direction)
         residual_next = _tree_add_scaled(residual, -alpha, applied)
-        z_next = precond(residual_next)
-        applied_z = matvec(z_next)
+        z_next = _pcg_precondition(precond, residual_next)
+        applied_z = _pcg_matvec(matvec, z_next)
         rho_next, delta_next, residual_squared = _tree_multi_dot(
             (residual_next, z_next),
             (z_next, applied_z),
@@ -267,9 +283,9 @@ def pcg(
             scalar_dtype=scalar_dtype,
             max_steps=max_steps,
         )
-    residual0 = _tree_sub(b, matvec(x0))
+    residual0 = _tree_sub(b, _pcg_matvec(matvec, x0))
     residual_norm0 = _tree_norm(residual0)
-    z0 = precond(residual0)
+    z0 = _pcg_precondition(precond, residual0)
     rho0 = _tree_dot(residual0, z0)
     finite0 = jnp.isfinite(residual_norm0) & jnp.isfinite(rho0)
     status0 = jnp.where(
@@ -289,7 +305,7 @@ def pcg(
 
     def body_fun(state):
         count, x, residual, z, direction, rho, _, _, history = state
-        applied = matvec(direction)
+        applied = _pcg_matvec(matvec, direction)
         curvature = _tree_dot(direction, applied)
         curvature_finite = jnp.isfinite(curvature)
         curvature_ok = curvature > 0.0
@@ -298,7 +314,7 @@ def pcg(
         x_next = _tree_add_scaled(x, alpha, direction)
         residual_next = _tree_add_scaled(residual, -alpha, applied)
         residual_norm = _tree_norm(residual_next)
-        z_next = precond(residual_next)
+        z_next = _pcg_precondition(precond, residual_next)
         rho_next = _tree_dot(residual_next, z_next)
         finite = (
             curvature_finite

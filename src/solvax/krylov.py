@@ -103,6 +103,18 @@ def _tree_sub(left: PyTree, right: PyTree) -> PyTree:
     return jax.tree.map(lambda x, y: x - y, left, right)
 
 
+def _gmres_matvec(matvec: MatVec, value: PyTree) -> PyTree:
+    """Apply the operator under a stable profiler scope."""
+    with jax.named_scope("solvax.gmres.matvec"):
+        return matvec(value)
+
+
+def _gmres_precondition(precond: MatVec, value: PyTree) -> PyTree:
+    """Apply the preconditioner under a stable profiler scope."""
+    with jax.named_scope("solvax.gmres.preconditioner"):
+        return precond(value)
+
+
 def _tree_dot(left: PyTree, right: PyTree) -> jax.Array:
     products = jax.tree.leaves(jax.tree.map(jnp.vdot, left, right))
     return sum(products[1:], products[0])
@@ -226,20 +238,20 @@ def _fgmres_cycle(
     def body_fun(state):
         j, V, Z, H, R, B, cs, sn, g, _ = state
 
-        z = precond(V[j])
-        w = matvec(z)
-        b_j = _adjoint(C) @ w  # project out the recycled image space
-        w = w - C @ b_j
+        z = _gmres_precondition(precond, V[j])
+        w = _gmres_matvec(matvec, z)
+        with jax.named_scope("solvax.gmres.arnoldi_reductions"):
+            b_j = _adjoint(C) @ w  # project out the recycled image space
+            w = w - C @ b_j
 
-        # CGS2: two passes of classical Gram-Schmidt against the padded
-        # basis (zero rows beyond j contribute nothing).
-        h1 = jnp.conj(V) @ w
-        w = w - h1 @ V
-        h2 = jnp.conj(V) @ w
-        w = w - h2 @ V
-        h = h1 + h2
-
-        h_next = jnp.linalg.norm(w)
+            # CGS2: two passes of classical Gram-Schmidt against the padded
+            # basis (zero rows beyond j contribute nothing).
+            h1 = jnp.conj(V) @ w
+            w = w - h1 @ V
+            h2 = jnp.conj(V) @ w
+            w = w - h2 @ V
+            h = h1 + h2
+            h_next = jnp.linalg.norm(w)
         V = V.at[j + 1].set(w / jnp.where(h_next > 0, h_next, 1.0))
         h = h.at[j + 1].set(h_next)
         H = H.at[:, j].set(h)  # unrotated column, keeps A Z = C B + V H
@@ -317,7 +329,7 @@ def _restarted(
     dtype = b.dtype
     eps = jnp.finfo(dtype).eps
     k = C.shape[1]
-    r0 = b - matvec(x0)
+    r0 = b - _gmres_matvec(matvec, x0)
 
     def cond_fun(state):
         _, _, res, _, cycles, _, _, _ = state
@@ -338,7 +350,7 @@ def _restarted(
         # matvec per cycle): the incremental update r - adx inherits CGS2
         # orthogonality drift, and a stale small estimate would end the loop
         # while the true residual is still large.
-        r = b - matvec(x)
+        r = b - _gmres_matvec(matvec, x)
         res = jnp.linalg.norm(r)
 
         if recycling:
@@ -370,7 +382,7 @@ def _restarted(
     )
     x, _, _, iters, _, C, U, fill = lax.while_loop(cond_fun, body_fun, init)
 
-    res = jnp.linalg.norm(b - matvec(x))
+    res = jnp.linalg.norm(b - _gmres_matvec(matvec, x))
     return x, res, iters, res <= tol, C, U, fill
 
 
@@ -403,16 +415,16 @@ def _pytree_fgmres_cycle(
 
     def body_fun(state):
         index, basis, z_basis, triangular, cosines, sines, rhs, _ = state
-        z = precond(_tree_basis_get(basis, index))
-        applied = matvec(z)
+        z = _gmres_precondition(precond, _tree_basis_get(basis, index))
+        applied = _gmres_matvec(matvec, z)
 
-        first = _tree_basis_dot(basis, applied, inner_product)
-        applied = _tree_sub(applied, _tree_basis_sum(first, basis))
-        second = _tree_basis_dot(basis, applied, inner_product)
-        applied = _tree_sub(applied, _tree_basis_sum(second, basis))
-        column = first + second
-
-        next_norm = _tree_norm(applied, inner_product)
+        with jax.named_scope("solvax.gmres.arnoldi_reductions"):
+            first = _tree_basis_dot(basis, applied, inner_product)
+            applied = _tree_sub(applied, _tree_basis_sum(first, basis))
+            second = _tree_basis_dot(basis, applied, inner_product)
+            applied = _tree_sub(applied, _tree_basis_sum(second, basis))
+            column = first + second
+            next_norm = _tree_norm(applied, inner_product)
         next_vector = jax.tree.map(
             lambda x: x / jnp.where(next_norm > 0, next_norm, 1.0), applied
         )
@@ -486,7 +498,7 @@ def _pytree_gmres(
     zero_initial: bool,
 ):
     """Restarted FGMRES implementation for matching pytree operands."""
-    residual = b if zero_initial else _tree_sub(b, matvec(x0))
+    residual = b if zero_initial else _tree_sub(b, _gmres_matvec(matvec, x0))
 
     def cond_fun(state):
         _, _, residual_norm, _, cycles = state
@@ -500,7 +512,7 @@ def _pytree_gmres(
             tolerance, restart, dtype
         )
         x = _tree_add_scaled(x, 1.0, correction)
-        residual = _tree_sub(b, matvec(x))
+        residual = _tree_sub(b, _gmres_matvec(matvec, x))
         return (x, residual, _tree_norm(residual, inner_product),
                 iterations + used, cycles + 1)
 
@@ -663,7 +675,7 @@ def gcrot(
         # from an early-converged previous solve) are masked out and
         # sorted to the back so FIFO insertion refills them first.
         U_in = jnp.asarray(U_in, dtype)
-        W = jnp.stack([matvec(U_in[:, i]) for i in range(k)], axis=1)
+        W = jnp.stack([_gmres_matvec(matvec, U_in[:, i]) for i in range(k)], axis=1)
         Q, R = jnp.linalg.qr(W)
         diag = jnp.abs(jnp.diagonal(R))
         good = diag > n * jnp.finfo(dtype).eps * jnp.max(diag, initial=0.0)

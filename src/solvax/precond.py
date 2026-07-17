@@ -339,10 +339,13 @@ def additive_tridiagonal_line_preconditioner(
 
         def solve_line(residual, lower=lower, upper=upper,
                        permutation=permutation, inverse=inverse):
-            solved = tridiagonal_solve(
-                jnp.transpose(lower, permutation), jnp.transpose(diagonal, permutation),
-                jnp.transpose(upper, permutation), jnp.transpose(residual, permutation),
-            )
+            with jax.named_scope("solvax.line_preconditioner.tridiagonal_solve"):
+                solved = tridiagonal_solve(
+                    jnp.transpose(lower, permutation),
+                    jnp.transpose(diagonal, permutation),
+                    jnp.transpose(upper, permutation),
+                    jnp.transpose(residual, permutation),
+                )
             return jnp.transpose(solved, inverse)
 
         line_solves.append(solve_line)
@@ -350,10 +353,13 @@ def additive_tridiagonal_line_preconditioner(
         lower, upper = periodic_last_axis
 
         def solve_periodic(residual: jax.Array) -> jax.Array:
-            solved = cyclic_tridiagonal_solve(
-                jnp.moveaxis(lower, -1, 0), jnp.moveaxis(diagonal, -1, 0),
-                jnp.moveaxis(upper, -1, 0), jnp.moveaxis(residual, -1, 0),
-            )
+            with jax.named_scope("solvax.line_preconditioner.cyclic_solve"):
+                solved = cyclic_tridiagonal_solve(
+                    jnp.moveaxis(lower, -1, 0),
+                    jnp.moveaxis(diagonal, -1, 0),
+                    jnp.moveaxis(upper, -1, 0),
+                    jnp.moveaxis(residual, -1, 0),
+                )
             return jnp.moveaxis(solved, 0, -1)
 
         line_solves.append(solve_periodic)
