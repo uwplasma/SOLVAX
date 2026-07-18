@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Added `nystrom_preconditioner`: a rank-`ell` randomized Nystrom
+  preconditioner for SPD systems `(A + mu I) x = b`, built from `ell` operator
+  applications with an explicit PRNG key — deterministic, jit-able, and
+  differentiable through the sketch and eigenfactors. Bounds the
+  preconditioned condition number by a small constant in expectation when the
+  rank exceeds about twice the mu-effective dimension (Frangella, Tropp &
+  Udell 2023); the scalable coarse correction when no grid hierarchy exists.
+
 - Warm-started :func:`gcrot` reports `recycle_drift`, the mean principal-angle
   sine between the incoming recycle image space and its re-established span
   under the current operator — zero for an unchanged operator, growing

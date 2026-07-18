@@ -146,6 +146,33 @@ may implement richer applications. Multigrid quality depends on complementary
 smoothing and coarse correction, not the recursion alone
 {cite}`trottenberg2001`.
 
+## Randomized Nystrom preconditioning
+
+When no grid hierarchy or structured coarse operator exists, a rank-$\ell$
+randomized Nystrom approximation $A_{\mathrm{nys}}=U\Lambda U^T$ built from
+$\ell$ operator applications gives the SPD preconditioner
+
+$$
+P^{-1}v=U\,\frac{\lambda_\ell+\mu}{\Lambda+\mu}\,U^Tv+(v-UU^Tv)
+$$
+
+for the regularized system $(A+\mu I)x=b$. When $\ell$ exceeds about twice
+the $\mu$-effective dimension of $A$, the preconditioned condition number is
+bounded by a small constant in expectation, independently of how the spectrum
+decays {cite}`frangella2023`.
+
+```python
+precond = sx.nystrom_preconditioner(matvec, n, rank, jax.random.PRNGKey(0), mu=mu)
+solution = sx.pcg(lambda v: matvec(v) + mu * v, b, precond=precond)
+```
+
+The sketch key is explicit, so construction is deterministic, jit-able, and
+differentiable through both the sketch and the eigenfactors — gradients flow
+through the preconditioner exactly like every other SOLVAX component. On a
+decaying-spectrum SPD operator with a flat tail the test suite pins at least a
+2x PCG iteration reduction; the target regime is fast spectral decay ahead of
+a regularization shift.
+
 ## Symmetric Galerkin deflation
 
 PCG needs a fixed symmetric positive-definite preconditioner. Given a symmetric
@@ -245,6 +272,7 @@ use is not an improvement. Benchmark complete solves, including setup reuse.
 - {func}`solvax.precond.additive_preconditioner`
 - {func}`solvax.precond.p_multigrid`
 - {func}`solvax.precond.galerkin_deflation`
+- {func}`solvax.randomized.nystrom_preconditioner`
 - {func}`solvax.precond.mixed_precision`
 - {func}`solvax.precond.kronecker_nkp`
 - {func}`solvax.precond.nearest_kronecker`

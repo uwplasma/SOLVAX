@@ -73,6 +73,7 @@ from solvax.precond import (
     nearest_kronecker,
     p_multigrid,
 )
+from solvax.randomized import nystrom_preconditioner
 from solvax.refine import as_low_precision, iterative_refinement
 from solvax.tridiagonal import cyclic_tridiagonal_solve, tridiagonal_solve
 
@@ -137,6 +138,7 @@ __all__ = [
     "mixed_precision",
     "kronecker_nkp",
     "nearest_kronecker",
+    "nystrom_preconditioner",
     "iterative_refinement",
     "as_low_precision",
     "chunk_map",
