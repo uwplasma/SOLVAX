@@ -154,6 +154,42 @@ This evaluates the retained Schur equations from the pivoted LU factors. It
 includes the eliminated tail and does not materialize the diagonal band. Omit
 `residual_rhs_index` to combine all right-hand sides in one RMS diagnostic.
 
+### Bounded-memory adjoint
+
+The forward truncated solve is $O(Km^2)$ in memory, but differentiating it with
+plain reverse mode tapes the downward sweep over every block, so the
+*differentiated* solve costs $O(Nm^2)$ — the block-count independence is lost
+exactly where gradient-based inversion needs it. Passing `adjoint_window`
+selects a structure-preserving custom VJP that keeps the reverse pass bounded
+too:
+
+```python
+x_low = sx.block_thomas_truncated(
+    lower, diag, upper, rhs_low, keep_lowest=K, adjoint_window=w
+)
+```
+
+Two facts make this exact where it can be and controlled where it cannot:
+
+- **Right-hand-side gradient (exact).** The transpose of a block-tridiagonal
+  operator is block-tridiagonal with the off-diagonals swapped and transposed,
+  so the cotangent map $\bar b = P_K A^{-\top} E_K\,\bar x$ is *itself* a
+  truncated solve of $A^\top$. It runs at $O(Km^2)$ and carries no truncation
+  error, independent of `adjoint_window`.
+- **Band gradient (windowed).** The full primal and adjoint spread over all
+  blocks but decay geometrically away from the retained head for block
+  diagonally dominant systems {cite}`demko1984,benzi2013`. Reconstructing the
+  band gradients from a leading $(K+w)$-block re-solve therefore has error
+  $O(\rho^{2w})$ with $\rho\in(0,1)$ set by the conditioning, at
+  $O((K+w)m^2)$ memory. Setting `adjoint_window >= n_blocks` reproduces the
+  exact gradient.
+
+The result: forward *and* reverse run at memory independent of the block count,
+so `jax.grad` through a truncated kinetic solve stays flat as $N$ grows while
+the naive tape grows linearly. This is the differentiable counterpart of the
+truncated forward solve and the tool for adjoint-based source/transport
+inversion on tall block systems.
+
 ## Residual gate
 
 Validate a solve with an operator action independent of the factorization:
