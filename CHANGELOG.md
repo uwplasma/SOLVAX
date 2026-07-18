@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `mixed_precision_block_thomas` gained an opt-in `implicit_adjoint` custom VJP:
+  the adjoint system is solved by the same working-precision refinement reusing
+  the transposed low-precision factors — zero additional factorizations, no
+  differentiation through the factorization, and the gradient inherits the
+  refined forward error rather than the factorization precision.
+
 - `block_thomas_truncated` gained an opt-in `adjoint_window` argument selecting a
   structure-preserving custom VJP: the right-hand-side gradient is the exact
   transposed truncated solve and the band gradients come from a leading

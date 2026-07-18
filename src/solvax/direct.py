@@ -313,6 +313,7 @@ def mixed_precision_block_thomas(
     *,
     factor_dtype=jnp.float32,
     refine_steps: int = 2,
+    implicit_adjoint: bool = False,
 ) -> jax.Array:
     """Block-tridiagonal solve with a low-precision factorization + refinement.
 
@@ -340,10 +341,21 @@ def mixed_precision_block_thomas(
             backend; half precision is not — see :func:`block_thomas_factor`).
         refine_steps: number of refinement sweeps (static int); ``0`` returns
             the bare low-precision solve.
+        implicit_adjoint: if True, reverse mode uses a custom VJP that solves
+            the adjoint system ``A^T lam = cotangent`` by the *same* refinement
+            reusing the transposed low-precision factors — zero additional
+            factorizations, no differentiation through the factorization, and
+            the gradient inherits the refined working-precision forward error
+            rather than the factorization precision. If False (default),
+            reverse mode differentiates through the refinement loop directly.
 
     Returns:
         ``x`` with the same shape and precision as ``rhs``.
     """
+    if implicit_adjoint:
+        return _mixed_precision_block_thomas_amortized(
+            lower, diag, upper, rhs, factor_dtype, refine_steps
+        )
     residual_dtype = jnp.result_type(rhs)
     factors = block_thomas_factor(lower, diag, upper, factor_dtype=factor_dtype)
     matvec = lambda x: block_tridiag_matvec(lower, diag, upper, x)  # noqa: E731
@@ -356,6 +368,80 @@ def mixed_precision_block_thomas(
         residual_dtype=residual_dtype,
     )
     return x
+
+
+def _band_gradients(lam: jax.Array, x: jax.Array):
+    """Band gradients of a solve: ``bar A = -lambda x^T`` restricted to the band.
+
+    ``bar D_j = -lam_j x_j^T``, ``bar L_j = -lam_j x_{j-1}^T`` (``j >= 1``),
+    ``bar U_j = -lam_j x_{j+1}^T`` (``j <= N-2``); trailing right-hand-side
+    axes are summed out.
+    """
+    lam2 = lam.reshape(lam.shape[0], lam.shape[1], -1)
+    x2 = x.reshape(x.shape[0], x.shape[1], -1)
+    outer = lambda a, b: -jnp.einsum("jmr,jnr->jmn", a, b)  # noqa: E731
+    x_below = jnp.concatenate([jnp.zeros_like(x2[:1]), x2[:-1]], axis=0)
+    x_above = jnp.concatenate([x2[1:], jnp.zeros_like(x2[:1])], axis=0)
+    diag_bar = outer(lam2, x2)
+    lower_bar = outer(lam2, x_below).at[0].set(0.0)
+    upper_bar = outer(lam2, x_above).at[-1].set(0.0)
+    return lower_bar, diag_bar, upper_bar
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(4, 5))
+def _mixed_precision_block_thomas_amortized(
+    lower: jax.Array,
+    diag: jax.Array,
+    upper: jax.Array,
+    rhs: jax.Array,
+    factor_dtype,
+    refine_steps: int,
+) -> jax.Array:
+    x, _ = _mixed_precision_forward(lower, diag, upper, rhs, factor_dtype, refine_steps)
+    return x
+
+
+def _mixed_precision_forward(lower, diag, upper, rhs, factor_dtype, refine_steps):
+    residual_dtype = jnp.result_type(rhs)
+    factors = block_thomas_factor(lower, diag, upper, factor_dtype=factor_dtype)
+    x, _ = iterative_refinement(
+        lambda v: block_tridiag_matvec(lower, diag, upper, v),
+        rhs,
+        lambda r: block_thomas_solve(factors, r),
+        iterations=refine_steps,
+        residual_dtype=residual_dtype,
+    )
+    return x, factors
+
+
+def _mixed_precision_fwd(lower, diag, upper, rhs, factor_dtype, refine_steps):
+    x, factors = _mixed_precision_forward(
+        lower, diag, upper, rhs, factor_dtype, refine_steps
+    )
+    return x, (lower, diag, upper, x, factors)
+
+
+def _mixed_precision_bwd(factor_dtype, refine_steps, residuals, cotangent):
+    lower, diag, upper, x, factors = residuals
+    # Adjoint solve A^T lam = cotangent by the same refinement, reusing the
+    # low-precision factors transposed: zero extra factorizations, and the
+    # gradient inherits the refined (working-precision) forward error rather
+    # than the factorization precision.
+    lower_t, diag_t, upper_t = _transpose_bands(lower, diag, upper)
+    lam, _ = iterative_refinement(
+        lambda v: block_tridiag_matvec(lower_t, diag_t, upper_t, v),
+        cotangent,
+        lambda r: block_thomas_solve(factors, r, transpose=True),
+        iterations=refine_steps,
+        residual_dtype=jnp.result_type(cotangent),
+    )
+    lower_bar, diag_bar, upper_bar = _band_gradients(lam, x)
+    return lower_bar, diag_bar, upper_bar, lam
+
+
+_mixed_precision_block_thomas_amortized.defvjp(
+    _mixed_precision_fwd, _mixed_precision_bwd
+)
 
 
 def _block_thomas_truncated_impl(
