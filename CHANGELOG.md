@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Warm-started :func:`gcrot` reports `recycle_drift`, the mean principal-angle
+  sine between the incoming recycle image space and its re-established span
+  under the current operator — zero for an unchanged operator, growing
+  linearly with the operator step, so optimization loops can monitor whether
+  their step size keeps recycling effective. Joint primal+adjoint recycling
+  along a continuation trajectory is demonstrated and measured in
+  `benchmarks/benchmark_recycling.py`.
+
 - Added the one-command reproduction driver (`python -m benchmarks.reproduce`):
   regenerates every committed measurement record after writing a
   hardware/software manifest and validating the timer against a known

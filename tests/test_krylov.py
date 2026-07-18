@@ -286,3 +286,43 @@ def test_multi_restart_convergence():
     x_ref = np.linalg.solve(np.asarray(a), np.asarray(b))
     err = np.linalg.norm(np.asarray(sol.x) - x_ref) / np.linalg.norm(x_ref)
     assert err <= 1e-8
+
+
+def test_recycle_drift_diagnostic():
+    # Cold start reports zero drift; gmres reports none; an unchanged operator
+    # re-establishes the same span (machine-floor drift); and the drift grows
+    # about linearly with the operator perturbation, tracking the Davis-Kahan
+    # subspace-rotation bound.
+    matrix, rhs = random_system(60, seed=31)
+    perturbation = jnp.asarray(
+        np.random.default_rng(32).standard_normal(matrix.shape)
+    )
+
+    cold = gcrot(lambda v: matrix @ v, rhs, m=20, k=8, rtol=1e-10)
+    assert float(cold.recycle_drift) == 0.0
+    assert gmres(lambda v: matrix @ v, rhs).recycle_drift is None
+
+    same = gcrot(lambda v: matrix @ v, rhs, m=20, k=8, rtol=1e-10, recycle=cold.recycle)
+    assert float(same.recycle_drift) < 1e-12
+
+    drifts = []
+    for eps in (1e-4, 1e-3, 1e-2):
+        moved = gcrot(
+            lambda v, eps=eps: (matrix + eps * perturbation) @ v,
+            rhs, m=20, k=8, rtol=1e-10, recycle=cold.recycle,
+        )
+        drifts.append(float(moved.recycle_drift))
+    assert drifts[0] < drifts[1] < drifts[2]  # monotone in the perturbation
+    assert 5.0 < drifts[1] / drifts[0] < 20.0  # linear per decade (measured ~10)
+    assert 5.0 < drifts[2] / drifts[1] < 20.0
+
+
+def test_recycle_drift_is_jit_compatible():
+    matrix, rhs = random_system(40, seed=33)
+    cold = gcrot(lambda v: matrix @ v, rhs, m=16, k=6, rtol=1e-10)
+    warm = jax.jit(
+        lambda pair: gcrot(
+            lambda v: matrix @ v, rhs, m=16, k=6, rtol=1e-10, recycle=pair
+        ).recycle_drift
+    )(cold.recycle)
+    assert np.isfinite(float(warm))

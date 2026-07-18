@@ -77,6 +77,12 @@ class KrylovSolution(NamedTuple):
         recycle: updated recycle pair ``(C, U)`` with fixed shapes
             ``(n, k)`` for :func:`gcrot`, ``None`` for :func:`gmres`.
             Unfilled columns are zero.
+        recycle_drift: for a warm-started :func:`gcrot`, the mean principal-
+            angle sine between the incoming recycle image space and its
+            re-established span under the *current* operator — a direct
+            measure of how far the operator has drifted since the pair was
+            built (0 for an unchanged operator, up to 1 for an orthogonal
+            rotation). ``0.0`` on a cold start, ``None`` for :func:`gmres`.
     """
 
     x: PyTree
@@ -84,6 +90,7 @@ class KrylovSolution(NamedTuple):
     iterations: jax.Array
     converged: jax.Array
     recycle: tuple[jax.Array, jax.Array] | None = None
+    recycle_drift: jax.Array | None = None
 
 
 def _identity(v: jax.Array) -> jax.Array:
@@ -662,6 +669,7 @@ def gcrot(
         C = jnp.zeros((n, k), dtype)
         U = jnp.zeros((n, k), dtype)
         fill = jnp.int32(0)
+        drift = jnp.asarray(0.0, jnp.real(jnp.zeros((), dtype)).dtype)
     else:
         C_in, U_in = recycle
         if C_in.shape != (n, k) or U_in.shape != (n, k):
@@ -685,8 +693,20 @@ def gcrot(
         C = (Q * good)[:, order]
         U = (U_new * good)[:, order]
         fill = jnp.sum(good).astype(jnp.int32)
+        # Operator-drift diagnostic: the incoming image columns were
+        # orthonormal (up to zero padding); after re-establishing A U = C for
+        # the current operator, the mean sine of the principal angles between
+        # the old filled columns and the new span measures how far the
+        # operator moved the recycled space. sin(theta_i) = ||(I - C C^H)
+        # c_i^old|| for unit c_i^old.
+        C_in = jnp.asarray(recycle[0], dtype)
+        filled = jnp.linalg.norm(C_in, axis=0) > 0.5
+        residual_cols = C_in - C @ (_adjoint(C) @ C_in)
+        sines = jnp.linalg.norm(residual_cols, axis=0)
+        count = jnp.maximum(jnp.sum(filled), 1)
+        drift = (jnp.sum(jnp.where(filled, sines, 0.0)) / count).real
 
     x, res, iters, converged, C, U, _ = _restarted(
         matvec, b, x0, precond, m, tol, max_restarts, C, U, fill, recycling=True,
     )
-    return KrylovSolution(x, res, iters, converged, (C, U))
+    return KrylovSolution(x, res, iters, converged, (C, U), drift)

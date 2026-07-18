@@ -128,6 +128,31 @@ for parameter in scan:
 The returned `recycle` arrays have shape `(n, k)` and may contain zero-padded
 unused columns.
 
+### Recycling across optimization, and the drift diagnostic
+
+A gradient-based optimization loop solves *two* slowly varying families: the
+primal ``A(theta_j) x = b`` and the adjoint ``A(theta_j)^T lam = g``. Each is
+its own sequence — carry one recycle pair per direction:
+
+```python
+primal = sx.gcrot(matvec, b, m=30, k=10, recycle=primal_pair)
+adjoint = sx.gcrot(matvec_t, g, m=30, k=10, recycle=adjoint_pair)
+primal_pair, adjoint_pair = primal.recycle, adjoint.recycle
+```
+
+On a warm start the solution reports `recycle_drift`: the mean principal-angle
+sine between the incoming recycle image space and its re-established span
+under the current operator. It is zero for an unchanged operator, and grows
+*linearly* with the operator step ``||A(theta_{j+1}) - A(theta_j)||`` (a
+Davis–Kahan subspace-rotation effect), so it tells the caller directly whether
+the optimizer's step size keeps the recycled space useful — small drift and
+falling iteration counts, or drift near one and a pair no better than a cold
+start. On the continuation family in `benchmarks/benchmark_recycling.py`, both
+carried pairs collapse the per-step iterations from 32 to 2–3 within four
+steps (a 3.3× total matvec reduction over ten steps) at measured drift
+~1e-3 per step, while per-step cold GCROT shows no gain at all — the carrying
+is the mechanism, not the deflation itself.
+
 ## Relationship to the literature
 
 The implementation follows the recycling framework of Parks et al. and the
