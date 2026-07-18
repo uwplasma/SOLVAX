@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Added a sharding and communication test suite on an eight-device emulated CPU
+  mesh (`tests/test_sharding.py`), pinning sharding preservation through pytree
+  Krylov solves and collective-operation counts of compiled primal and adjoint
+  solves, plus `benchmarks/benchmark_collectives.py` and a sharding guide. The
+  measured invariant: reverse-mode solves cost exactly one extra solve's worth
+  of collectives, and sharded batched tridiagonal solves are collective-free in
+  both directions.
+
 - `mixed_precision_block_thomas` gained an opt-in `implicit_adjoint` custom VJP:
   the adjoint system is solved by the same working-precision refinement reusing
   the transposed low-precision factors — zero additional factorizations, no
