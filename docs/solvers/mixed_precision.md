@@ -85,6 +85,31 @@ x = sx.mixed_precision_block_thomas(
 This factors Schur complements in float32, applies block-Thomas corrections in
 that precision, and computes block-tridiagonal residuals in working precision.
 
+### Amortized implicit adjoint
+
+By default, `jax.grad` differentiates *through* the refinement loop — taping
+every sweep and differentiating the low-precision factorization itself. Passing
+`implicit_adjoint=True` selects a custom VJP that instead solves the adjoint
+system
+
+$$
+A^T\lambda=\bar x
+$$
+
+by the *same* refinement, reusing the already-computed low-precision factors
+through the transposed triangular solves — zero additional factorizations. The
+gradients are then $\bar b=\lambda$ and the band outer products
+$\bar A=-\lambda x^T$ restricted to the band, all in working precision.
+
+The consequence worth stating precisely: **the gradient inherits the refined
+forward error, not the factorization precision.** With float32 factors and two
+refinement sweeps, the computed gradient matches the exact float64 gradient to
+working precision whenever the refinement itself converges
+($\kappa(A)\,u_{f}<1$, {cite}`carson2018`), while a bare low-precision
+gradient (`refine_steps=0`) carries float32-level error. One cheap
+factorization is thus amortized over the primal *and* adjoint solves, and the
+backward pass is refinement sweeps rather than a differentiated factorization.
+
 ## Low-precision preconditioning
 
 ```python

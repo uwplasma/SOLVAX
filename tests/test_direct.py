@@ -143,6 +143,79 @@ def test_truncated_matches_full(keep):
     assert np.allclose(np.asarray(x_trunc), np.asarray(x_full[:keep]), atol=1e-12)
 
 
+@pytest.mark.parametrize("n_rhs", [None, 2])
+def test_bounded_adjoint_full_window_matches_naive_grad(n_rhs):
+    # The custom-VJP bounded adjoint at a full window reproduces the exact
+    # reverse-mode gradient of the direct (taped) truncated solve, bit for
+    # bit up to rounding, for every input (bands and right-hand side).
+    n_blocks, m, keep = 12, 4, 3
+    (lower, diag, upper, rhs), _ = make_system(n_blocks, m, n_rhs, seed=5)
+    rhs = rhs.at[keep:].set(0.0)
+    rhs_low = rhs[:keep]
+
+    def loss(lo, di, up, b, window):
+        return jnp.sum(block_thomas_truncated(lo, di, up, b, keep, adjoint_window=window) ** 2)
+
+    naive = jax.grad(lambda lo, di, up, b: jnp.sum(
+        block_thomas_truncated(lo, di, up, b, keep) ** 2), argnums=(0, 1, 2, 3))
+    bounded = jax.grad(lambda lo, di, up, b: loss(lo, di, up, b, n_blocks), argnums=(0, 1, 2, 3))
+    g_naive = naive(lower, diag, upper, rhs_low)
+    g_bounded = bounded(lower, diag, upper, rhs_low)
+    for a, b in zip(g_naive, g_bounded, strict=True):
+        assert np.allclose(np.asarray(a), np.asarray(b), atol=1e-9)
+
+
+@pytest.mark.parametrize("window", [0, 1, 4])
+def test_bounded_adjoint_rhs_gradient_is_exact_at_any_window(window):
+    # The right-hand-side gradient is a truncated solve of the transpose and
+    # is exact independent of the window (no truncation error).
+    n_blocks, m, keep = 14, 3, 2
+    (lower, diag, upper, rhs), _ = make_system(n_blocks, m, seed=7)
+    rhs_low = rhs.at[keep:].set(0.0)[:keep]
+
+    def rhs_grad(window_):
+        return jax.grad(lambda b: jnp.sum(
+            block_thomas_truncated(lower, diag, upper, b, keep, adjoint_window=window_) ** 2
+        ))(rhs_low)
+
+    exact = jax.grad(lambda b: jnp.sum(
+        block_thomas_truncated(lower, diag, upper, b, keep) ** 2))(rhs_low)
+    assert np.allclose(np.asarray(rhs_grad(window)), np.asarray(exact), atol=1e-9)
+
+
+def test_bounded_adjoint_band_gradient_decays_geometrically():
+    # The band gradient converges to the exact gradient geometrically in the
+    # window for a block diagonally dominant system (Demko-Moss-Smith decay).
+    n_blocks, m, keep = 24, 4, 2
+    (lower, diag, upper, rhs), _ = make_system(n_blocks, m, seed=9, dominance=3.0)
+    rhs_low = rhs.at[keep:].set(0.0)[:keep]
+    exact = jax.grad(lambda d: jnp.sum(
+        block_thomas_truncated(lower, d, upper, rhs_low, keep) ** 2))(diag)
+
+    def rel_err(window):
+        g = jax.grad(lambda d: jnp.sum(
+            block_thomas_truncated(lower, d, upper, rhs_low, keep, adjoint_window=window) ** 2
+        ))(diag)
+        return float(jnp.linalg.norm(g - exact) / jnp.linalg.norm(exact))
+
+    errs = [rel_err(w) for w in (0, 2, 4, 6)]
+    assert all(errs[i + 1] <= errs[i] for i in range(len(errs) - 1))  # monotone decay
+    assert errs[0] > 10 * errs[1]  # genuinely geometric, not flat
+    assert errs[-1] < 1e-8  # converges to the exact gradient
+
+
+def test_bounded_adjoint_is_jit_and_vmap_transparent():
+    n_blocks, m, keep = 10, 3, 2
+    (lower, diag, upper, rhs), _ = make_system(n_blocks, m, seed=3)
+    rhs_low = rhs.at[keep:].set(0.0)[:keep]
+    grad = jax.jit(jax.grad(lambda d: jnp.sum(
+        block_thomas_truncated(lower, d, upper, rhs_low, keep, adjoint_window=3) ** 2)))
+    stacked = jnp.stack([diag, diag + 0.1])
+    out = jax.vmap(grad)(stacked)
+    assert out.shape == stacked.shape
+    assert np.all(np.isfinite(np.asarray(out)))
+
+
 def test_vmap_over_batch():
     def solve_one(seed):
         (lower, diag, upper, rhs), _ = make_system(6, 3, seed=seed)

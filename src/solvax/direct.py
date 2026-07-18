@@ -38,6 +38,7 @@ References
 from __future__ import annotations
 
 from collections.abc import Callable
+from functools import partial
 from typing import NamedTuple
 
 import jax
@@ -312,6 +313,7 @@ def mixed_precision_block_thomas(
     *,
     factor_dtype=jnp.float32,
     refine_steps: int = 2,
+    implicit_adjoint: bool = False,
 ) -> jax.Array:
     """Block-tridiagonal solve with a low-precision factorization + refinement.
 
@@ -339,10 +341,21 @@ def mixed_precision_block_thomas(
             backend; half precision is not — see :func:`block_thomas_factor`).
         refine_steps: number of refinement sweeps (static int); ``0`` returns
             the bare low-precision solve.
+        implicit_adjoint: if True, reverse mode uses a custom VJP that solves
+            the adjoint system ``A^T lam = cotangent`` by the *same* refinement
+            reusing the transposed low-precision factors — zero additional
+            factorizations, no differentiation through the factorization, and
+            the gradient inherits the refined working-precision forward error
+            rather than the factorization precision. If False (default),
+            reverse mode differentiates through the refinement loop directly.
 
     Returns:
         ``x`` with the same shape and precision as ``rhs``.
     """
+    if implicit_adjoint:
+        return _mixed_precision_block_thomas_amortized(
+            lower, diag, upper, rhs, factor_dtype, refine_steps
+        )
     residual_dtype = jnp.result_type(rhs)
     factors = block_thomas_factor(lower, diag, upper, factor_dtype=factor_dtype)
     matvec = lambda x: block_tridiag_matvec(lower, diag, upper, x)  # noqa: E731
@@ -357,7 +370,81 @@ def mixed_precision_block_thomas(
     return x
 
 
-def block_thomas_truncated(
+def _band_gradients(lam: jax.Array, x: jax.Array):
+    """Band gradients of a solve: ``bar A = -lambda x^T`` restricted to the band.
+
+    ``bar D_j = -lam_j x_j^T``, ``bar L_j = -lam_j x_{j-1}^T`` (``j >= 1``),
+    ``bar U_j = -lam_j x_{j+1}^T`` (``j <= N-2``); trailing right-hand-side
+    axes are summed out.
+    """
+    lam2 = lam.reshape(lam.shape[0], lam.shape[1], -1)
+    x2 = x.reshape(x.shape[0], x.shape[1], -1)
+    outer = lambda a, b: -jnp.einsum("jmr,jnr->jmn", a, b)  # noqa: E731
+    x_below = jnp.concatenate([jnp.zeros_like(x2[:1]), x2[:-1]], axis=0)
+    x_above = jnp.concatenate([x2[1:], jnp.zeros_like(x2[:1])], axis=0)
+    diag_bar = outer(lam2, x2)
+    lower_bar = outer(lam2, x_below).at[0].set(0.0)
+    upper_bar = outer(lam2, x_above).at[-1].set(0.0)
+    return lower_bar, diag_bar, upper_bar
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(4, 5))
+def _mixed_precision_block_thomas_amortized(
+    lower: jax.Array,
+    diag: jax.Array,
+    upper: jax.Array,
+    rhs: jax.Array,
+    factor_dtype,
+    refine_steps: int,
+) -> jax.Array:
+    x, _ = _mixed_precision_forward(lower, diag, upper, rhs, factor_dtype, refine_steps)
+    return x
+
+
+def _mixed_precision_forward(lower, diag, upper, rhs, factor_dtype, refine_steps):
+    residual_dtype = jnp.result_type(rhs)
+    factors = block_thomas_factor(lower, diag, upper, factor_dtype=factor_dtype)
+    x, _ = iterative_refinement(
+        lambda v: block_tridiag_matvec(lower, diag, upper, v),
+        rhs,
+        lambda r: block_thomas_solve(factors, r),
+        iterations=refine_steps,
+        residual_dtype=residual_dtype,
+    )
+    return x, factors
+
+
+def _mixed_precision_fwd(lower, diag, upper, rhs, factor_dtype, refine_steps):
+    x, factors = _mixed_precision_forward(
+        lower, diag, upper, rhs, factor_dtype, refine_steps
+    )
+    return x, (lower, diag, upper, x, factors)
+
+
+def _mixed_precision_bwd(factor_dtype, refine_steps, residuals, cotangent):
+    lower, diag, upper, x, factors = residuals
+    # Adjoint solve A^T lam = cotangent by the same refinement, reusing the
+    # low-precision factors transposed: zero extra factorizations, and the
+    # gradient inherits the refined (working-precision) forward error rather
+    # than the factorization precision.
+    lower_t, diag_t, upper_t = _transpose_bands(lower, diag, upper)
+    lam, _ = iterative_refinement(
+        lambda v: block_tridiag_matvec(lower_t, diag_t, upper_t, v),
+        cotangent,
+        lambda r: block_thomas_solve(factors, r, transpose=True),
+        iterations=refine_steps,
+        residual_dtype=jnp.result_type(cotangent),
+    )
+    lower_bar, diag_bar, upper_bar = _band_gradients(lam, x)
+    return lower_bar, diag_bar, upper_bar, lam
+
+
+_mixed_precision_block_thomas_amortized.defvjp(
+    _mixed_precision_fwd, _mixed_precision_bwd
+)
+
+
+def _block_thomas_truncated_impl(
     lower: jax.Array,
     diag: jax.Array,
     upper: jax.Array,
@@ -436,6 +523,148 @@ def block_thomas_truncated(
     inputs_up = (lus[1:], pivs[1:], lower[1:k], sigmas[1:])
     _, xs = jax.lax.scan(up_step, x0, inputs_up)
     return jnp.concatenate([x0[None], xs], axis=0)
+
+
+def _transpose_bands(
+    lower: jax.Array, diag: jax.Array, upper: jax.Array
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Bands of ``A^T`` for a block-tridiagonal ``A``.
+
+    ``(A^T)_{j,j-1} = (A_{j-1,j})^T = U_{j-1}^T`` and
+    ``(A^T)_{j,j+1} = (A_{j+1,j})^T = L_{j+1}^T``: the off-diagonals swap and
+    each block transposes. The out-of-domain slots ``lower[0]``/``upper[-1]``
+    stay zero.
+    """
+    t = lambda a: jnp.swapaxes(a, -1, -2)  # noqa: E731
+    lower_t = jnp.concatenate([jnp.zeros_like(upper[:1]), t(upper[:-1])], axis=0)
+    upper_t = jnp.concatenate([t(lower[1:]), jnp.zeros_like(lower[:1])], axis=0)
+    return lower_t, t(diag), upper_t
+
+
+def _windowed_leading_solve(
+    lower: jax.Array,
+    diag: jax.Array,
+    upper: jax.Array,
+    rhs_low: jax.Array,
+    keep_lowest: int,
+    window: int,
+) -> tuple[jax.Array, int]:
+    """Solve the leading ``W = keep_lowest + window`` principal subsystem.
+
+    Uses a homogeneous closure at block ``W`` (the tail is dropped): with the
+    right-hand side zero above ``keep_lowest``, block ``j`` of the full solution
+    is reproduced with error ``O(rho^{W-j})`` under block diagonal dominance
+    (Demko--Moss--Smith decay). Returns the ``W`` leading solution blocks and
+    ``W``; peak memory ``O(W m^2)``, independent of the block count.
+    """
+    n = diag.shape[0]
+    w = min(keep_lowest + window, n)
+    pad = jnp.zeros((w - keep_lowest, *rhs_low.shape[1:]), rhs_low.dtype)
+    rhs = jnp.concatenate([rhs_low, pad], axis=0)
+    return block_thomas(lower[:w], diag[:w], upper[:w], rhs), w
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(4, 5))
+def _block_thomas_truncated_bounded(
+    lower: jax.Array,
+    diag: jax.Array,
+    upper: jax.Array,
+    rhs_low: jax.Array,
+    keep_lowest: int,
+    adjoint_window: int,
+) -> jax.Array:
+    return _block_thomas_truncated_impl(lower, diag, upper, rhs_low, keep_lowest)
+
+
+def _bounded_fwd(lower, diag, upper, rhs_low, keep_lowest, adjoint_window):
+    x_low = _block_thomas_truncated_impl(lower, diag, upper, rhs_low, keep_lowest)
+    return x_low, (lower, diag, upper, rhs_low)
+
+
+def _bounded_bwd(keep_lowest, adjoint_window, residual, cotangent):
+    lower, diag, upper, rhs_low = residual
+    lower_t, diag_t, upper_t = _transpose_bands(lower, diag, upper)
+
+    # rhs-adjoint (exact): b_bar = P_K A^{-T} E_K x_bar is itself a truncated
+    # solve of the transpose -- O(keep_lowest * m^2), no truncation error.
+    rhs_bar = _block_thomas_truncated_impl(
+        lower_t, diag_t, upper_t, cotangent, keep_lowest
+    )
+
+    # band-adjoint (windowed): the full primal/adjoint spread over all blocks but
+    # decay away from the lowest block window; a leading-window re-solve gives the
+    # band gradients at O((keep_lowest + adjoint_window) m^2) with O(rho^{2 w})
+    # error (Demko decay). Grad blocks G_j = -lambda_j x_{.}^T.
+    n, m = diag.shape[0], diag.shape[-1]
+    x_win, w = _windowed_leading_solve(
+        lower, diag, upper, rhs_low, keep_lowest, adjoint_window
+    )
+    lam_win, _ = _windowed_leading_solve(
+        lower_t, diag_t, upper_t, cotangent, keep_lowest, adjoint_window
+    )
+    outer = jax.vmap(lambda a, b: jnp.einsum("i...,j...->ij", a, b))
+    x_below = jnp.concatenate([jnp.zeros_like(x_win[:1]), x_win[:-1]], axis=0)
+    x_above = jnp.concatenate([x_win[1:], jnp.zeros_like(x_win[:1])], axis=0)
+    diag_bar = -outer(lam_win, x_win)
+    lower_bar = (-outer(lam_win, x_below)).at[0].set(0.0)
+    upper_bar = (-outer(lam_win, x_above)).at[-1].set(0.0)
+
+    tail = jnp.zeros((n - w, m, m), diag.dtype)
+    pad = lambda g: jnp.concatenate([g, tail], axis=0)  # noqa: E731
+    return pad(lower_bar), pad(diag_bar), pad(upper_bar), rhs_bar
+
+
+_block_thomas_truncated_bounded.defvjp(_bounded_fwd, _bounded_bwd)
+
+
+def block_thomas_truncated(
+    lower: jax.Array,
+    diag: jax.Array,
+    upper: jax.Array,
+    rhs_low: jax.Array,
+    keep_lowest: int,
+    *,
+    adjoint_window: int | None = None,
+) -> jax.Array:
+    """Block-tridiagonal solve returning only the lowest ``keep_lowest`` blocks.
+
+    Requires the right-hand side to vanish for ``k >= keep_lowest``
+    (``rhs_low`` holds the nonzero head). The downward Schur sweep runs over all
+    blocks but stores nothing above ``keep_lowest``; the upward substitution
+    stops there. Peak memory ``O(keep_lowest * m^2)``, independent of
+    ``n_blocks``.
+
+    Args:
+        lower, diag, upper: as in :func:`block_thomas`.
+        rhs_low: nonzero head of the right-hand side, shape
+            ``(keep_lowest, m)`` or ``(keep_lowest, m, n_rhs)``.
+        keep_lowest: static number of solution blocks to compute
+            (1 <= keep_lowest <= n_blocks; equality recovers the full solve).
+        adjoint_window: if ``None`` (default), reverse mode differentiates the
+            elimination directly, taping the sweep at ``O(n_blocks * m^2)``. If
+            an integer ``w``, a structure-preserving custom VJP is used: the
+            right-hand-side gradient is the exact transposed truncated solve and
+            the band gradients come from a leading ``(keep_lowest + w)``-block
+            re-solve, so the *differentiated* solve also runs at
+            ``O((keep_lowest + w) m^2)`` memory, independent of ``n_blocks``.
+            Band-gradient error decays geometrically in ``w`` for block
+            diagonally dominant systems; ``w >= n_blocks`` reproduces the exact
+            gradient.
+
+    Returns:
+        The lowest ``keep_lowest`` solution blocks, same layout as ``rhs_low``.
+    """
+    if not 1 <= keep_lowest <= diag.shape[0]:
+        raise ValueError("need 1 <= keep_lowest <= n_blocks")
+    if rhs_low.shape[0] != keep_lowest:
+        raise ValueError("rhs_low must have keep_lowest leading blocks")
+    if adjoint_window is None:
+        return _block_thomas_truncated_impl(lower, diag, upper, rhs_low, keep_lowest)
+    if adjoint_window < 0:
+        raise ValueError("adjoint_window must be non-negative")
+    return _block_thomas_truncated_bounded(
+        lower, diag, upper, rhs_low, keep_lowest, adjoint_window
+    )
 
 
 def _block_thomas_truncated_fn_state(
