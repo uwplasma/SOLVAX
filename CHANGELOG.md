@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Added a sharding and communication test suite on an eight-device emulated CPU
+  mesh (`tests/test_sharding.py`), pinning sharding preservation through pytree
+  Krylov solves and collective-operation counts of compiled primal and adjoint
+  solves, plus `benchmarks/benchmark_collectives.py` and a sharding guide. The
+  measured invariant: reverse-mode solves cost exactly one extra solve's worth
+  of collectives, and sharded batched tridiagonal solves are collective-free in
+  both directions.
+
 ## 0.8.6 - 2026-07-17
 
 - `tridiagonal_solve` and `cyclic_tridiagonal_solve` accept complex operands:

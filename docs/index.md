@@ -91,6 +91,7 @@ preconditioners
 solvers/implicit
 solvers/mixed_precision
 autodiff
+sharding
 solvers/native
 ```
 
