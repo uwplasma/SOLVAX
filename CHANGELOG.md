@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Added the one-command reproduction driver (`python -m benchmarks.reproduce`):
+  regenerates every committed measurement record after writing a
+  hardware/software manifest and validating the timer against a known
+  reference interval; `--quick` is CI-smoked. Tagged releases carry Zenodo
+  metadata (`.zenodo.json`) so archives include the records.
+
 - Benchmarks are now part of the documentation: a new Benchmarks section
   renders the committed measurement records (`benchmarks/results/*.json`) —
   bounded-memory adjoint scaling, mixed-precision adjoint accuracy and cost,

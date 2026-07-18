@@ -30,6 +30,22 @@ The measurements follow a fixed protocol:
   precision across libraries, and report iterations and achieved residuals
   next to wall time wherever the API exposes them.
 
+## Reproducing everything
+
+One command regenerates every record from the current environment, after
+writing a hardware/software manifest and validating the timer against a known
+reference interval:
+
+```bash
+python -m benchmarks.reproduce            # full records into benchmarks/results/
+python -m benchmarks.reproduce --quick    # reduced sizes, CI smoke, scratch dir
+```
+
+The manifest (`results/manifest.json`) pins the platform, processor, device
+list, and JAX/jaxlib/solvax versions each table was measured with; the timer
+validation guards the one failure mode that silently corrupts every wall-time
+number. Tagged releases are archived on Zenodo with these records included.
+
 ```{toctree}
 :maxdepth: 1
 
