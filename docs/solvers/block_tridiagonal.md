@@ -179,10 +179,10 @@ Two facts make this exact where it can be and controlled where it cannot:
 - **Band gradient (windowed).** The full primal and adjoint spread over all
   blocks but decay geometrically away from the retained head for block
   diagonally dominant systems {cite}`demko1984,benzi2013`. Reconstructing the
-  band gradients from a leading $(K+w)$-block re-solve therefore has error
-  $O(\rho^{2w})$ with $\rho\in(0,1)$ set by the conditioning, at
-  $O((K+w)m^2)$ memory. Setting `adjoint_window >= n_blocks` reproduces the
-  exact gradient.
+  band gradients from a leading $(K+w)$-block re-solve — the leading principal
+  submatrix with a homogeneous closure — therefore has error $O(\rho^{w})$ with
+  $\rho\in(0,1)$ set by the conditioning, at $O((K+w)m^2)$ memory. Setting
+  `adjoint_window >= n_blocks` reproduces the exact gradient.
 
 The result: forward *and* reverse run at memory independent of the block count,
 so `jax.grad` through a truncated kinetic solve stays flat as $N$ grows while
