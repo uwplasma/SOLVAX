@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Added the one-command reproduction driver (`python -m benchmarks.reproduce`):
+  regenerates every committed measurement record after writing a
+  hardware/software manifest and validating the timer against a known
+  reference interval; `--quick` is CI-smoked. Tagged releases carry Zenodo
+  metadata (`.zenodo.json`) so archives include the records.
+
+- Benchmarks are now part of the documentation: a new Benchmarks section
+  renders the committed measurement records (`benchmarks/results/*.json`) —
+  bounded-memory adjoint scaling, mixed-precision adjoint accuracy and cost,
+  communication accounting, and the problem-suite sweeps — each with its exact
+  reproduce command and methodology notes, alongside a test-taxonomy page.
+
 - Added the research-grade benchmark problem suite (`benchmarks/problems.py`):
   convection-diffusion (Peclet sweep), indefinite Helmholtz (wavenumber sweep),
   anisotropic diffusion (ratio sweep), Poisson, and the kinetic

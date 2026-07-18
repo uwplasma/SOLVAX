@@ -1,0 +1,78 @@
+{
+  "solvax_version": "0.8.6",
+  "devices_available": 8,
+  "results": {
+    "1": {
+      "tridiagonal_batch": {
+        "primal": 0,
+        "adjoint": 0
+      },
+      "pcg": {
+        "primal": 0,
+        "adjoint": 0
+      },
+      "pcg_single_reduction": {
+        "primal": 0,
+        "adjoint": 0
+      },
+      "gmres_linear_solve": {
+        "primal": 0,
+        "adjoint": 0
+      }
+    },
+    "2": {
+      "tridiagonal_batch": {
+        "primal": 0,
+        "adjoint": 0
+      },
+      "pcg": {
+        "primal": 3,
+        "adjoint": 6
+      },
+      "pcg_single_reduction": {
+        "primal": 2,
+        "adjoint": 4
+      },
+      "gmres_linear_solve": {
+        "primal": 6,
+        "adjoint": 12
+      }
+    },
+    "4": {
+      "tridiagonal_batch": {
+        "primal": 0,
+        "adjoint": 0
+      },
+      "pcg": {
+        "primal": 3,
+        "adjoint": 6
+      },
+      "pcg_single_reduction": {
+        "primal": 2,
+        "adjoint": 4
+      },
+      "gmres_linear_solve": {
+        "primal": 6,
+        "adjoint": 12
+      }
+    },
+    "8": {
+      "tridiagonal_batch": {
+        "primal": 0,
+        "adjoint": 0
+      },
+      "pcg": {
+        "primal": 3,
+        "adjoint": 6
+      },
+      "pcg_single_reduction": {
+        "primal": 2,
+        "adjoint": 4
+      },
+      "gmres_linear_solve": {
+        "primal": 6,
+        "adjoint": 12
+      }
+    }
+  }
+}

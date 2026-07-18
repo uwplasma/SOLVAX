@@ -1,0 +1,21 @@
+{
+  "title": "SOLVAX: differentiable structured linear solvers, preconditioners and matrix-free methods in JAX",
+  "description": "Differentiable structured direct solves, preconditioned and recycled Krylov methods, physics-agnostic preconditioners, mixed-precision iterative refinement, and structure-preserving discrete adjoints, all jit/vmap/grad-transparent on CPU and GPU. Releases archive the library together with its benchmark drivers and committed measurement records for independent reproduction.",
+  "creators": [
+    {
+      "name": "Jorge, Rogerio",
+      "affiliation": "University of Wisconsin-Madison"
+    }
+  ],
+  "license": "MIT",
+  "upload_type": "software",
+  "keywords": [
+    "JAX",
+    "linear solvers",
+    "automatic differentiation",
+    "Krylov methods",
+    "preconditioning",
+    "mixed precision",
+    "plasma physics"
+  ]
+}

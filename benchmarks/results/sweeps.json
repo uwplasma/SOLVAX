@@ -1,0 +1,242 @@
+{
+  "solvax_version": "0.8.6",
+  "tolerance": 1e-08,
+  "results": [
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 16
+      },
+      "solver": "pcg+jacobi",
+      "iterations": 8,
+      "converged": true,
+      "relative_residual": 6.879647014390536e-12,
+      "warm_ms": 0.10454107541590929,
+      "baseline": "jax.scipy cg",
+      "baseline_relative_residual": 6.879647014390536e-12,
+      "baseline_warm_ms": 0.015583937056362629
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 32
+      },
+      "solver": "pcg+jacobi",
+      "iterations": 18,
+      "converged": true,
+      "relative_residual": 5.078388233464661e-09,
+      "warm_ms": 0.7082909578457475,
+      "baseline": "jax.scipy cg",
+      "baseline_relative_residual": 5.078388233464661e-09,
+      "baseline_warm_ms": 0.17320795450359583
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 48
+      },
+      "solver": "pcg+jacobi",
+      "iterations": 31,
+      "converged": true,
+      "relative_residual": 2.1538469589073834e-09,
+      "warm_ms": 1.8715410260483623,
+      "baseline": "jax.scipy cg",
+      "baseline_relative_residual": 2.1538469589073834e-09,
+      "baseline_warm_ms": 1.1834590695798397
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 64
+      },
+      "solver": "pcg+jacobi",
+      "iterations": 44,
+      "converged": true,
+      "relative_residual": 1.986878516107962e-09,
+      "warm_ms": 0.7142089307308197,
+      "baseline": "jax.scipy cg",
+      "baseline_relative_residual": 1.986878516107962e-09,
+      "baseline_warm_ms": 8.210833999328315
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 0.1
+      },
+      "solver": "fgmres+jacobi",
+      "iterations": 145,
+      "converged": true,
+      "relative_residual": 9.565235049661691e-09,
+      "warm_ms": 24.990833015181124,
+      "baseline": "jax.scipy gmres",
+      "baseline_relative_residual": 6.218285612564526e-06,
+      "baseline_warm_ms": 3.1706250738352537
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 1.0
+      },
+      "solver": "fgmres+jacobi",
+      "iterations": 114,
+      "converged": true,
+      "relative_residual": 8.363997677276137e-09,
+      "warm_ms": 3.7164160748943686,
+      "baseline": "jax.scipy gmres",
+      "baseline_relative_residual": 1.8405305415547724e-07,
+      "baseline_warm_ms": 2.3469580337405205
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 10.0
+      },
+      "solver": "fgmres+jacobi",
+      "iterations": 39,
+      "converged": true,
+      "relative_residual": 9.59969236504511e-09,
+      "warm_ms": 6.214749999344349,
+      "baseline": "jax.scipy gmres",
+      "baseline_relative_residual": 1.8073215427714808e-09,
+      "baseline_warm_ms": 0.5364579847082496
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 100.0
+      },
+      "solver": "fgmres+jacobi",
+      "iterations": 35,
+      "converged": true,
+      "relative_residual": 1.2528623500252946e-09,
+      "warm_ms": 1.7810839926823974,
+      "baseline": "jax.scipy gmres",
+      "baseline_relative_residual": 1.2536051182856054e-14,
+      "baseline_warm_ms": 1.7233750550076365
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 1.0
+      },
+      "solver": "fgmres+jacobi",
+      "iterations": 18,
+      "converged": true,
+      "relative_residual": 6.528625303601351e-09,
+      "warm_ms": 1.9170419545844197,
+      "baseline": "jax.scipy gmres",
+      "baseline_relative_residual": 4.979950721367563e-14,
+      "baseline_warm_ms": 0.7479169871658087
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 5.0
+      },
+      "solver": "fgmres+jacobi",
+      "iterations": 19,
+      "converged": true,
+      "relative_residual": 2.5980253426690532e-09,
+      "warm_ms": 1.4972079079598188,
+      "baseline": "jax.scipy gmres",
+      "baseline_relative_residual": 1.8785532047235396e-13,
+      "baseline_warm_ms": 1.967624993994832
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 10.0
+      },
+      "solver": "fgmres+jacobi",
+      "iterations": 20,
+      "converged": true,
+      "relative_residual": 1.5815532984410323e-09,
+      "warm_ms": 2.255292027257383,
+      "baseline": "jax.scipy gmres",
+      "baseline_relative_residual": 3.174806212550031e-12,
+      "baseline_warm_ms": 0.5572920199483633
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 20.0
+      },
+      "solver": "fgmres+jacobi",
+      "iterations": 19,
+      "converged": true,
+      "relative_residual": 1.3456152824342635e-09,
+      "warm_ms": 2.3492499021813273,
+      "baseline": "jax.scipy gmres",
+      "baseline_relative_residual": 2.8715098942858103e-15,
+      "baseline_warm_ms": 0.7641249103471637
+    },
+    {
+      "family": "anisotropic_diffusion",
+      "params": {
+        "grid": 32,
+        "epsilon": 1.0
+      },
+      "solver": "pcg+jacobi",
+      "iterations": 18,
+      "converged": true,
+      "relative_residual": 5.078388233464661e-09,
+      "warm_ms": 0.06866594776511192,
+      "baseline": "jax.scipy cg",
+      "baseline_relative_residual": 5.078388233464661e-09,
+      "baseline_warm_ms": 0.09854091331362724
+    },
+    {
+      "family": "anisotropic_diffusion",
+      "params": {
+        "grid": 32,
+        "epsilon": 0.1
+      },
+      "solver": "pcg+jacobi",
+      "iterations": 37,
+      "converged": true,
+      "relative_residual": 8.912050897473328e-09,
+      "warm_ms": 0.20529108587652445,
+      "baseline": "jax.scipy cg",
+      "baseline_relative_residual": 8.912050897473328e-09,
+      "baseline_warm_ms": 0.23220793809741735
+    },
+    {
+      "family": "anisotropic_diffusion",
+      "params": {
+        "grid": 32,
+        "epsilon": 0.01
+      },
+      "solver": "pcg+jacobi",
+      "iterations": 70,
+      "converged": true,
+      "relative_residual": 5.610659319962843e-09,
+      "warm_ms": 0.6230000872164965,
+      "baseline": "jax.scipy cg",
+      "baseline_relative_residual": 5.610659319962843e-09,
+      "baseline_warm_ms": 0.20937505178153515
+    },
+    {
+      "family": "anisotropic_diffusion",
+      "params": {
+        "grid": 32,
+        "epsilon": 0.001
+      },
+      "solver": "pcg+jacobi",
+      "iterations": 20,
+      "converged": true,
+      "relative_residual": 9.228075348478787e-09,
+      "warm_ms": 0.21604204084724188,
+      "baseline": "jax.scipy cg",
+      "baseline_relative_residual": 9.228075348478787e-09,
+      "baseline_warm_ms": 0.1099579967558384
+    }
+  ]
+}
