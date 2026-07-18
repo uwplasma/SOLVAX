@@ -1,0 +1,67 @@
+{
+  "solvax_version": "0.8.6",
+  "params": {
+    "m": 4,
+    "keep_lowest": 2,
+    "window": 4
+  },
+  "memory_scaling": [
+    {
+      "n_blocks": 16,
+      "naive_temp_bytes": 16664,
+      "bounded_temp_bytes": 8900
+    },
+    {
+      "n_blocks": 32,
+      "naive_temp_bytes": 29208,
+      "bounded_temp_bytes": 8900
+    },
+    {
+      "n_blocks": 64,
+      "naive_temp_bytes": 54296,
+      "bounded_temp_bytes": 8900
+    },
+    {
+      "n_blocks": 128,
+      "naive_temp_bytes": 104472,
+      "bounded_temp_bytes": 8900
+    },
+    {
+      "n_blocks": 256,
+      "naive_temp_bytes": 204824,
+      "bounded_temp_bytes": 8900
+    },
+    {
+      "n_blocks": 512,
+      "naive_temp_bytes": 405528,
+      "bounded_temp_bytes": 8900
+    },
+    {
+      "n_blocks": 1024,
+      "naive_temp_bytes": 806936,
+      "bounded_temp_bytes": 8900
+    }
+  ],
+  "band_gradient_decay": [
+    {
+      "window": 0,
+      "band_grad_rel_error": 0.0020768710463549603
+    },
+    {
+      "window": 2,
+      "band_grad_rel_error": 3.1358526753380343e-08
+    },
+    {
+      "window": 4,
+      "band_grad_rel_error": 7.910259376553722e-14
+    },
+    {
+      "window": 6,
+      "band_grad_rel_error": 9.912672728892774e-19
+    },
+    {
+      "window": 8,
+      "band_grad_rel_error": 7.408298827027662e-24
+    }
+  ]
+}
