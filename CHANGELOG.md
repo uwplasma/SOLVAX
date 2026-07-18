@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Added the research-grade benchmark problem suite (`benchmarks/problems.py`):
+  convection-diffusion (Peclet sweep), indefinite Helmholtz (wavenumber sweep),
+  anisotropic diffusion (ratio sweep), Poisson, and the kinetic
+  block-tridiagonal operator, each dense-verifiable; plus the sweep driver
+  (`benchmarks/benchmark_sweeps.py`) recording iterations-to-tolerance,
+  convergence, achieved residual, and warm wall time against the
+  `jax.scipy.sparse.linalg` baselines at identical tolerance. CI smoke-runs the
+  dense verification mode.
+
 - Added a sharding and communication test suite on an eight-device emulated CPU
   mesh (`tests/test_sharding.py`), pinning sharding preservation through pytree
   Krylov solves and collective-operation counts of compiled primal and adjoint

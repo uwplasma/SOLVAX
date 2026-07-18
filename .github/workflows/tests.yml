@@ -53,6 +53,9 @@ jobs:
           'equinox>=0.11,<0.12' 'lineax>=0.0.7,<0.1'
       - run: python -c "import jax, solvax; print(jax.__version__, solvax.__version__, solvax.__file__)"
       - run: pytest -n auto --cov --cov-report=xml
+      - name: Benchmark problem-suite verification
+        if: matrix.stack == 'current'
+        run: python -m benchmarks.benchmark_sweeps --verify
       - uses: codecov/codecov-action@v4
         if: matrix.os == 'ubuntu-latest' && matrix.stack == 'current'
         with:
