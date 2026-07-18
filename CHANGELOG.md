@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `block_thomas_truncated` gained an opt-in `adjoint_window` argument selecting a
+  structure-preserving custom VJP: the right-hand-side gradient is the exact
+  transposed truncated solve and the band gradients come from a leading
+  `(keep_lowest + adjoint_window)`-block re-solve, so the *differentiated* solve
+  runs at memory independent of the block count (versus the linear-in-`N` tape of
+  plain reverse mode). Band-gradient error decays geometrically in the window.
+
 ## 0.8.6 - 2026-07-17
 
 - `tridiagonal_solve` and `cyclic_tridiagonal_solve` accept complex operands:
