@@ -168,3 +168,72 @@ def test_mixed_precision_gradient_matches_fd():
     e = jnp.zeros_like(diag).at[2, 1, 1].set(eps)
     fd = (loss(diag + e) - loss(diag - e)) / (2 * eps)
     assert np.isclose(float(g[2, 1, 1]), float(fd), rtol=1e-4)
+
+
+@pytest.mark.parametrize("n_rhs", [None, 3])
+def test_implicit_adjoint_gradient_matches_exact_fp64(n_rhs):
+    # The amortized adjoint (fp32 factors reused, working-precision refinement)
+    # reproduces the gradient of the exact fp64 solve to working precision:
+    # the gradient inherits the refined forward error, not the factor precision.
+    lower, diag, upper, rhs = make_system(10, 6, n_rhs, seed=7)
+
+    def loss(f, d, b):
+        return jnp.sum(f(d, b) ** 2)
+
+    exact = jax.grad(
+        lambda d, b: loss(lambda d_, b_: block_thomas(lower, d_, upper, b_), d, b),
+        argnums=(0, 1),
+    )(diag, rhs)
+    implicit = jax.grad(
+        lambda d, b: loss(
+            lambda d_, b_: mixed_precision_block_thomas(
+                lower, d_, upper, b_, refine_steps=2, implicit_adjoint=True
+            ),
+            d, b,
+        ),
+        argnums=(0, 1),
+    )(diag, rhs)
+    for got, ref in zip(implicit, exact, strict=True):
+        rel = float(jnp.linalg.norm(got - ref) / jnp.linalg.norm(ref))
+        assert rel < 1e-9
+
+
+def test_implicit_adjoint_primal_identical_to_default_path():
+    lower, diag, upper, rhs = make_system(12, 5, seed=8)
+    x_default = mixed_precision_block_thomas(lower, diag, upper, rhs, refine_steps=2)
+    x_implicit = mixed_precision_block_thomas(
+        lower, diag, upper, rhs, refine_steps=2, implicit_adjoint=True
+    )
+    assert np.allclose(np.asarray(x_default), np.asarray(x_implicit), atol=0.0)
+
+
+def test_implicit_adjoint_is_jit_and_vmap_transparent():
+    lower, diag, upper, rhs = make_system(8, 4, seed=9)
+    grad = jax.jit(jax.grad(lambda d: jnp.sum(
+        mixed_precision_block_thomas(lower, d, upper, rhs, implicit_adjoint=True) ** 2
+    )))
+    stacked = jnp.stack([diag, diag + 0.05])
+    out = jax.vmap(grad)(stacked)
+    assert out.shape == stacked.shape
+    assert np.all(np.isfinite(np.asarray(out)))
+
+
+def test_implicit_adjoint_gradient_degrades_gracefully_with_conditioning():
+    # As dominance weakens (kappa grows) the gradient error grows like the
+    # primal refinement error -- but stays far below the bare fp32 gradient
+    # obtained with refine_steps=0.
+    def gradient_errors(dominance):
+        lower, diag, upper, rhs = make_system(10, 6, seed=11, dominance=dominance)
+        exact = jax.grad(lambda d: jnp.sum(block_thomas(lower, d, upper, rhs) ** 2))(diag)
+
+        def rel_error(steps):
+            got = jax.grad(lambda d: jnp.sum(mixed_precision_block_thomas(
+                lower, d, upper, rhs, refine_steps=steps, implicit_adjoint=True) ** 2))(diag)
+            return float(jnp.linalg.norm(got - exact) / jnp.linalg.norm(exact))
+
+        return rel_error(0), rel_error(2)
+
+    for dominance in (4.0, 1.5):
+        bare, refined = gradient_errors(dominance)
+        assert refined < 1e-9  # refined gradient at working precision
+        assert refined < 1e-3 * bare  # refinement buys >= 3 digits over bare fp32
