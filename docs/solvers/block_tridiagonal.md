@@ -192,6 +192,28 @@ the naive tape grows linearly. This is the differentiable counterpart of the
 truncated forward solve and the tool for adjoint-based source/transport
 inversion on tall block systems.
 
+With array bands, the bands themselves still occupy $O(Nm^2)$; when blocks are
+assembled from a low-dimensional parameterization, the generated path removes
+that too:
+
+```python
+def block_fn(params, k):
+    return lower_block(params, k), diagonal_block(params, k), upper_block(params, k)
+
+x_low = sx.block_thomas_truncated_fn(
+    block_fn, n_blocks=N, rhs_low=rhs_low, keep_lowest=K,
+    params=params, adjoint_window=w,
+)
+```
+
+The custom VJP then generates the *transposed* rows on the fly for the exact
+right-hand-side gradient (three block assemblies per index) and pulls the
+windowed band cotangents back through `block_fn`'s own derivative at each of
+the leading $K+w$ indices, so `jax.grad` with respect to `params` runs at
+$O((K+w)m^2)$ scratch — **no band arrays exist in either direction**, and the
+reverse-mode footprint is measured flat from $N=32$ to $N=1024$ in the test
+suite and the transport-inversion benchmark.
+
 ## Residual gate
 
 Validate a solve with an operator action independent of the factorization:

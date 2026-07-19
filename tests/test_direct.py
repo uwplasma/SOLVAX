@@ -399,3 +399,86 @@ def test_truncated_fn_low_order_recovery_by_precision(dtype, atol):
     x_fn = block_thomas_truncated_fn(_fn_from_arrays(lower, diag, upper), n_blocks, rhs, keep)
     x_full = block_thomas(lower, diag, upper, rhs)
     assert np.allclose(np.asarray(x_fn), np.asarray(x_full), atol=atol, rtol=atol)
+
+
+def _indexed_block_fn(params, index):
+    lower, diag, upper = params
+    return lower[index], diag[index], upper[index]
+
+
+def test_generated_bounded_adjoint_matches_array_bounded_path():
+    # With array params and a full window, the generated custom VJP reproduces
+    # the array-path bounded adjoint bitwise (same windowed construction).
+    n_blocks, m, keep = 14, 4, 2
+    (lower, diag, upper, rhs), _ = make_system(n_blocks, m, seed=21, dominance=3.0)
+    rhs_low = rhs.at[keep:].set(0.0)[:keep]
+    operands = (lower, diag, upper, rhs_low)
+
+    def array_loss(t):
+        return jnp.sum(block_thomas_truncated(
+            t[0], t[1], t[2], t[3], keep, adjoint_window=n_blocks) ** 2)
+
+    def generated_loss(t):
+        return jnp.sum(block_thomas_truncated_fn(
+            _indexed_block_fn, n_blocks, t[3], keep,
+            params=(t[0], t[1], t[2]), adjoint_window=n_blocks) ** 2)
+
+    g_array = jax.grad(array_loss)(operands)
+    g_generated = jax.grad(generated_loss)(operands)
+    for a, b in zip(g_array, g_generated, strict=True):
+        assert np.allclose(np.asarray(a), np.asarray(b), atol=1e-15)
+
+
+def test_generated_bounded_adjoint_low_dim_params_match_finite_differences():
+    n_blocks, m, keep = 16, 4, 2
+    (lower, diag, upper, rhs), _ = make_system(n_blocks, m, seed=22, dominance=3.0)
+    rhs_low = rhs.at[keep:].set(0.0)[:keep]
+
+    def block_fn(params, index):
+        nu = params[0] * (1.0 + params[1] * index / n_blocks)
+        return lower[index], nu * diag[index], upper[index]
+
+    def loss(params):
+        return jnp.sum(block_thomas_truncated_fn(
+            block_fn, n_blocks, rhs_low, keep, params=params, adjoint_window=8) ** 2)
+
+    probe = jnp.asarray([1.1, 0.4])
+    gradient = jax.jit(jax.grad(loss))(probe)
+    eps = 1e-6
+    for axis in range(2):
+        step = jnp.zeros(2).at[axis].set(eps)
+        finite = (loss(probe + step) - loss(probe - step)) / (2 * eps)
+        assert np.isclose(float(gradient[axis]), float(finite), rtol=1e-5)
+
+
+def test_generated_bounded_adjoint_memory_is_flat_in_block_count():
+    # The claim the params path exists for: reverse-mode scratch independent
+    # of n_blocks (no band arrays materialized in either direction).
+    m, keep, window = 8, 2, 4
+    rng = np.random.default_rng(23)
+    coupling = jnp.asarray(0.2 * rng.standard_normal((m, m)))
+    base = jnp.asarray(rng.standard_normal((m, m)) + 3.0 * m * np.eye(m))
+    rhs_low = jnp.asarray(rng.standard_normal((keep, m)))
+
+    def temp_bytes(n_blocks):
+        def block_fn(params, index):
+            nu = params[0] * (1.0 + params[1] * index / n_blocks)
+            return coupling, nu * base, -coupling
+
+        def loss(params):
+            return jnp.sum(block_thomas_truncated_fn(
+                block_fn, n_blocks, rhs_low, keep,
+                params=params, adjoint_window=window) ** 2)
+
+        compiled = jax.jit(jax.grad(loss)).lower(jnp.asarray([1.0, 0.5])).compile()
+        return compiled.memory_analysis().temp_size_in_bytes
+
+    small, large = temp_bytes(32), temp_bytes(512)
+    assert large <= 1.1 * small  # flat: 16x more blocks, same reverse scratch
+
+
+def test_generated_bounded_adjoint_requires_window_with_params():
+    with pytest.raises(ValueError, match="adjoint_window"):
+        block_thomas_truncated_fn(
+            _indexed_block_fn, 4, jnp.zeros((1, 2)), 1, params=(None, None, None)
+        )

@@ -18,12 +18,11 @@ Three records come out:
    from truncated low-moment observations — its sensitivity decays with mode
    number like the block-inverse decay bound itself. The machinery that makes
    the inversion cheap also diagnoses what the data can and cannot determine.
-3. **Memory**: compiled reverse-mode scratch versus the mode count for the
-   naive tape and the bounded adjoint. The bounded adjoint removes the solve's
-   tape; the remaining growth is the O(N m^2) band arrays the array-band API
-   materializes (plus cotangents). Removing that floor for low-dimensional
-   profiles requires the generated-block (``_fn``) truncated adjoint, the
-   named follow-up.
+3. **Memory**: compiled reverse-mode scratch versus the mode count for three
+   paths — the naive tape, the array-band bounded adjoint (removes the solve
+   tape; the O(N m^2) band arrays remain), and the generated-block bounded
+   adjoint (``block_thomas_truncated_fn(params=...)``), which materializes no
+   band arrays in either direction and is flat in the mode count.
 
 Deterministic and JSON-serializable for the reproducibility package.
 """
@@ -37,7 +36,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from solvax import __version__, block_thomas_truncated
+from solvax import __version__, block_thomas_truncated, block_thomas_truncated_fn
 
 jax.config.update("jax_enable_x64", True)
 
@@ -132,11 +131,27 @@ def run_kinetic_inversion_benchmark(
         compiled = jax.jit(jax.grad(objective)).lower(true_params).compile()
         return int(compiled.memory_analysis().temp_size_in_bytes)
 
+    def temp_bytes_generated(count: int) -> int:
+        def block_fn(params_, index):
+            nu = params_[0] * (1.0 + params_[1] * index / count)
+            return STREAMING, 3.0 * M * nu * COLLISION, -STREAMING
+
+        def objective(params_):
+            solution = block_thomas_truncated_fn(
+                block_fn, count, RHS_LOW, KEEP,
+                params=params_, adjoint_window=WINDOW,
+            )
+            return jnp.sum(solution**2)
+
+        compiled = jax.jit(jax.grad(objective)).lower(true_params).compile()
+        return int(compiled.memory_analysis().temp_size_in_bytes)
+
     memory = [
         {
             "n_blocks": count,
             "naive_temp_bytes": temp_bytes(count, None),
             "bounded_temp_bytes": temp_bytes(count, WINDOW),
+            "generated_temp_bytes": temp_bytes_generated(count),
         }
         for count in memory_block_counts
     ]
@@ -173,11 +188,12 @@ def main() -> None:
     eigs = result["extended_hessian_eigenvalues"]
     print(f"(nu0, a, b) misfit Hessian eigenvalues: {[f'{v:.2e}' for v in eigs]}")
     print("  -> the quadratic coefficient is unidentifiable from truncated moments")
-    print(f"\n{'N':>6} {'naive_KiB':>12} {'bounded_KiB':>12} {'ratio':>8}")
+    print(f"\n{'N':>6} {'naive_KiB':>12} {'bounded_KiB':>12} {'generated_KiB':>14}")
     for row in result["memory_scaling"]:
         naive, bounded = row["naive_temp_bytes"], row["bounded_temp_bytes"]
+        generated = row["generated_temp_bytes"]
         print(f"{row['n_blocks']:>6} {naive / 1024:>12.1f} {bounded / 1024:>12.1f}"
-              f" {naive / bounded:>7.1f}x")
+              f" {generated / 1024:>14.1f}")
 
 
 if __name__ == "__main__":
