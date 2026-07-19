@@ -45,3 +45,13 @@ transposed factors, not a taped loop through a differentiated factorization:
 
 At N=256, m=16 the implicit adjoint uses **680× less reverse-mode scratch and
 runs 40× faster**, with roughly half the compile time.
+
+## Platform contrast
+
+The accuracy dichotomy is platform-independent: on the A4000 the implicit
+gradient sits at 3.1e-16 with bare fp32 at 2.0e-7, identical to CPU
+(`benchmarks/results/gpu/mixed_precision_adjoint.json`). The backward *cost*
+advantage is platform-dependent: 238×/5.9× (memory/time) on CPU at N=128,
+m=8, but 2×/1.3× on the GPU, whose executor absorbs the tape and factor-VJP
+far better at this size (and compiles 32 s vs 302 s). Cost claims are
+therefore stated per platform; the accuracy theorem is not.

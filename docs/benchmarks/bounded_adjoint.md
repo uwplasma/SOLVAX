@@ -44,3 +44,10 @@ converges geometrically at the proved $O(\rho^{2w})$ rate
 | 4 | 7.91e-14 |
 | 6 | 2.46e-16 |
 | 8 | 2.46e-16 |
+
+## On GPU
+
+The same flat-versus-linear scaling compiles on the A4000: naive 33→802 KiB
+across N=16→1024, bounded flat at ~32 KiB
+(`benchmarks/results/gpu/bounded_adjoint.json`), with the windowed decay
+reaching 7.1e-24 by w=8.

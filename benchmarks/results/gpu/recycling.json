@@ -1,0 +1,130 @@
+{
+  "solvax_version": "0.8.6",
+  "params": {
+    "n": 200,
+    "steps": 10,
+    "step_size": 0.002,
+    "m": 30,
+    "k": 10,
+    "rtol": 1e-10
+  },
+  "per_step": [
+    {
+      "step": 0,
+      "cold_gmres_iterations": 32,
+      "cold_gcrot_iterations": 32,
+      "recycled_primal_iterations": 32,
+      "recycled_adjoint_iterations": 32,
+      "cold_adjoint_iterations": 32,
+      "primal_drift": 0.0,
+      "adjoint_drift": 0.0,
+      "all_converged": true
+    },
+    {
+      "step": 1,
+      "cold_gmres_iterations": 32,
+      "cold_gcrot_iterations": 32,
+      "recycled_primal_iterations": 24,
+      "recycled_adjoint_iterations": 24,
+      "cold_adjoint_iterations": 32,
+      "primal_drift": 0.0024874497948679554,
+      "adjoint_drift": 0.002681997140947877,
+      "all_converged": true
+    },
+    {
+      "step": 2,
+      "cold_gmres_iterations": 32,
+      "cold_gcrot_iterations": 32,
+      "recycled_primal_iterations": 16,
+      "recycled_adjoint_iterations": 17,
+      "cold_adjoint_iterations": 32,
+      "primal_drift": 0.001606059937954999,
+      "adjoint_drift": 0.0017891946118727383,
+      "all_converged": true
+    },
+    {
+      "step": 3,
+      "cold_gmres_iterations": 32,
+      "cold_gcrot_iterations": 32,
+      "recycled_primal_iterations": 9,
+      "recycled_adjoint_iterations": 10,
+      "cold_adjoint_iterations": 32,
+      "primal_drift": 0.0012612416894449115,
+      "adjoint_drift": 0.0014040892086211946,
+      "all_converged": true
+    },
+    {
+      "step": 4,
+      "cold_gmres_iterations": 32,
+      "cold_gcrot_iterations": 32,
+      "recycled_primal_iterations": 3,
+      "recycled_adjoint_iterations": 3,
+      "cold_adjoint_iterations": 32,
+      "primal_drift": 0.000999476752654775,
+      "adjoint_drift": 0.0011681142782783809,
+      "all_converged": true
+    },
+    {
+      "step": 5,
+      "cold_gmres_iterations": 32,
+      "cold_gcrot_iterations": 32,
+      "recycled_primal_iterations": 3,
+      "recycled_adjoint_iterations": 3,
+      "cold_adjoint_iterations": 32,
+      "primal_drift": 0.0011904670174069897,
+      "adjoint_drift": 0.0011561848174925166,
+      "all_converged": true
+    },
+    {
+      "step": 6,
+      "cold_gmres_iterations": 32,
+      "cold_gcrot_iterations": 32,
+      "recycled_primal_iterations": 3,
+      "recycled_adjoint_iterations": 3,
+      "cold_adjoint_iterations": 32,
+      "primal_drift": 0.001230470793857665,
+      "adjoint_drift": 0.0012878133542049606,
+      "all_converged": true
+    },
+    {
+      "step": 7,
+      "cold_gmres_iterations": 32,
+      "cold_gcrot_iterations": 32,
+      "recycled_primal_iterations": 2,
+      "recycled_adjoint_iterations": 2,
+      "cold_adjoint_iterations": 32,
+      "primal_drift": 0.0013641585512011122,
+      "adjoint_drift": 0.0014150701826640846,
+      "all_converged": true
+    },
+    {
+      "step": 8,
+      "cold_gmres_iterations": 32,
+      "cold_gcrot_iterations": 32,
+      "recycled_primal_iterations": 3,
+      "recycled_adjoint_iterations": 2,
+      "cold_adjoint_iterations": 32,
+      "primal_drift": 0.0014421213536416186,
+      "adjoint_drift": 0.0015386394835165652,
+      "all_converged": true
+    },
+    {
+      "step": 9,
+      "cold_gmres_iterations": 32,
+      "cold_gcrot_iterations": 32,
+      "recycled_primal_iterations": 2,
+      "recycled_adjoint_iterations": 2,
+      "cold_adjoint_iterations": 32,
+      "primal_drift": 0.0016030890279781454,
+      "adjoint_drift": 0.0016135470147998483,
+      "all_converged": true
+    }
+  ],
+  "totals": {
+    "cold_gmres_iterations": 320,
+    "cold_gcrot_iterations": 320,
+    "recycled_primal_iterations": 97,
+    "recycled_adjoint_iterations": 98,
+    "cold_adjoint_iterations": 320
+  }
+}

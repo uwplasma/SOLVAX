@@ -1,0 +1,67 @@
+{
+  "solvax_version": "0.8.6",
+  "params": {
+    "n_blocks": 96,
+    "m": 36,
+    "keep": 3,
+    "n_rhs": 4,
+    "window": 10,
+    "newton_steps": 8
+  },
+  "true_params": [
+    1.0,
+    0.6
+  ],
+  "recovered_params": [
+    0.9999999999935122,
+    0.6000000004621662
+  ],
+  "loss_trajectory": [
+    0.04724217185903006,
+    0.017965589863721435,
+    0.005137965060360332,
+    0.0009592603855697802,
+    0.00010293623763077418,
+    3.3495549889090153e-06,
+    5.442186337750634e-09,
+    1.60790460425267e-14
+  ],
+  "gradient_fd_match": true,
+  "extended_hessian_eigenvalues": [
+    3.4123066543832873e-10,
+    9.644414483714467e-06,
+    0.14816897971805165
+  ],
+  "memory_scaling": [
+    {
+      "n_blocks": 32,
+      "naive_temp_bytes": 2753184,
+      "bounded_temp_bytes": 1111648,
+      "generated_temp_bytes": 1476448
+    },
+    {
+      "n_blocks": 64,
+      "naive_temp_bytes": 5743776,
+      "bounded_temp_bytes": 2107232,
+      "generated_temp_bytes": 1476448
+    },
+    {
+      "n_blocks": 128,
+      "naive_temp_bytes": 11725984,
+      "bounded_temp_bytes": 4098400,
+      "generated_temp_bytes": 1476448
+    },
+    {
+      "n_blocks": 256,
+      "naive_temp_bytes": 23689376,
+      "bounded_temp_bytes": 8080736,
+      "generated_temp_bytes": 1476448
+    },
+    {
+      "n_blocks": 512,
+      "naive_temp_bytes": 47616160,
+      "bounded_temp_bytes": 16045408,
+      "generated_temp_bytes": 1476448
+    }
+  ]
+}
