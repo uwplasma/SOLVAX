@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Added the transport-inversion application benchmark
+  (`benchmarks/benchmark_kinetic_inversion.py`): damped Newton recovers a
+  collisionality profile exactly (quadratic convergence to 1.6e-14) from
+  truncated low-moment observations of a spectral kinetic ladder, with the
+  gradient and Hessian both flowing through
+  `block_thomas_truncated(adjoint_window=w)` and validated against finite
+  differences. The extended-profile misfit Hessian spectrum documents that
+  the quadratic profile coefficient is unidentifiable from truncated moments,
+  and the memory record separates the solve-tape savings of the bounded
+  adjoint from the band-array floor of the array-band API.
+
 - Added `nystrom_preconditioner`: a rank-`ell` randomized Nystrom
   preconditioner for SPD systems `(A + mu I) x = b`, built from `ell` operator
   applications with an explicit PRNG key — deterministic, jit-able, and
