@@ -54,4 +54,5 @@ mixed_precision_adjoint
 collectives
 sweeps
 baselines
+kinetic_inversion
 ```

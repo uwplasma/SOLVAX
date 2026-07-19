@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Added the GPU measurement records (`benchmarks/results/gpu/`, 2x RTX A4000)
+  and their docs columns: collective counts identical to the emulated-mesh
+  schedule over NCCL; ideal weak scaling for single-reduction PCG (and a
+  recorded non-scaling finding for the fused lax tridiagonal layout under
+  sharding); the bounded adjoint flat on GPU; the physics-scale
+  generated-block inversion whose N=4096, m=195 gradient runs in 33.7 MiB
+  where the naive tape would exceed the 16 GB card; and the per-platform
+  framing of the mixed-precision backward cost. New kinetic-inversion
+  benchmark docs page.
+
 - Added the baseline comparison benchmark (`benchmarks/benchmark_baselines.py`,
   `pip install solvax[bench]`): head-to-head against `jax.scipy`, `lineax`, and
   `scipy.sparse` on the problem suite at identical tolerance with no

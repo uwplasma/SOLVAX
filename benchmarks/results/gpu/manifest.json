@@ -1,0 +1,19 @@
+{
+  "solvax": "0.8.6",
+  "jax": "0.11.0",
+  "jaxlib": "0.11.0",
+  "python": "3.12.13",
+  "platform": "Linux-6.17.9-76061709-generic-x86_64-with-glibc2.35",
+  "processor": "x86_64",
+  "devices": [
+    "cuda:0",
+    "cuda:1"
+  ],
+  "default_backend": "gpu",
+  "x64_enabled": true,
+  "timer_validation": {
+    "interval_s": 0.1,
+    "measured_s": 0.1001517130061984,
+    "relative_error": 0.0015171300619840067
+  }
+}

@@ -34,3 +34,17 @@ The single-reduction rewrite lowers the per-solve reduction count 3→2 and its
 adjoint follows 6→4. Its fused realization is compiler-dependent (current JAX
 fuses; the oldest supported partitioner does not) — which is exactly why these
 counts are measured per toolchain rather than asserted from the algebra.
+
+## On real GPUs
+
+The identical counts compile on 2x RTX A4000 over NCCL — PCG 3→6,
+`single_reduction` 2→4, FGMRES 6→12, batched (Thomas) tridiagonal 0→0 — the
+schedule is backend-invariant (`benchmarks/results/gpu/collectives.json`).
+
+Weak scaling at constant per-device size
+(`benchmarks/results/gpu/gpu_weak_scaling.json`): single-reduction PCG runs
+1e6 unknowns/device in 31.6 ms on one GPU and 2e6 across two in 31.4 ms —
+ideal. The fused `lax` tridiagonal path does **not** scale (3.9 → 7.8 ms for
+2x work on 2 devices): its reshape/moveaxis layout defeats the sharding.
+Under sharding, use the leaf-local Thomas path; a sharding-aware layout for
+the fused path is the recorded follow-up.

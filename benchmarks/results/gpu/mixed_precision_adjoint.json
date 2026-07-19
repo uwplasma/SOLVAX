@@ -1,0 +1,49 @@
+{
+  "solvax_version": "0.8.6",
+  "gradient_accuracy": [
+    {
+      "dominance": 6.0,
+      "implicit_refined": 3.1078931721904836e-16,
+      "implicit_bare_fp32": 1.9759854023356634e-07,
+      "unrolled_refined": 3.1201479141553377e-16
+    },
+    {
+      "dominance": 4.0,
+      "implicit_refined": 3.022645297330901e-16,
+      "implicit_bare_fp32": 1.990424250931613e-07,
+      "unrolled_refined": 2.7377771526984876e-16
+    },
+    {
+      "dominance": 2.0,
+      "implicit_refined": 3.454971705016252e-16,
+      "implicit_bare_fp32": 1.7203728120356474e-07,
+      "unrolled_refined": 5.019381651734568e-16
+    },
+    {
+      "dominance": 1.5,
+      "implicit_refined": 5.388734380022372e-16,
+      "implicit_bare_fp32": 1.3373996798601773e-07,
+      "unrolled_refined": 4.335533857857795e-16
+    },
+    {
+      "dominance": 1.2,
+      "implicit_refined": 4.4498252814492655e-16,
+      "implicit_bare_fp32": 1.3250011772180106e-07,
+      "unrolled_refined": 4.436856225617555e-16
+    }
+  ],
+  "backward_cost": {
+    "n_blocks": 128,
+    "m": 8,
+    "unrolled": {
+      "backward_temp_bytes": 1825008,
+      "warm_ms": 134.59533989662305,
+      "compile_s": 31.584378905943595
+    },
+    "implicit": {
+      "backward_temp_bytes": 967920,
+      "warm_ms": 104.8083183937706,
+      "compile_s": 18.422558723948896
+    }
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "m": 195,
+  "keep": 3,
+  "window": 8,
+  "cases": [
+    {
+      "n_xi": 256,
+      "grad_temp_bytes": 35343440,
+      "naive_tape_estimate_bytes": 233625600,
+      "final_loss": 3.787221777051105e-08,
+      "recovered": [
+        0.9971795003396376,
+        0.9334619255944472
+      ],
+      "newton_wall_s": 34.79823066003155
+    },
+    {
+      "n_xi": 1024,
+      "grad_temp_bytes": 35343440,
+      "naive_tape_estimate_bytes": 934502400,
+      "final_loss": 3.8128784632272224e-08,
+      "recovered": [
+        0.9971757979883273,
+        1.9287886175297633
+      ],
+      "newton_wall_s": 70.74659903603606
+    },
+    {
+      "n_xi": 4096,
+      "grad_temp_bytes": 35343440,
+      "naive_tape_estimate_bytes": 3738009600,
+      "final_loss": 3.843964588827802e-08,
+      "recovered": [
+        0.9971611127338742,
+        5.95935632406988
+      ],
+      "newton_wall_s": 266.42493089393247
+    }
+  ]
+}
