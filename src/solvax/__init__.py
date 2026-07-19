@@ -77,7 +77,7 @@ from solvax.randomized import nystrom_preconditioner
 from solvax.refine import as_low_precision, iterative_refinement
 from solvax.tridiagonal import cyclic_tridiagonal_solve, tridiagonal_solve
 
-__version__ = "0.8.6"
+__version__ = "0.8.7"
 
 __all__ = [
     "BandedLUFactors",

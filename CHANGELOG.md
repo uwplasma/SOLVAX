@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.8.7 - 2026-07-19
+
 - Added the GPU measurement records (`benchmarks/results/gpu/`, 2x RTX A4000)
   and their docs columns: collective counts identical to the emulated-mesh
   schedule over NCCL; ideal weak scaling for single-reduction PCG (and a

@@ -1,4 +1,4 @@
-cff-version: 1.2.0
+cff-version: 0.8.7
 message: "If you use solvax in your research, please cite it as below."
 title: "solvax: differentiable structured linear solvers in JAX"
 authors:
@@ -8,5 +8,5 @@ authors:
     affiliation: University of Wisconsin-Madison
 repository-code: "https://github.com/uwplasma/SOLVAX"
 license: MIT
-version: 0.8.6
-date-released: 2026-07-17
+version: 0.8.7
+date-released: 2026-07-19
