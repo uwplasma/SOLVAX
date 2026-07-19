@@ -760,18 +760,124 @@ def _block_thomas_truncated_fn_state(
     return solution, lus, pivs, sigmas, ls
 
 
+@partial(jax.custom_vjp, nondiff_argnums=(0, 1, 3, 4))
+def _truncated_fn_bounded(
+    block_fn,
+    n_blocks: int,
+    params,
+    keep_lowest: int,
+    adjoint_window: int,
+    rhs_low: jax.Array,
+) -> jax.Array:
+    solution, _, _, _, _ = _block_thomas_truncated_fn_state(
+        lambda j: block_fn(params, j), n_blocks, rhs_low, keep_lowest
+    )
+    return solution
+
+
+def _truncated_fn_fwd(block_fn, n_blocks, params, keep_lowest, adjoint_window, rhs_low):
+    solution, _, _, _, _ = _block_thomas_truncated_fn_state(
+        lambda j: block_fn(params, j), n_blocks, rhs_low, keep_lowest
+    )
+    return solution, (params, rhs_low)
+
+
+def _truncated_fn_bwd(block_fn, n_blocks, keep_lowest, adjoint_window, residuals, ct):
+    params, rhs_low = residuals
+    n, k = n_blocks, keep_lowest
+
+    # rhs-adjoint (exact): a generated truncated solve of A^T. Row j of A^T has
+    # bands (U_{j-1}^T, D_j^T, L_{j+1}^T); each transposed row costs three
+    # block assemblies, and the sweep keeps the generated path's flat memory.
+    def transposed_block_fn(j):
+        _, _, u_prev = block_fn(params, jnp.maximum(j - 1, 0))
+        _, d_j, _ = block_fn(params, j)
+        l_next, _, _ = block_fn(params, jnp.minimum(j + 1, n - 1))
+        t = lambda a: jnp.swapaxes(a, -1, -2)  # noqa: E731
+        return t(u_prev), t(d_j), t(l_next)
+
+    rhs_bar, _, _, _, _ = _block_thomas_truncated_fn_state(
+        transposed_block_fn, n, ct, k
+    )
+
+    # params-adjoint (windowed): materialize only the leading K+w blocks,
+    # solve the windowed primal and adjoint there, form the band cotangents,
+    # and pull each one back through block_fn's own VJP at its index. Peak
+    # memory O((K+w) m^2) plus the params cotangent, independent of n_blocks.
+    w = min(k + adjoint_window, n)
+    indices = jnp.arange(w, dtype=jnp.int32)
+    lower_w, diag_w, upper_w = jax.lax.map(lambda j: block_fn(params, j), indices)
+
+    x_win, _ = _windowed_leading_solve(lower_w, diag_w, upper_w, rhs_low, k, w - k)
+    lower_t, diag_t, upper_t = _transpose_bands(lower_w, diag_w, upper_w)
+    lam_win, _ = _windowed_leading_solve(lower_t, diag_t, upper_t, ct, k, w - k)
+    lower_bar, diag_bar, upper_bar = _band_gradients(lam_win, x_win)
+
+    def accumulate(carry, inputs):
+        j, l_bar, d_bar, u_bar = inputs
+        _, pullback = jax.vjp(lambda p: block_fn(p, j), params)
+        (contribution,) = pullback((l_bar, d_bar, u_bar))
+        return jax.tree.map(jnp.add, carry, contribution), None
+
+    zero = jax.tree.map(jnp.zeros_like, params)
+    params_bar, _ = jax.lax.scan(
+        accumulate, zero, (indices, lower_bar, diag_bar, upper_bar)
+    )
+    return params_bar, rhs_bar
+
+
+_truncated_fn_bounded.defvjp(_truncated_fn_fwd, _truncated_fn_bwd)
+
+
 def block_thomas_truncated_fn(
-    block_fn: Callable[[jax.Array], tuple[jax.Array, jax.Array, jax.Array]],
+    block_fn: Callable[..., tuple[jax.Array, jax.Array, jax.Array]],
     n_blocks: int,
     rhs_low: jax.Array,
     keep_lowest: int,
+    *,
+    params=None,
+    adjoint_window: int | None = None,
 ) -> jax.Array:
     """Truncated block-tridiagonal solve with on-the-fly block assembly.
 
     The full band arrays are never materialized, and each block index is
     assembled once. See :func:`block_thomas_truncated_fn_with_residual` when an
     algebraic residual of the retained Schur system is also required.
+
+    By default ``block_fn`` maps an index to blocks, ``k -> (L_k, D_k, U_k)``,
+    and reverse mode differentiates through the generated sweeps (taping them
+    at ``O(n_blocks m^2)``). Passing ``params`` (any pytree) switches
+    ``block_fn`` to the explicit form ``(params, k) -> (L_k, D_k, U_k)`` and
+    selects a structure-preserving custom VJP governed by ``adjoint_window``:
+    the right-hand-side gradient is an exactly generated truncated solve of
+    ``A^T`` (three block assemblies per index), and the ``params`` gradient
+    pulls the windowed band cotangents back through ``block_fn``'s own VJP at
+    each of the leading ``keep_lowest + adjoint_window`` indices. Forward and
+    reverse then both run at memory independent of ``n_blocks`` — the band
+    arrays are never materialized in either direction.
+
+    Args:
+        block_fn: ``k -> (L_k, D_k, U_k)``, or ``(params, k) -> ...`` when
+            ``params`` is given. ``L_0`` and ``U_{n_blocks-1}`` are ignored.
+        n_blocks: static total number of blocks (>= 1).
+        rhs_low: nonzero head of the right-hand side, shape
+            ``(keep_lowest, m)`` or ``(keep_lowest, m, n_rhs)``.
+        keep_lowest: static number of solution blocks to compute.
+        params: optional differentiable parameters consumed by ``block_fn``.
+        adjoint_window: window ``w`` for the ``params`` gradient (required with
+            ``params``); band-gradient error decays as ``O(rho^{2w})`` for
+            block diagonally dominant systems, exactly as for
+            :func:`block_thomas_truncated`.
+
+    Returns:
+        The lowest ``keep_lowest`` solution blocks, same layout as ``rhs_low``.
     """
+    if params is not None:
+        if adjoint_window is None or adjoint_window < 0:
+            raise ValueError("params requires a non-negative adjoint_window")
+        return _truncated_fn_bounded(
+            block_fn, n_blocks, params, keep_lowest, adjoint_window, rhs_low
+        )
     solution, _, _, _, _ = _block_thomas_truncated_fn_state(
         block_fn, n_blocks, rhs_low, keep_lowest
     )

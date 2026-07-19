@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- `block_thomas_truncated_fn` gained a `params`/`adjoint_window` path with a
+  structure-preserving custom VJP for generated blocks: the right-hand-side
+  gradient is an exactly generated truncated solve of the transpose, and the
+  `params` gradient pulls windowed band cotangents back through `block_fn`'s
+  own derivative — forward and reverse both run at memory independent of the
+  block count, with no band arrays materialized in either direction. Measured
+  flat from N=32 to N=1024 (~30x less reverse scratch than the taped generated
+  path at N=1024); full-window gradients are bitwise identical to the
+  array-band bounded adjoint.
+
 - Added the transport-inversion application benchmark
   (`benchmarks/benchmark_kinetic_inversion.py`): damped Newton recovers a
   collisionality profile exactly (quadratic convergence to 1.6e-14) from
