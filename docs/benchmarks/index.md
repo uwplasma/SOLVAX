@@ -53,4 +53,5 @@ bounded_adjoint
 mixed_precision_adjoint
 collectives
 sweeps
+baselines
 ```

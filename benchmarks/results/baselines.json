@@ -1,0 +1,1235 @@
+{
+  "solvax_version": "0.8.6",
+  "lineax_available": true,
+  "tolerance": 1e-08,
+  "head_to_head": [
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 16
+      },
+      "solver": "solvax",
+      "iterations": 8,
+      "warm_ms": 0.027916976250708103,
+      "relative_residual": 5.672125819524092e-12
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 16
+      },
+      "solver": "jax.scipy",
+      "iterations": null,
+      "warm_ms": 0.017292099073529243,
+      "relative_residual": 5.672125819524092e-12
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 16
+      },
+      "solver": "lineax",
+      "iterations": 9,
+      "warm_ms": 0.02504198346287012,
+      "relative_residual": 2.623690299446573e-13
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 16
+      },
+      "solver": "scipy",
+      "iterations": 8,
+      "warm_ms": 0.0750409672036767,
+      "relative_residual": 6.121892926229048e-12
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 32
+      },
+      "solver": "solvax",
+      "iterations": 18,
+      "warm_ms": 0.049332971684634686,
+      "relative_residual": 4.861889458347118e-09
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 32
+      },
+      "solver": "jax.scipy",
+      "iterations": null,
+      "warm_ms": 0.044334097765386105,
+      "relative_residual": 4.861889458347118e-09
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 32
+      },
+      "solver": "lineax",
+      "iterations": 19,
+      "warm_ms": 0.07466704118996859,
+      "relative_residual": 2.776106083142054e-10
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 32
+      },
+      "solver": "scipy",
+      "iterations": 18,
+      "warm_ms": 0.30037492979317904,
+      "relative_residual": 4.538880648242226e-09
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 48
+      },
+      "solver": "solvax",
+      "iterations": 31,
+      "warm_ms": 0.13162498362362385,
+      "relative_residual": 2.219691199261986e-09
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 48
+      },
+      "solver": "jax.scipy",
+      "iterations": null,
+      "warm_ms": 0.12362492270767689,
+      "relative_residual": 2.219691199261986e-09
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 48
+      },
+      "solver": "lineax",
+      "iterations": 33,
+      "warm_ms": 0.2576670376583934,
+      "relative_residual": 1.8467503999668283e-11
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 48
+      },
+      "solver": "scipy",
+      "iterations": 31,
+      "warm_ms": 0.6617499748244882,
+      "relative_residual": 1.9713024322609186e-09
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 0.1
+      },
+      "solver": "solvax",
+      "iterations": 145,
+      "warm_ms": 4.133584094233811,
+      "relative_residual": 9.565233787703404e-09
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 0.1
+      },
+      "solver": "jax.scipy",
+      "iterations": null,
+      "warm_ms": 1.8797910306602716,
+      "relative_residual": 2.9965584744113797e-10
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 0.1
+      },
+      "solver": "lineax",
+      "iterations": 6,
+      "warm_ms": 2.2875419817864895,
+      "relative_residual": 7.392479167457583e-13
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 0.1
+      },
+      "solver": "scipy",
+      "iterations": 145,
+      "warm_ms": 14.71416698768735,
+      "relative_residual": 9.565234993302157e-09
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 10.0
+      },
+      "solver": "solvax",
+      "iterations": 39,
+      "warm_ms": 1.081916969269514,
+      "relative_residual": 9.599692315081019e-09
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 10.0
+      },
+      "solver": "jax.scipy",
+      "iterations": null,
+      "warm_ms": 0.45004195999354124,
+      "relative_residual": 1.8073216757964362e-09
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 10.0
+      },
+      "solver": "lineax",
+      "iterations": 3,
+      "warm_ms": 0.9238750208169222,
+      "relative_residual": 2.1229707088323878e-15
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 10.0
+      },
+      "solver": "scipy",
+      "iterations": 39,
+      "warm_ms": 4.062833031639457,
+      "relative_residual": 9.59969208933711e-09
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 100.0
+      },
+      "solver": "solvax",
+      "iterations": 35,
+      "warm_ms": 0.9836250683292747,
+      "relative_residual": 1.2528624203006102e-09
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 100.0
+      },
+      "solver": "jax.scipy",
+      "iterations": null,
+      "warm_ms": 0.46208291314542294,
+      "relative_residual": 1.514568347006461e-14
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 100.0
+      },
+      "solver": "lineax",
+      "iterations": 3,
+      "warm_ms": 0.9125410579144955,
+      "relative_residual": 1.94968445796921e-15
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 100.0
+      },
+      "solver": "scipy",
+      "iterations": 35,
+      "warm_ms": 3.3805411076173186,
+      "relative_residual": 1.2528623768722866e-09
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 1.0
+      },
+      "solver": "solvax",
+      "iterations": 18,
+      "warm_ms": 0.5189579678699374,
+      "relative_residual": 6.181497827346632e-09
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 1.0
+      },
+      "solver": "jax.scipy",
+      "iterations": null,
+      "warm_ms": 0.4695829702541232,
+      "relative_residual": 4.7684054299914636e-14
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 1.0
+      },
+      "solver": "lineax",
+      "iterations": 3,
+      "warm_ms": 0.9152919519692659,
+      "relative_residual": 2.5435600960059344e-14
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 1.0
+      },
+      "solver": "scipy",
+      "iterations": 18,
+      "warm_ms": 1.1441669194027781,
+      "relative_residual": 5.982175614168384e-09
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 10.0
+      },
+      "solver": "solvax",
+      "iterations": 20,
+      "warm_ms": 0.5673340056091547,
+      "relative_residual": 1.2924096764586118e-09
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 10.0
+      },
+      "solver": "jax.scipy",
+      "iterations": null,
+      "warm_ms": 0.45670801773667336,
+      "relative_residual": 1.6346557623974211e-12
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 10.0
+      },
+      "solver": "lineax",
+      "iterations": 3,
+      "warm_ms": 0.9184590307995677,
+      "relative_residual": 1.4162666897226109e-14
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 10.0
+      },
+      "solver": "scipy",
+      "iterations": 20,
+      "warm_ms": 1.3206249568611383,
+      "relative_residual": 1.175066015763174e-09
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 20.0
+      },
+      "solver": "solvax",
+      "iterations": 19,
+      "warm_ms": 0.5525000160560012,
+      "relative_residual": 1.0921365819855695e-09
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 20.0
+      },
+      "solver": "jax.scipy",
+      "iterations": null,
+      "warm_ms": 0.4526660777628422,
+      "relative_residual": 4.758731959233825e-15
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 20.0
+      },
+      "solver": "lineax",
+      "iterations": 3,
+      "warm_ms": 0.9452089434489608,
+      "relative_residual": 1.113848663580296e-15
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 20.0
+      },
+      "solver": "scipy",
+      "iterations": 19,
+      "warm_ms": 1.2039159191772342,
+      "relative_residual": 1.01363368524098e-09
+    },
+    {
+      "family": "anisotropic_diffusion",
+      "params": {
+        "grid": 32,
+        "epsilon": 1.0
+      },
+      "solver": "solvax",
+      "iterations": 18,
+      "warm_ms": 0.04958303179591894,
+      "relative_residual": 4.861889458347118e-09
+    },
+    {
+      "family": "anisotropic_diffusion",
+      "params": {
+        "grid": 32,
+        "epsilon": 1.0
+      },
+      "solver": "jax.scipy",
+      "iterations": null,
+      "warm_ms": 0.057875062339007854,
+      "relative_residual": 4.861889458347118e-09
+    },
+    {
+      "family": "anisotropic_diffusion",
+      "params": {
+        "grid": 32,
+        "epsilon": 1.0
+      },
+      "solver": "lineax",
+      "iterations": 19,
+      "warm_ms": 0.0760830007493496,
+      "relative_residual": 2.776106083142054e-10
+    },
+    {
+      "family": "anisotropic_diffusion",
+      "params": {
+        "grid": 32,
+        "epsilon": 1.0
+      },
+      "solver": "scipy",
+      "iterations": 18,
+      "warm_ms": 0.3054169937968254,
+      "relative_residual": 4.538880648242226e-09
+    },
+    {
+      "family": "anisotropic_diffusion",
+      "params": {
+        "grid": 32,
+        "epsilon": 0.01
+      },
+      "solver": "solvax",
+      "iterations": 70,
+      "warm_ms": 0.1362079055979848,
+      "relative_residual": 5.7085127173003305e-09
+    },
+    {
+      "family": "anisotropic_diffusion",
+      "params": {
+        "grid": 32,
+        "epsilon": 0.01
+      },
+      "solver": "jax.scipy",
+      "iterations": null,
+      "warm_ms": 0.1323340693488717,
+      "relative_residual": 5.7085127173003305e-09
+    },
+    {
+      "family": "anisotropic_diffusion",
+      "params": {
+        "grid": 32,
+        "epsilon": 0.01
+      },
+      "solver": "lineax",
+      "iterations": 85,
+      "warm_ms": 0.2710419939830899,
+      "relative_residual": 3.0085631032680307e-10
+    },
+    {
+      "family": "anisotropic_diffusion",
+      "params": {
+        "grid": 32,
+        "epsilon": 0.01
+      },
+      "solver": "scipy",
+      "iterations": 70,
+      "warm_ms": 1.1670420644804835,
+      "relative_residual": 6.275267015758613e-09
+    }
+  ],
+  "performance_ratios": {
+    "solvax": [
+      1.6144353633413673,
+      1.1127546103611352,
+      1.0647123633384499,
+      2.1989593666599743,
+      2.404035768764853,
+      2.1286765650642363,
+      1.1051464826100785,
+      1.2422247553715284,
+      1.2205465423575728,
+      1.0,
+      1.0292731589693696
+    ],
+    "jax.scipy": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.167235246469366,
+      1.0
+    ],
+    "lineax": [
+      1.4481748778090455,
+      1.6841899340120317,
+      2.084264499543284,
+      1.216912914507841,
+      2.0528641836645214,
+      1.9748426785634206,
+      1.9491591687704077,
+      2.0110420556030806,
+      2.08809316598309,
+      1.5344564056208398,
+      2.0481648854048546
+    ],
+    "scipy": [
+      4.339610066111029,
+      6.775257531635099,
+      5.352884841750398,
+      7.8275546311756985,
+      9.027676067577708,
+      7.315875596017597,
+      2.436559653736148,
+      2.89161763221459,
+      2.659611528938075,
+      6.1597079229423715,
+      8.818908616826524
+    ]
+  },
+  "work_precision": [
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 48
+      },
+      "rtol": 0.0001,
+      "solver": "solvax",
+      "iterations": 27,
+      "warm_ms": 0.11516700033098459,
+      "relative_residual": 3.3068553726641615e-05
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 48
+      },
+      "rtol": 0.0001,
+      "solver": "jax.scipy",
+      "iterations": null,
+      "warm_ms": 0.11025008279830217,
+      "relative_residual": 3.3068553726641615e-05
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 48
+      },
+      "rtol": 0.0001,
+      "solver": "lineax",
+      "iterations": 29,
+      "warm_ms": 0.23791694547981024,
+      "relative_residual": 3.416072789265955e-07
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 48
+      },
+      "rtol": 0.0001,
+      "solver": "scipy",
+      "iterations": 26,
+      "warm_ms": 0.5328339757397771,
+      "relative_residual": 9.971791004161991e-05
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 48
+      },
+      "rtol": 0.0001,
+      "solver": "solvax+gradient",
+      "iterations": null,
+      "warm_ms": 0.21420896518975496,
+      "relative_residual": 0.0
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 48
+      },
+      "rtol": 1e-06,
+      "solver": "solvax",
+      "iterations": 29,
+      "warm_ms": 0.1343749463558197,
+      "relative_residual": 3.4160705782168614e-07
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 48
+      },
+      "rtol": 1e-06,
+      "solver": "jax.scipy",
+      "iterations": null,
+      "warm_ms": 0.11475000064820051,
+      "relative_residual": 3.4160705782168614e-07
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 48
+      },
+      "rtol": 1e-06,
+      "solver": "lineax",
+      "iterations": 30,
+      "warm_ms": 0.25829195510596037,
+      "relative_residual": 2.5676892524966186e-08
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 48
+      },
+      "rtol": 1e-06,
+      "solver": "scipy",
+      "iterations": 29,
+      "warm_ms": 0.6599168991670012,
+      "relative_residual": 3.102382258911381e-07
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 48
+      },
+      "rtol": 1e-06,
+      "solver": "solvax+gradient",
+      "iterations": null,
+      "warm_ms": 0.2655419521033764,
+      "relative_residual": 0.0
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 48
+      },
+      "rtol": 1e-08,
+      "solver": "solvax",
+      "iterations": 31,
+      "warm_ms": 0.17129199113696814,
+      "relative_residual": 2.219691199261986e-09
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 48
+      },
+      "rtol": 1e-08,
+      "solver": "jax.scipy",
+      "iterations": null,
+      "warm_ms": 0.12220803182572126,
+      "relative_residual": 2.219691199261986e-09
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 48
+      },
+      "rtol": 1e-08,
+      "solver": "lineax",
+      "iterations": 33,
+      "warm_ms": 0.251457910053432,
+      "relative_residual": 1.8467503999668283e-11
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 48
+      },
+      "rtol": 1e-08,
+      "solver": "scipy",
+      "iterations": 31,
+      "warm_ms": 0.6573329446837306,
+      "relative_residual": 1.9713024322609186e-09
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 48
+      },
+      "rtol": 1e-08,
+      "solver": "solvax+gradient",
+      "iterations": null,
+      "warm_ms": 0.31387503258883953,
+      "relative_residual": 0.0
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 48
+      },
+      "rtol": 1e-10,
+      "solver": "solvax",
+      "iterations": 33,
+      "warm_ms": 0.13554096221923828,
+      "relative_residual": 1.8477041974730504e-11
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 48
+      },
+      "rtol": 1e-10,
+      "solver": "jax.scipy",
+      "iterations": null,
+      "warm_ms": 0.1386249205097556,
+      "relative_residual": 1.8477041974730504e-11
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 48
+      },
+      "rtol": 1e-10,
+      "solver": "lineax",
+      "iterations": 35,
+      "warm_ms": 0.26424997486174107,
+      "relative_residual": 2.333036414342079e-13
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 48
+      },
+      "rtol": 1e-10,
+      "solver": "scipy",
+      "iterations": 33,
+      "warm_ms": 0.6857500411570072,
+      "relative_residual": 1.642099615922862e-11
+    },
+    {
+      "family": "poisson",
+      "params": {
+        "grid": 48
+      },
+      "rtol": 1e-10,
+      "solver": "solvax+gradient",
+      "iterations": null,
+      "warm_ms": 0.28908299282193184,
+      "relative_residual": 0.0
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 10.0
+      },
+      "rtol": 0.0001,
+      "solver": "solvax",
+      "iterations": 33,
+      "warm_ms": 0.9429169585928321,
+      "relative_residual": 3.7736731501310404e-05
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 10.0
+      },
+      "rtol": 0.0001,
+      "solver": "jax.scipy",
+      "iterations": null,
+      "warm_ms": 0.4725410835817456,
+      "relative_residual": 1.8073216757964362e-09
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 10.0
+      },
+      "rtol": 0.0001,
+      "solver": "lineax",
+      "iterations": 3,
+      "warm_ms": 0.9144579526036978,
+      "relative_residual": 2.1229707088323878e-15
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 10.0
+      },
+      "rtol": 0.0001,
+      "solver": "scipy",
+      "iterations": 33,
+      "warm_ms": 3.0619159806519747,
+      "relative_residual": 3.773673150122733e-05
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 10.0
+      },
+      "rtol": 0.0001,
+      "solver": "solvax+gradient",
+      "iterations": null,
+      "warm_ms": 1.902792020700872,
+      "relative_residual": 0.0
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 10.0
+      },
+      "rtol": 1e-06,
+      "solver": "solvax",
+      "iterations": 36,
+      "warm_ms": 1.0167909786105156,
+      "relative_residual": 7.82338813003476e-07
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 10.0
+      },
+      "rtol": 1e-06,
+      "solver": "jax.scipy",
+      "iterations": null,
+      "warm_ms": 0.473707914352417,
+      "relative_residual": 1.8073216757964362e-09
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 10.0
+      },
+      "rtol": 1e-06,
+      "solver": "lineax",
+      "iterations": 3,
+      "warm_ms": 0.9471660014241934,
+      "relative_residual": 2.1229707088323878e-15
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 10.0
+      },
+      "rtol": 1e-06,
+      "solver": "scipy",
+      "iterations": 36,
+      "warm_ms": 3.5693340469151735,
+      "relative_residual": 7.823388130299322e-07
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 10.0
+      },
+      "rtol": 1e-06,
+      "solver": "solvax+gradient",
+      "iterations": null,
+      "warm_ms": 2.0968749886378646,
+      "relative_residual": 0.0
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 10.0
+      },
+      "rtol": 1e-08,
+      "solver": "solvax",
+      "iterations": 39,
+      "warm_ms": 1.1256670113652945,
+      "relative_residual": 9.599692315081019e-09
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 10.0
+      },
+      "rtol": 1e-08,
+      "solver": "jax.scipy",
+      "iterations": null,
+      "warm_ms": 0.47504191752523184,
+      "relative_residual": 1.8073216757964362e-09
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 10.0
+      },
+      "rtol": 1e-08,
+      "solver": "lineax",
+      "iterations": 3,
+      "warm_ms": 0.9184579830616713,
+      "relative_residual": 2.1229707088323878e-15
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 10.0
+      },
+      "rtol": 1e-08,
+      "solver": "scipy",
+      "iterations": 39,
+      "warm_ms": 4.159790929406881,
+      "relative_residual": 9.59969208933711e-09
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 10.0
+      },
+      "rtol": 1e-08,
+      "solver": "solvax+gradient",
+      "iterations": null,
+      "warm_ms": 2.329000039026141,
+      "relative_residual": 0.0
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 10.0
+      },
+      "rtol": 1e-10,
+      "solver": "solvax",
+      "iterations": 44,
+      "warm_ms": 1.2766250874847174,
+      "relative_residual": 6.398932504295282e-11
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 10.0
+      },
+      "rtol": 1e-10,
+      "solver": "jax.scipy",
+      "iterations": null,
+      "warm_ms": 0.9169579716399312,
+      "relative_residual": 2.2033417748025593e-15
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 10.0
+      },
+      "rtol": 1e-10,
+      "solver": "lineax",
+      "iterations": 4,
+      "warm_ms": 1.3984170509502292,
+      "relative_residual": 1.9948625854672867e-15
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 10.0
+      },
+      "rtol": 1e-10,
+      "solver": "scipy",
+      "iterations": 44,
+      "warm_ms": 4.545541014522314,
+      "relative_residual": 6.398938330528106e-11
+    },
+    {
+      "family": "convection_diffusion",
+      "params": {
+        "grid": 32,
+        "peclet": 10.0
+      },
+      "rtol": 1e-10,
+      "solver": "solvax+gradient",
+      "iterations": null,
+      "warm_ms": 2.6028749998658895,
+      "relative_residual": 0.0
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 10.0
+      },
+      "rtol": 0.0001,
+      "solver": "solvax",
+      "iterations": 17,
+      "warm_ms": 0.4954589530825615,
+      "relative_residual": 8.241868834807493e-06
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 10.0
+      },
+      "rtol": 0.0001,
+      "solver": "jax.scipy",
+      "iterations": null,
+      "warm_ms": 0.4536659689620137,
+      "relative_residual": 1.6346557623974211e-12
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 10.0
+      },
+      "rtol": 0.0001,
+      "solver": "lineax",
+      "iterations": 3,
+      "warm_ms": 0.9725829586386681,
+      "relative_residual": 1.4162666897226109e-14
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 10.0
+      },
+      "rtol": 0.0001,
+      "solver": "scipy",
+      "iterations": 17,
+      "warm_ms": 0.9742910042405128,
+      "relative_residual": 6.081249997611388e-06
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 10.0
+      },
+      "rtol": 0.0001,
+      "solver": "solvax+gradient",
+      "iterations": null,
+      "warm_ms": 1.0888329707086086,
+      "relative_residual": 0.0
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 10.0
+      },
+      "rtol": 1e-06,
+      "solver": "solvax",
+      "iterations": 18,
+      "warm_ms": 0.525166979059577,
+      "relative_residual": 3.33195749081553e-07
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 10.0
+      },
+      "rtol": 1e-06,
+      "solver": "jax.scipy",
+      "iterations": null,
+      "warm_ms": 0.4640000406652689,
+      "relative_residual": 1.6346557623974211e-12
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 10.0
+      },
+      "rtol": 1e-06,
+      "solver": "lineax",
+      "iterations": 3,
+      "warm_ms": 0.9198340121656656,
+      "relative_residual": 1.4162666897226109e-14
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 10.0
+      },
+      "rtol": 1e-06,
+      "solver": "scipy",
+      "iterations": 18,
+      "warm_ms": 1.153416931629181,
+      "relative_residual": 2.6181826983580486e-07
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 10.0
+      },
+      "rtol": 1e-06,
+      "solver": "solvax+gradient",
+      "iterations": null,
+      "warm_ms": 1.219124998897314,
+      "relative_residual": 0.0
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 10.0
+      },
+      "rtol": 1e-08,
+      "solver": "solvax",
+      "iterations": 20,
+      "warm_ms": 0.5648750811815262,
+      "relative_residual": 1.2924096764586118e-09
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 10.0
+      },
+      "rtol": 1e-08,
+      "solver": "jax.scipy",
+      "iterations": null,
+      "warm_ms": 0.4797079600393772,
+      "relative_residual": 1.6346557623974211e-12
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 10.0
+      },
+      "rtol": 1e-08,
+      "solver": "lineax",
+      "iterations": 3,
+      "warm_ms": 0.9405000600963831,
+      "relative_residual": 1.4162666897226109e-14
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 10.0
+      },
+      "rtol": 1e-08,
+      "solver": "scipy",
+      "iterations": 20,
+      "warm_ms": 1.317500020377338,
+      "relative_residual": 1.175066015763174e-09
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 10.0
+      },
+      "rtol": 1e-08,
+      "solver": "solvax+gradient",
+      "iterations": null,
+      "warm_ms": 1.2724580010399222,
+      "relative_residual": 0.0
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 10.0
+      },
+      "rtol": 1e-10,
+      "solver": "solvax",
+      "iterations": 22,
+      "warm_ms": 0.6217500194907188,
+      "relative_residual": 1.1412395709539406e-11
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 10.0
+      },
+      "rtol": 1e-10,
+      "solver": "jax.scipy",
+      "iterations": null,
+      "warm_ms": 0.4597919760271907,
+      "relative_residual": 1.6346557623974211e-12
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 10.0
+      },
+      "rtol": 1e-10,
+      "solver": "lineax",
+      "iterations": 3,
+      "warm_ms": 0.916167045943439,
+      "relative_residual": 1.4162666897226109e-14
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 10.0
+      },
+      "rtol": 1e-10,
+      "solver": "scipy",
+      "iterations": 21,
+      "warm_ms": 1.4214159455150366,
+      "relative_residual": 9.81765054269153e-11
+    },
+    {
+      "family": "helmholtz",
+      "params": {
+        "grid": 32,
+        "wavenumber": 10.0
+      },
+      "rtol": 1e-10,
+      "solver": "solvax+gradient",
+      "iterations": null,
+      "warm_ms": 1.3453749706968665,
+      "relative_residual": 0.0
+    }
+  ]
+}
