@@ -28,6 +28,7 @@ Documentation = "https://solvax.readthedocs.io"
 [project.optional-dependencies]
 native = ["scipy"]
 dev = ["pytest", "pytest-cov", "pytest-xdist", "scipy", "numpy", "ruff"]
+bench = ["lineax", "scipy"]
 docs = [
   "sphinx",
   "furo",

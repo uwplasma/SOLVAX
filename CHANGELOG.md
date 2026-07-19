@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Added the baseline comparison benchmark (`benchmarks/benchmark_baselines.py`,
+  `pip install solvax[bench]`): head-to-head against `jax.scipy`, `lineax`, and
+  `scipy.sparse` on the problem suite at identical tolerance with no
+  preconditioning, performance-profile ratios, and work-precision series
+  including a solution-plus-gradient series through the implicit adjoint.
+  SOLVAX matches the SciPy reference iteration counts exactly and runs within
+  ~20% of the fastest JAX baseline at these sizes.
+
 - `block_thomas_truncated_fn` gained a `params`/`adjoint_window` path with a
   structure-preserving custom VJP for generated blocks: the right-hand-side
   gradient is an exactly generated truncated solve of the transpose, and the
