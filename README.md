@@ -55,6 +55,9 @@ x2 = sx.block_thomas_solve(factors, rhs2)
 # diagonal band.
 generated_factors = sx.block_thomas_factor_fn(block_fn, n_blocks=N)
 
+# One generated solve with O(sqrt(N) m^2) factor storage and exact JVP/VJP.
+x = sx.block_thomas_checkpointed_fn(block_fn, N, rhs)
+
 # Memory-truncated mode: rhs nonzero only in the lowest K blocks and only the
 # lowest K solution blocks needed -> O(K m^2) memory, independent of N.
 x_low = sx.block_thomas_truncated(lower, diag, upper, rhs[:3], keep_lowest=3)
