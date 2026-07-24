@@ -7,6 +7,7 @@ import pytest
 
 from solvax import (
     block_thomas,
+    block_thomas_checkpointed_fn,
     block_thomas_factor,
     block_thomas_factor_fn,
     block_thomas_solve,
@@ -116,6 +117,80 @@ def test_generated_factor_assembles_each_index_once():
 def test_generated_factor_rejects_empty_system():
     with pytest.raises(ValueError, match="positive"):
         block_thomas_factor_fn(lambda _: (None, None, None), 0)
+
+
+@pytest.mark.parametrize("n_blocks,checkpoint_size", [(1, 1), (7, None), (10, 20)])
+@pytest.mark.parametrize("n_rhs", [None, 2])
+@pytest.mark.parametrize("transpose", [False, True])
+def test_checkpointed_generated_solve_matches_factors(n_blocks, checkpoint_size, n_rhs, transpose):
+    (lower, diag, upper, rhs), _ = make_system(n_blocks, 4, n_rhs, seed=17)
+    actual = block_thomas_checkpointed_fn(
+        _fn_from_arrays(lower, diag, upper),
+        n_blocks,
+        rhs,
+        checkpoint_size,
+        transpose=transpose,
+    )
+    factors = block_thomas_factor(lower, diag, upper)
+    expected = block_thomas_solve(factors, rhs, transpose=transpose)
+    assert np.allclose(np.asarray(actual), np.asarray(expected), atol=1e-12)
+
+
+@pytest.mark.parametrize("transpose", [False, True])
+def test_checkpointed_generated_solve_jit_jvp_and_vjp(transpose):
+    n_blocks, m = 7, 3
+    (lower, diag, upper, rhs), _ = make_system(n_blocks, m, seed=18)
+    eye = jnp.eye(m)
+
+    def solve(shift):
+        def block_fn(k):
+            return lower[k], diag[k] + shift * eye, upper[k]
+
+        return block_thomas_checkpointed_fn(block_fn, n_blocks, rhs, 3, transpose=transpose)
+
+    def reference(shift):
+        factors = block_thomas_factor(lower, diag + shift * eye, upper)
+        return block_thomas_solve(factors, rhs, transpose=transpose)
+
+    shift = jnp.asarray(0.1)
+    actual, tangent = jax.jit(lambda s: jax.jvp(solve, (s,), (jnp.ones_like(s),)))(shift)
+    expected = reference(shift)
+    assert np.allclose(np.asarray(actual), np.asarray(expected), atol=1e-12)
+    assert np.all(np.isfinite(np.asarray(tangent)))
+    actual_grad = jax.grad(lambda s: jnp.sum(solve(s) ** 2))(shift)
+    expected_grad = jax.grad(lambda s: jnp.sum(reference(s) ** 2))(shift)
+    assert np.allclose(np.asarray(actual_grad), np.asarray(expected_grad), atol=1e-12)
+
+
+def test_checkpointed_generated_solve_bounds_compiled_factor_storage():
+    n_blocks, m, checkpoint_size = 64, 16, 8
+    eye = jnp.eye(m)
+    rhs = jax.ShapeDtypeStruct((n_blocks, m), jnp.float64)
+
+    def block_fn(index):
+        return -0.1 * eye, (3.0 + 0.001 * index) * eye, -0.1 * eye
+
+    def full(b):
+        return block_thomas_solve(block_thomas_factor_fn(block_fn, n_blocks), b)
+
+    def checkpointed(b):
+        return block_thomas_checkpointed_fn(block_fn, n_blocks, b, checkpoint_size)
+
+    full_bytes = jax.jit(full).lower(rhs).compile().memory_analysis().temp_size_in_bytes
+    checkpointed_bytes = (
+        jax.jit(checkpointed).lower(rhs).compile().memory_analysis().temp_size_in_bytes
+    )
+    assert checkpointed_bytes < 0.4 * full_bytes
+
+
+def test_checkpointed_generated_solve_validates_static_sizes():
+    block_fn = lambda _: (jnp.eye(2), jnp.eye(2), jnp.eye(2))  # noqa: E731
+    with pytest.raises(ValueError, match="n_blocks"):
+        block_thomas_checkpointed_fn(block_fn, 0, jnp.empty((0, 2)))
+    with pytest.raises(ValueError, match="checkpoint_size"):
+        block_thomas_checkpointed_fn(block_fn, 2, jnp.empty((2, 2)), 0)
+    with pytest.raises(ValueError, match="leading dimension"):
+        block_thomas_checkpointed_fn(block_fn, 2, jnp.empty((3, 2)))
 
 
 @pytest.mark.parametrize("n_rhs", [None, 3])

@@ -83,19 +83,6 @@ def chunk_map(
     return jax.lax.map(fun, xs, batch_size=int(chunk_size))
 
 
-def _device_memory_limit() -> int | None:
-    """Best-effort per-device memory limit in bytes, or ``None`` if unknown."""
-    try:
-        device = jax.local_devices()[0]
-        stats = device.memory_stats()
-    except Exception:  # pragma: no cover - platform dependent
-        return None
-    if not stats:
-        return None
-    limit = stats.get("bytes_limit")
-    return int(limit) if limit else None
-
-
 def auto_chunk_size(
     dim: int,
     output_size: int = 1,
@@ -108,26 +95,29 @@ def auto_chunk_size(
 
     Two regimes:
 
-    - **Memory budget** (``max_memory_bytes`` given, or a device limit is
-      queryable): return the largest ``chunk`` whose block of directional
+    - **Explicit memory budget** (``max_memory_bytes`` given): return the
+      largest ``chunk`` whose block of directional
       derivatives fits the budget,
 
           chunk = floor(memory_fraction * budget / (output_size *
           element_bytes)),
 
       clamped to ``[1, dim]`` — DESC's "largest that fits" semantics.
-    - **Heuristic** (no budget available): return the square-root-balanced
+    - **Automatic heuristic** (no explicit budget): return the
+      square-root-balanced
       width ``ceil(sqrt(dim))``, where the peak memory ``~ chunk`` and the
       chunk count ``~ dim / chunk`` are balanced, clamped to ``[1, dim]``.
+      This is deterministic across CPU/GPU because reported device capacity
+      does not bound the much larger intermediates of an arbitrary traced
+      function.
 
     Args:
         dim: number of basis vectors (input size for forward mode, output
             size for reverse mode).
         output_size: element count of one directional-derivative result (the
             other Jacobian dimension), used only in the budget regime.
-        max_memory_bytes: explicit byte budget; if ``None``, the first local
-            device's ``bytes_limit`` is used when available, else the
-            heuristic regime applies.
+        max_memory_bytes: explicit byte budget; ``None`` selects the
+            device-independent square-root heuristic.
         element_bytes: bytes per array element (8 for float64, 4 for float32).
         memory_fraction: fraction of the budget the Jacobian block may use.
 
@@ -137,11 +127,10 @@ def auto_chunk_size(
     dim = int(dim)
     if dim <= 1:
         return 1
-    budget = max_memory_bytes if max_memory_bytes is not None else _device_memory_limit()
-    if budget is None:
+    if max_memory_bytes is None:
         return max(1, min(dim, math.ceil(math.sqrt(dim))))
     per_vector = max(1, int(output_size) * int(element_bytes))
-    fit = int(memory_fraction * int(budget)) // per_vector
+    fit = int(memory_fraction * int(max_memory_bytes)) // per_vector
     return max(1, min(dim, fit))
 
 

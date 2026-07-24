@@ -39,6 +39,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from functools import partial
+from math import isqrt
 from typing import NamedTuple
 
 import jax
@@ -86,7 +87,7 @@ def block_thomas_factor(
             accuracy on fast low-precision hardware. Practically this is
             ``jnp.float32``: ``lu_factor`` dispatches to LAPACK/cuSOLVER
             ``getrf``, which has float32 and float64 kernels but no half
-            precision, so bfloat16/float16 raise ``NotImplementedError``.
+            precision, so bfloat16/float16 fail at tracing or execution.
 
     Returns:
         Factors for :func:`block_thomas_solve`.
@@ -159,6 +160,237 @@ def block_thomas_factor_fn(
         delta_piv=jnp.concatenate([pivs, last[1][None]], axis=0),
         lower=jnp.concatenate([lowers, l_last[None]], axis=0),
         upper=jnp.concatenate([uppers, u_last[None]], axis=0),
+    )
+
+
+def _block_thomas_checkpointed_impl(
+    block_fn: Callable[[jax.Array], tuple[jax.Array, jax.Array, jax.Array]],
+    n_blocks: int,
+    rhs: jax.Array,
+    checkpoint_size: int,
+    *,
+    transpose: bool,
+) -> jax.Array:
+    """Generated one-shot solve retaining one segment plus radial checkpoints."""
+    lower_last, diag_last, upper_last = block_fn(jnp.int32(n_blocks - 1))
+    last = lu_factor(diag_last)
+    sigma_last = rhs[-1]
+    n_segments = (n_blocks + checkpoint_size - 1) // checkpoint_size
+
+    def eliminate(carry, index):
+        delta_next, lower_next, sigma_next = carry
+        lower, diagonal, upper = block_fn(index)
+        solved_lower = lu_solve(delta_next, lower_next)
+        delta = lu_factor(diagonal - upper @ solved_lower)
+        down = jnp.swapaxes(lower_next, -1, -2) if transpose else upper
+        solved_sigma = lu_solve(delta_next, sigma_next, trans=1 if transpose else 0)
+        sigma = rhs[index] - down @ solved_sigma
+        return (delta, lower, sigma), upper
+
+    checkpoint_lu = jnp.zeros((n_segments,) + last[0].shape, last[0].dtype)
+    checkpoint_piv = jnp.zeros((n_segments,) + last[1].shape, last[1].dtype)
+    checkpoint_sigma = jnp.zeros((n_segments,) + sigma_last.shape, sigma_last.dtype)
+    checkpoint_lu = checkpoint_lu.at[-1].set(last[0])
+    checkpoint_piv = checkpoint_piv.at[-1].set(last[1])
+    checkpoint_sigma = checkpoint_sigma.at[-1].set(sigma_last)
+
+    def downward(step, carry):
+        delta, lower_next, sigma, lus, pivs, sigmas = carry
+        index = jnp.int32(n_blocks - 2 - step)
+        (delta, lower_next, sigma), _ = eliminate((delta, lower_next, sigma), index)
+
+        def save(checkpoints):
+            lu_values, piv_values, sigma_values = checkpoints
+            segment = index // checkpoint_size
+            return (
+                lu_values.at[segment].set(delta[0]),
+                piv_values.at[segment].set(delta[1]),
+                sigma_values.at[segment].set(sigma),
+            )
+
+        lus, pivs, sigmas = jax.lax.cond(
+            (index + 1) % checkpoint_size == 0,
+            save,
+            lambda values: values,
+            (lus, pivs, sigmas),
+        )
+        return delta, lower_next, sigma, lus, pivs, sigmas
+
+    *_, checkpoint_lu, checkpoint_piv, checkpoint_sigma = jax.lax.fori_loop(
+        0,
+        n_blocks - 1,
+        downward,
+        (
+            last,
+            lower_last,
+            sigma_last,
+            checkpoint_lu,
+            checkpoint_piv,
+            checkpoint_sigma,
+        ),
+    )
+
+    def solve_segment(segment, carry):
+        x_previous, upper_previous, solution = carry
+        start = segment * checkpoint_size
+        end = jnp.minimum(start + checkpoint_size - 1, n_blocks - 1)
+        length = end - start + 1
+        lower_end, _, upper_end = block_fn(end)
+        delta_end = (checkpoint_lu[segment], checkpoint_piv[segment])
+        sigma_end = checkpoint_sigma[segment]
+        lus = jnp.zeros((checkpoint_size,) + last[0].shape, last[0].dtype)
+        pivs = jnp.zeros((checkpoint_size,) + last[1].shape, last[1].dtype)
+        sigmas = jnp.zeros((checkpoint_size,) + sigma_last.shape, sigma_last.dtype)
+        lowers = jnp.zeros((checkpoint_size,) + lower_last.shape, lower_last.dtype)
+        uppers = jnp.zeros((checkpoint_size,) + upper_last.shape, upper_last.dtype)
+        final = length - 1
+        lus = lus.at[final].set(delta_end[0])
+        pivs = pivs.at[final].set(delta_end[1])
+        sigmas = sigmas.at[final].set(sigma_end)
+        lowers = lowers.at[final].set(lower_end)
+        uppers = uppers.at[final].set(upper_end)
+
+        def recompute(step, state):
+            delta, lower_next, sigma, lu_values, piv_values, sigma_values, lo, up = state
+
+            def active(values):
+                delta_next, lower_next, sigma_next, lu_values, piv_values, sigma_values, lo, up = (
+                    values
+                )
+                index = end - 1 - step
+                (delta, lower, sigma), upper = eliminate(
+                    (delta_next, lower_next, sigma_next), index
+                )
+                local = index - start
+                return (
+                    delta,
+                    lower,
+                    sigma,
+                    lu_values.at[local].set(delta[0]),
+                    piv_values.at[local].set(delta[1]),
+                    sigma_values.at[local].set(sigma),
+                    lo.at[local].set(lower),
+                    up.at[local].set(upper),
+                )
+
+            return jax.lax.cond(step < length - 1, active, lambda values: values, state)
+
+        _, _, _, lus, pivs, sigmas, lowers, uppers = jax.lax.fori_loop(
+            0,
+            checkpoint_size - 1,
+            recompute,
+            (delta_end, lower_end, sigma_end, lus, pivs, sigmas, lowers, uppers),
+        )
+
+        def substitute(local, state):
+            x_prev, upper_prev, values = state
+
+            def active(carry_up):
+                x_prev, upper_prev, values = carry_up
+                index = start + local
+                sigma = sigmas[local]
+                lower = lowers[local]
+                upper = uppers[local]
+                delta = (lus[local], pivs[local])
+                up = jnp.swapaxes(upper_prev, -1, -2) if transpose else lower
+                correction = jax.lax.cond(
+                    index == 0,
+                    lambda _: jnp.zeros_like(sigma),
+                    lambda _: up @ x_prev,
+                    operand=None,
+                )
+                x = lu_solve(delta, sigma - correction, trans=1 if transpose else 0)
+                return x, upper, values.at[index].set(x)
+
+            return jax.lax.cond(local < length, active, lambda value: value, state)
+
+        return jax.lax.fori_loop(
+            0,
+            checkpoint_size,
+            substitute,
+            (x_previous, upper_previous, solution),
+        )
+
+    return jax.lax.fori_loop(
+        0,
+        n_segments,
+        solve_segment,
+        (jnp.zeros_like(rhs[0]), jnp.zeros_like(upper_last), jnp.zeros_like(rhs)),
+    )[2]
+
+
+def block_thomas_checkpointed_fn(
+    block_fn: Callable[[jax.Array], tuple[jax.Array, jax.Array, jax.Array]],
+    n_blocks: int,
+    rhs: jax.Array,
+    checkpoint_size: int | None = None,
+    *,
+    transpose: bool = False,
+) -> jax.Array:
+    """Solve generated full block rows with exact radial checkpointing.
+
+    The downward elimination retains one Schur/RHS checkpoint per
+    ``checkpoint_size`` rows. Upward substitution recomputes and discards one
+    segment at a time. Peak dense-factor storage is therefore
+    ``O((n_blocks / checkpoint_size + checkpoint_size) * m**2)`` instead of
+    ``O(n_blocks * m**2)``; ``checkpoint_size ~= sqrt(n_blocks)`` minimizes
+    it. Every block row is generated twice and no band is materialized.
+
+    :func:`jax.lax.custom_linear_solve` supplies implicit JVP/VJP rules: the
+    reverse pass uses the same checkpointed algorithm on the transposed block
+    system instead of differentiating through and taping the elimination.
+
+    Args:
+        block_fn: traced row generator returning ``(lower, diagonal, upper)``.
+        n_blocks: static positive number of block rows.
+        rhs: ``(n_blocks, m)`` or ``(n_blocks, m, n_rhs)``.
+        checkpoint_size: static positive segment width. The default
+            ``ceil(sqrt(n_blocks))`` minimizes the factor-storage bound.
+        transpose: solve ``A.T x = rhs`` when true.
+
+    Returns:
+        Solution with the same shape as ``rhs``.
+    """
+    if n_blocks < 1:
+        raise ValueError("n_blocks must be positive")
+    checkpoint_size = isqrt(n_blocks - 1) + 1 if checkpoint_size is None else checkpoint_size
+    if checkpoint_size < 1:
+        raise ValueError("checkpoint_size must be positive")
+    checkpoint_size = min(checkpoint_size, n_blocks)
+    if int(rhs.shape[0]) != n_blocks:
+        raise ValueError("rhs leading dimension must equal n_blocks")
+
+    def matvec(x, *, transposed):
+        values = [jnp.zeros_like(x[0]) for _ in range(n_blocks)]
+        for index in range(n_blocks):
+            lower, diagonal, upper = block_fn(jnp.int32(index))
+            if transposed:
+                values[index] += jnp.swapaxes(diagonal, -1, -2) @ x[index]
+                if index > 0:
+                    values[index - 1] += jnp.swapaxes(lower, -1, -2) @ x[index]
+                if index < n_blocks - 1:
+                    values[index + 1] += jnp.swapaxes(upper, -1, -2) @ x[index]
+            else:
+                values[index] = diagonal @ x[index]
+                if index > 0:
+                    values[index] += lower @ x[index - 1]
+                if index < n_blocks - 1:
+                    values[index] += upper @ x[index + 1]
+        return jnp.stack(values)
+
+    def operator(x):
+        return matvec(x, transposed=transpose)
+
+    return jax.lax.custom_linear_solve(
+        operator,
+        rhs,
+        solve=lambda _, b: _block_thomas_checkpointed_impl(
+            block_fn, n_blocks, b, checkpoint_size, transpose=transpose
+        ),
+        transpose_solve=lambda _, b: _block_thomas_checkpointed_impl(
+            block_fn, n_blocks, b, checkpoint_size, transpose=not transpose
+        ),
+        symmetric=False,
     )
 
 
