@@ -57,6 +57,8 @@ References
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -69,6 +71,28 @@ except ImportError:  # pragma: no cover - very old jax
 
 #: Guard substituted for a vanishing pivot in both backends.
 _PIVOT_EPS = 1.0e-12
+
+
+class TridiagonalSolveDiagnostics(NamedTuple):
+    """Per-coefficient-column diagnostics from a checked tridiagonal solve.
+
+    ``minimum_relative_pivot`` and the boolean fields have shape
+    ``diag.shape[1:]``.  Extra right-hand-side axes are reduced when evaluating
+    ``relative_residual`` so a coefficient column has one conservative status.
+    """
+
+    minimum_relative_pivot: jax.Array
+    relative_residual: jax.Array
+    well_conditioned: jax.Array
+    residual_acceptable: jax.Array
+    fallback_used: jax.Array
+
+
+class TridiagonalSolveResult(NamedTuple):
+    """Solution and diagnostics returned by :func:`tridiagonal_solve_checked`."""
+
+    solution: jax.Array
+    diagnostics: TridiagonalSolveDiagnostics
 
 
 def tridiagonal_solve(
@@ -153,6 +177,113 @@ def tridiagonal_solve(
     if jax.default_backend() == "cpu":  # pragma: no cover - old-jax fallback
         return _thomas_solve(lower, diag, upper, rhs)
     return _lax_solve(lower, diag, upper, rhs)  # pragma: no cover
+
+
+def tridiagonal_solve_checked(
+    lower: jax.Array,
+    diag: jax.Array,
+    upper: jax.Array,
+    rhs: jax.Array,
+    *,
+    method: str = "auto",
+    pivot_rtol: float = 1.0e-8,
+    residual_rtol: float = 1.0e-8,
+    fallback: str = "identity",
+) -> TridiagonalSolveResult:
+    r"""Solve and guard a batched tridiagonal preconditioner.
+
+    The ordinary direct solve intentionally retains its historical behavior.
+    This opt-in interface additionally replays Thomas elimination on the
+    coefficient bands, evaluates the smallest modified pivot relative to the
+    corresponding original diagonal, and verifies a normwise backward
+    residual.  A failed coefficient column can then be replaced by the
+    identity action instead of injecting an arbitrarily amplified but finite
+    update into an outer nonlinear or Krylov iteration.
+
+    ``fallback="identity"`` is intended for preconditioners: unsafe columns
+    return their original right-hand side.  ``"nan"`` makes failure visible to
+    a caller's non-finite guard, while ``"none"`` reports diagnostics without
+    altering the direct solution.
+
+    Diagnostics are per coefficient column (``diag.shape[1:]``); any extra
+    right-hand-side axes are reduced conservatively.  The operation remains
+    compatible with ``jit``, ``vmap``, and differentiation away from the
+    discrete fallback boundary.
+    """
+    if pivot_rtol < 0.0:
+        raise ValueError("pivot_rtol must be non-negative")
+    if residual_rtol < 0.0:
+        raise ValueError("residual_rtol must be non-negative")
+    if fallback not in ("identity", "nan", "none"):
+        raise ValueError("fallback must be 'identity', 'nan', or 'none'")
+
+    lower, diag, upper, rhs = map(jnp.asarray, (lower, diag, upper, rhs))
+    if rhs.shape[0] == 0:
+        empty_columns = jnp.ones(diag.shape[1:], dtype=bool)
+        empty_values = jnp.full(diag.shape[1:], jnp.inf, dtype=jnp.float32)
+        diagnostics = TridiagonalSolveDiagnostics(
+            minimum_relative_pivot=empty_values,
+            relative_residual=jnp.zeros_like(empty_values),
+            well_conditioned=empty_columns,
+            residual_acceptable=empty_columns,
+            fallback_used=jnp.zeros_like(empty_columns),
+        )
+        return TridiagonalSolveResult(rhs, diagnostics)
+
+    solution = tridiagonal_solve(lower, diag, upper, rhs, method=method)
+    pivots = _thomas_pivots(lower, diag, upper)
+    abs_pivots = jnp.abs(pivots)
+    abs_diagonal = jnp.abs(diag)
+    pivot_threshold = jnp.asarray(pivot_rtol, dtype=abs_pivots.dtype) * abs_diagonal
+    pivot_ok = jnp.isfinite(abs_pivots) & (abs_pivots > pivot_threshold)
+    well_conditioned = jnp.all(pivot_ok, axis=0)
+
+    relative_pivots = jnp.where(
+        abs_diagonal > 0.0,
+        abs_pivots / abs_diagonal,
+        jnp.where(abs_pivots > 0.0, jnp.inf, 0.0),
+    )
+    minimum_relative_pivot = jnp.min(relative_pivots, axis=0)
+
+    residual = _tridiagonal_matvec(lower, diag, upper, solution) - rhs
+    extra_rhs_axes = tuple(range(diag.ndim, rhs.ndim))
+    reduce_axes = (0, *extra_rhs_axes)
+    residual_norm = jnp.max(jnp.abs(residual), axis=reduce_axes)
+    rhs_norm = jnp.max(jnp.abs(rhs), axis=reduce_axes)
+    solution_norm = jnp.max(jnp.abs(solution), axis=reduce_axes)
+    coefficient_scale = (
+        jnp.max(jnp.abs(diag), axis=0)
+        + jnp.max(jnp.abs(lower), axis=0)
+        + jnp.max(jnp.abs(upper), axis=0)
+    )
+    denominator = rhs_norm + coefficient_scale * solution_norm
+    relative_residual = jnp.where(
+        denominator > 0.0,
+        residual_norm / denominator,
+        residual_norm,
+    )
+    residual_acceptable = (
+        jnp.isfinite(relative_residual)
+        & (relative_residual <= jnp.asarray(residual_rtol, dtype=relative_residual.dtype))
+    )
+    safe = well_conditioned & residual_acceptable
+
+    if fallback != "none":
+        mask = safe.reshape((1, *safe.shape, *((1,) * (rhs.ndim - diag.ndim))))
+        if fallback == "identity":
+            replacement = rhs
+        else:
+            replacement = jnp.full_like(solution, jnp.nan)
+        solution = jnp.where(mask, solution, replacement)
+
+    diagnostics = TridiagonalSolveDiagnostics(
+        minimum_relative_pivot=minimum_relative_pivot,
+        relative_residual=relative_residual,
+        well_conditioned=well_conditioned,
+        residual_acceptable=residual_acceptable,
+        fallback_used=(~safe) if fallback != "none" else jnp.zeros_like(safe),
+    )
+    return TridiagonalSolveResult(solution, diagnostics)
 
 
 def cyclic_tridiagonal_solve(
@@ -312,6 +443,44 @@ def _thomas_solve(lower: jax.Array, diag: jax.Array, upper: jax.Array, rhs: jax.
     x_last = x[-1]
     _, x_body = lax.scan(backward, x_last, (upper_norm[:-1], x[:-1]), reverse=True)
     return jnp.concatenate([x_body, x_last[None, ...]], axis=0)
+
+
+def _thomas_pivots(lower: jax.Array, diag: jax.Array, upper: jax.Array) -> jax.Array:
+    """Return unregularized modified pivots from Thomas elimination."""
+    lower, diag, upper = map(jnp.asarray, (lower, diag, upper))
+    pivot0 = diag[0]
+    safe0 = jnp.where(pivot0 != 0.0, pivot0, jnp.ones_like(pivot0))
+    upper0 = upper[0] / safe0
+
+    def eliminate(previous_upper, values):
+        upper_j, diagonal_j, lower_j = values
+        pivot = diagonal_j - previous_upper * lower_j
+        safe_pivot = jnp.where(pivot != 0.0, pivot, jnp.ones_like(pivot))
+        normalized_upper = upper_j / safe_pivot
+        return normalized_upper, pivot
+
+    if int(diag.shape[0]) == 1:
+        return pivot0[None, ...]
+    _, remaining = lax.scan(
+        eliminate, upper0, (upper[1:], diag[1:], lower[1:])
+    )
+    return jnp.concatenate((pivot0[None, ...], remaining), axis=0)
+
+
+def _tridiagonal_matvec(
+    lower: jax.Array,
+    diag: jax.Array,
+    upper: jax.Array,
+    value: jax.Array,
+) -> jax.Array:
+    """Apply a leading-axis tridiagonal matrix to one or more right sides."""
+    extra = (1,) * (value.ndim - diag.ndim)
+    lower_e = lower.reshape(lower.shape + extra)
+    diagonal_e = diag.reshape(diag.shape + extra)
+    upper_e = upper.reshape(upper.shape + extra)
+    result = diagonal_e * value
+    result = result.at[1:].add(lower_e[1:] * value[:-1])
+    return result.at[:-1].add(upper_e[:-1] * value[1:])
 
 
 def _reusable_tridiagonal_solver(lower, diag, upper):

@@ -158,11 +158,32 @@ back. Combine orthogonal line solves with {func}`solvax.precond.line_smoother`.
 
 Thomas elimination is safe for standard strictly diagonally dominant and many
 SPD tridiagonal operators. A zero or tiny modified pivot $q_j$ causes numerical
-failure. There is no pivot count, so validate difficult coefficient regimes by
-checking the residual or using a pivoted banded/native solver.
+failure. The lightweight `tridiagonal_solve` retains its historical regularized
+direct-solve behavior. For line preconditioners or untrusted coefficient
+regimes, use the checked interface:
 
-The function returns only `x`; it does not return convergence diagnostics
-because it is a direct algorithm.
+```python
+result = sx.tridiagonal_solve_checked(
+    lower,
+    diag,
+    upper,
+    rhs,
+    pivot_rtol=1e-8,
+    residual_rtol=1e-8,
+    fallback="identity",
+)
+x = result.solution
+```
+
+It reports the minimum modified-pivot ratio and normwise backward residual for
+each coefficient column. With `fallback="identity"`, a rejected column applies
+no preconditioning instead of returning a potentially enormous finite update.
+`fallback="nan"` exposes the rejection to an outer non-finite guard, and
+`fallback="none"` returns the direct result together with diagnostics.
+
+The checked path deliberately adds one coefficient-only Thomas sweep and a
+matrix-vector residual. It is intended for robustness-sensitive preconditioners
+rather than throughput-only direct solves.
 
 ## Differentiation
 
@@ -179,6 +200,7 @@ gradient = jax.grad(loss)(diag)
 ## API summary
 
 - {func}`solvax.tridiagonal.tridiagonal_solve`
+- {func}`solvax.tridiagonal.tridiagonal_solve_checked`
 - {func}`solvax.tridiagonal.cyclic_tridiagonal_solve`
 
 Runnable counterparts: `examples/14_tridiagonal_solve.py` and

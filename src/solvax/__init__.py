@@ -75,9 +75,15 @@ from solvax.precond import (
 )
 from solvax.randomized import nystrom_preconditioner
 from solvax.refine import as_low_precision, iterative_refinement
-from solvax.tridiagonal import cyclic_tridiagonal_solve, tridiagonal_solve
+from solvax.tridiagonal import (
+    TridiagonalSolveDiagnostics,
+    TridiagonalSolveResult,
+    cyclic_tridiagonal_solve,
+    tridiagonal_solve,
+    tridiagonal_solve_checked,
+)
 
-__version__ = "0.8.7"
+__version__ = "0.8.8"
 
 __all__ = [
     "BandedLUFactors",
@@ -102,6 +108,9 @@ __all__ = [
     "build_fourier_helmholtz_operator",
     "solve_fourier_helmholtz",
     "tridiagonal_solve",
+    "tridiagonal_solve_checked",
+    "TridiagonalSolveDiagnostics",
+    "TridiagonalSolveResult",
     "cyclic_tridiagonal_solve",
     "FixedPointSolution",
     "affine_fixed_point_gmres",
