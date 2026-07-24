@@ -96,6 +96,35 @@ addition to the Schur factors.
 This split is useful for multiple forcing terms, repeated Newton corrections
 with a frozen Jacobian, and direct preconditioning.
 
+## Checkpoint one generated solve
+
+When the blocks are cheap to regenerate and the system is solved once, retain
+only radial checkpoints and one segment:
+
+```python
+x = sx.block_thomas_checkpointed_fn(block_fn, N, rhs)
+```
+
+The default segment width is $\lceil\sqrt{N}\rceil$. The downward sweep stores
+one Schur factor and transformed right-hand side per segment; substitution
+regenerates and discards one segment at a time. This changes dense-factor
+storage from $O(Nm^2)$ to $O(\sqrt{N}m^2)$ at the cost of generating every
+block twice. The solve is exact to floating-point round-off, accepts multiple
+right-hand sides and `transpose=True`, and uses the same checkpointed
+transpose solve for implicit JVPs and VJPs. Use reusable factors instead when
+the same matrix has several right-hand sides.
+
+Reproduce the full-factor comparison with:
+
+```bash
+PYTHONPATH=src python benchmarks/benchmark_checkpointed_block.py --x64
+```
+
+For the default float64 `N=128`, `m=64` case, compiled temporary storage was
+20.73 MB versus 1.99 MB on an Apple M4 CPU and 16.81 MB versus 2.95 MB on an
+RTX A4000 (90.4% and 82.4% lower). Warm execution was about twice as long
+because the saved factors are recomputed; the solutions agreed to round-off.
+
 ## Transposed solve and adjoints
 
 ```python

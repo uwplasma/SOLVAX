@@ -120,14 +120,15 @@ def test_bfloat16_factor_unsupported_by_lapack():
     """Documents a real backend limit: ``lu_factor`` (LAPACK/cuSOLVER getrf)
     has no bfloat16/float16 kernel, so float32 is the usable low precision.
 
-    A half-precision LU would need a non-LAPACK factorization; this pins the
-    NotImplementedError so the limitation is visible rather than silent.
+    Accelerators may report the error asynchronously, so force completion
+    inside the exception check.
     """
     lower, diag, upper, rhs = make_system(4, 6, seed=6)
-    with pytest.raises(NotImplementedError):
-        mixed_precision_block_thomas(
+    with pytest.raises((NotImplementedError, jax.errors.JaxRuntimeError)):
+        result = mixed_precision_block_thomas(
             lower, diag, upper, rhs, factor_dtype=jnp.bfloat16, refine_steps=1
         )
+        result.block_until_ready()
 
 
 def test_mixed_precision_vmap_matches_loop():

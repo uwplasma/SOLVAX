@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Added `block_thomas_checkpointed_fn`, an exact generated full-system solve
+  that recomputes each radial segment during substitution. Its default
+  square-root checkpoint spacing reduces factor storage from `O(N m^2)` to
+  `O(sqrt(N) m^2)` while preserving JIT, JVP, and VJP through an implicit
+  primal/transpose solve.
+- Made automatic Jacobian chunking square-root bounded on every device.
+  Device capacity alone no longer silently widens a batch; callers can still
+  request the existing largest-fitting policy with `max_memory_bytes`.
+
 ## 0.8.7 - 2026-07-19
 
 - Added the GPU measurement records (`benchmarks/results/gpu/`, 2x RTX A4000)
