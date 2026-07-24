@@ -11,7 +11,11 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from solvax import cyclic_tridiagonal_solve, tridiagonal_solve
+from solvax import (
+    cyclic_tridiagonal_solve,
+    tridiagonal_solve,
+    tridiagonal_solve_checked,
+)
 
 jax.config.update("jax_enable_x64", True)
 
@@ -189,6 +193,87 @@ def test_unknown_method_raises():
     lower, diag, upper, rhs = make_tridiag(5)
     with pytest.raises(ValueError, match="unknown method"):
         tridiagonal_solve(lower, diag, upper, rhs, method="bogus")
+
+
+def test_checked_solve_matches_direct_and_reports_stable_columns():
+    lower, diag, upper, rhs = make_tridiag(12, (3,), 2, seed=17)
+    result = jax.jit(
+        lambda b: tridiagonal_solve_checked(
+            lower, diag, upper, b, method="thomas"
+        )
+    )(rhs)
+    expected = tridiagonal_solve(lower, diag, upper, rhs, method="thomas")
+    assert result.solution == pytest.approx(expected, abs=1.0e-13)
+    assert np.all(np.asarray(result.diagnostics.well_conditioned))
+    assert np.all(np.asarray(result.diagnostics.residual_acceptable))
+    assert not np.any(np.asarray(result.diagnostics.fallback_used))
+    assert np.all(np.asarray(result.diagnostics.minimum_relative_pivot) > 0.8)
+    assert np.all(np.asarray(result.diagnostics.relative_residual) < 1.0e-15)
+
+
+def test_checked_solve_falls_back_only_for_singular_coefficient_column():
+    lower = jnp.asarray(
+        [[0.0, 0.0], [1.0, -0.2], [1.0, -0.2], [1.0, -0.2]]
+    )
+    diag = jnp.asarray(
+        [[1.0, 4.0], [1.0, 4.0], [2.0, 4.0], [2.0, 4.0]]
+    )
+    upper = jnp.asarray(
+        [[1.0, -0.2], [1.0, -0.2], [1.0, -0.2], [0.0, 0.0]]
+    )
+    rhs = jnp.arange(16.0).reshape(4, 2, 2) + 1.0
+    result = tridiagonal_solve_checked(
+        lower, diag, upper, rhs, method="thomas", fallback="identity"
+    )
+    assert np.array_equal(np.asarray(result.solution[:, 0]), np.asarray(rhs[:, 0]))
+    expected_safe = tridiagonal_solve(
+        lower[:, 1], diag[:, 1], upper[:, 1], rhs[:, 1], method="thomas"
+    )
+    assert result.solution[:, 1] == pytest.approx(expected_safe, abs=1.0e-13)
+    assert np.array_equal(
+        np.asarray(result.diagnostics.fallback_used), np.asarray([True, False])
+    )
+    assert result.diagnostics.minimum_relative_pivot[0] == 0.0
+
+
+def test_checked_solve_relative_pivot_threshold_and_nan_policy():
+    lower = jnp.asarray([0.0, 1.0, 0.2])
+    diag = jnp.asarray([1.0, 1.0 + 5.0e-9, 2.0])
+    upper = jnp.asarray([1.0, 0.2, 0.0])
+    rhs = jnp.ones((3,))
+    rejected = tridiagonal_solve_checked(
+        lower,
+        diag,
+        upper,
+        rhs,
+        method="thomas",
+        pivot_rtol=1.0e-8,
+        fallback="nan",
+    )
+    assert rejected.diagnostics.fallback_used
+    assert np.all(np.isnan(np.asarray(rejected.solution)))
+
+    accepted = tridiagonal_solve_checked(
+        lower,
+        diag,
+        upper,
+        rhs,
+        method="thomas",
+        pivot_rtol=1.0e-10,
+        fallback="identity",
+    )
+    assert not accepted.diagnostics.fallback_used
+    assert np.all(np.isfinite(np.asarray(accepted.solution)))
+
+
+def test_checked_solve_validates_policy_arguments():
+    lower, diag, upper, rhs = make_tridiag(5)
+    with pytest.raises(ValueError, match="pivot_rtol"):
+        tridiagonal_solve_checked(lower, diag, upper, rhs, pivot_rtol=-1.0)
+    with pytest.raises(ValueError, match="residual_rtol"):
+        tridiagonal_solve_checked(lower, diag, upper, rhs, residual_rtol=-1.0)
+    with pytest.raises(ValueError, match="fallback"):
+        tridiagonal_solve_checked(lower, diag, upper, rhs, fallback="bogus")
 
 
 def test_vmap_over_batch():
