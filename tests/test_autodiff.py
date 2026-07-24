@@ -175,28 +175,3 @@ def test_auto_string_resolves_in_builder():
     x = jnp.asarray(np.random.default_rng(8).standard_normal(9))
     got = chunked_jacfwd(vector_fun, chunk_size="auto")(x)
     assert np.allclose(np.asarray(got), np.asarray(jax.jacfwd(vector_fun)(x)), atol=1e-12)
-
-
-def test_device_memory_limit_reads_bytes_limit(monkeypatch):
-    from solvax import autodiff
-
-    class _FakeDevice:
-        def memory_stats(self):
-            return {"bytes_limit": 2_000_000_000}
-
-    monkeypatch.setattr(autodiff.jax, "local_devices", lambda: [_FakeDevice()])
-    assert autodiff._device_memory_limit() == 2_000_000_000
-    # ...and the device budget then drives auto_chunk_size (no explicit budget).
-    # dim large, per-vector = out(1) * 8 bytes -> chunk clamped to dim.
-    assert auto_chunk_size(64) == 64
-
-
-def test_device_memory_limit_absent_stats(monkeypatch):
-    from solvax import autodiff
-
-    class _NoStatsDevice:
-        def memory_stats(self):
-            return {}
-
-    monkeypatch.setattr(autodiff.jax, "local_devices", lambda: [_NoStatsDevice()])
-    assert autodiff._device_memory_limit() is None

@@ -57,11 +57,12 @@ chunk = sx.auto_chunk_size(
 )
 ```
 
-With an explicit or device-reported memory budget, the policy chooses the
-largest estimated chunk fitting the chosen fraction. Without a usable device
-budget, it uses $\lceil\sqrt q\rceil$, balancing chunk width and chunk count.
-This is a heuristic because JAX intermediate storage depends on the traced
-program, not only the final Jacobian.
+With an explicit memory budget, the policy chooses the largest estimated chunk
+fitting the chosen fraction. Without one, it uses $\lceil\sqrt q\rceil$,
+balancing chunk width and chunk count. The automatic default is intentionally
+device-independent: reported accelerator capacity cannot account for the
+larger intermediates of an arbitrary traced program. Pass a byte budget
+explicitly to opt into the wider policy.
 
 ## General chunked mapping
 

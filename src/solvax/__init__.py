@@ -25,6 +25,7 @@ from solvax.banded import (
 from solvax.direct import (
     BlockTridiagFactors,
     block_thomas,
+    block_thomas_checkpointed_fn,
     block_thomas_factor,
     block_thomas_factor_fn,
     block_thomas_solve,
@@ -91,6 +92,7 @@ __all__ = [
     "block_tridiag_matvec",
     "block_tridiag_relative_residual",
     "block_thomas",
+    "block_thomas_checkpointed_fn",
     "block_thomas_factor",
     "block_thomas_factor_fn",
     "block_thomas_solve",
