@@ -19,7 +19,17 @@ common kinetic-equation structure: when the right-hand side vanishes for
 k >= K and only the lowest K blocks of the solution are needed (e.g. velocity
 moments touching only the first few spectral modes), the upward substitution
 can stop at block K and the downward sweep needs no storage above it, so peak
-memory is O(K m^2), *independent of N*.
+memory is O(K m^2), *independent of N*. This is a **selected-head** solve, not
+a principal-submatrix approximation: every one of the N rows is still visited
+and eliminated into the running Schur complement, so the returned blocks are
+exact blocks of the full solution and the arithmetic remains O(N m^3). Only
+storage and the final substitution are restricted to the head.
+
+Differentiating that solve with respect to generated block parameters uses the
+exact-window adjoint: with W = min(K+w, N) retained rows, the source cotangent
+and every retained row cotangent are exact at any window, and the only
+approximation is the omission of rows j >= W (see
+``_block_thomas_selected_fn_state`` and ``_retained_row_cotangents``).
 
 Stability note: block LU without pivoting is guaranteed stable only for
 block-diagonally-dominant systems (Demmel, Higham & Schreiber, Numer. Linear
@@ -899,21 +909,36 @@ def block_thomas_truncated(
     )
 
 
-def _block_thomas_truncated_fn_state(
+def _block_thomas_selected_fn_state(
     block_fn: Callable[[jax.Array], tuple[jax.Array, jax.Array, jax.Array]],
     n_blocks: int,
     rhs_low: jax.Array,
-    keep_lowest: int,
+    source_blocks: int,
+    retain_blocks: int,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-    """Return a generated truncated solution and retained elimination state.
+    """Exact leading ``retain_blocks`` blocks of the *full* generated solve.
 
-    Identical semantics to :func:`block_thomas_truncated`, but the blocks are
-    produced per index by ``block_fn(k) -> (lower_k, diag_k, upper_k)`` inside
-    the sweeps, so the full ``(n_blocks, m, m)`` band arrays are never
-    materialized: peak memory is O(keep_lowest * m^2) plus a single block
-    triple. This is the right entry point when blocks are assembled from
-    compact physics coefficients (collision/streaming factors) and
-    ``n_blocks`` is large.
+    This is the selected-head primitive: the elimination visits and eliminates
+    **every** one of the ``n_blocks`` rows -- the tail sweep folds the whole
+    remainder into the running Schur complement -- so the returned blocks are
+    exact blocks of the full ``n_blocks``-row solution, not a leading-principal
+    (homogeneous-closure) approximation of them. Only storage and the final
+    upward substitution are restricted to the head.
+
+    The two lengths are deliberately independent:
+
+    * ``source_blocks`` is the support of the right-hand side (it must vanish
+      above it), and
+    * ``retain_blocks`` is how many exact solution blocks are returned.
+
+    Decoupling them is what lets a reverse rule request an extra *halo* block
+    beyond the physically returned head, which the exact-window parameter
+    adjoint needs to form the upper-block cotangent of its last retained row.
+
+    Blocks are produced per index by ``block_fn(k) -> (L_k, D_k, U_k)`` inside
+    the sweeps, so the ``(n_blocks, m, m)`` band arrays are never materialized:
+    dense workspace is ``O(retain_blocks * m^2)`` plus a single block triple,
+    independent of ``n_blocks``. No explicit inverse is formed.
 
     Args:
         block_fn: maps a (traced) int32 index ``k`` to the three ``(m, m)``
@@ -921,21 +946,33 @@ def _block_thomas_truncated_fn_state(
             ignored.
         n_blocks: static total number of blocks (>= 1).
         rhs_low: nonzero head of the right-hand side, shape
-            ``(keep_lowest, m)`` or ``(keep_lowest, m, n_rhs)``; the right-hand
-            side must vanish for ``k >= keep_lowest``.
-        keep_lowest: static number of solution blocks to compute
-            (1 <= keep_lowest <= n_blocks; equality recovers the full solve).
+            ``(source_blocks, m)`` or ``(source_blocks, m, n_rhs)``; the
+            right-hand side must vanish for ``k >= source_blocks``.
+        source_blocks: static support of the right-hand side.
+        retain_blocks: static number of exact solution blocks to return
+            (``source_blocks <= retain_blocks <= n_blocks``; equality with
+            ``n_blocks`` recovers the full solve).
 
     Returns:
-        The lowest ``keep_lowest`` solution blocks, same layout as ``rhs_low``.
+        The lowest ``retain_blocks`` exact solution blocks, plus the retained
+        head factors used by residual diagnostics.
     """
-    k = keep_lowest
     n = n_blocks
-    if not 1 <= k <= n:
-        raise ValueError("need 1 <= keep_lowest <= n_blocks")
-    if rhs_low.shape[0] != k:
-        raise ValueError("rhs_low must have keep_lowest leading blocks")
+    if not 1 <= source_blocks <= retain_blocks <= n:
+        raise ValueError("need 1 <= source_blocks <= retain_blocks <= n_blocks")
+    if rhs_low.shape[0] != source_blocks:
+        raise ValueError("rhs_low must have source_blocks leading blocks")
 
+    # Zero-pad the source up to the retained length: the extra rows carry no
+    # forcing, so padding changes nothing mathematically and lets the head
+    # sweep below run over the retained window uniformly.
+    if retain_blocks > source_blocks:
+        pad = jnp.zeros(
+            (retain_blocks - source_blocks,) + rhs_low.shape[1:], rhs_low.dtype
+        )
+        rhs_low = jnp.concatenate([rhs_low, pad], axis=0)
+
+    k = retain_blocks
     m = rhs_low.shape[1]
     dtype = rhs_low.dtype
 
@@ -992,6 +1029,103 @@ def _block_thomas_truncated_fn_state(
     return solution, lus, pivs, sigmas, ls
 
 
+def _block_thomas_truncated_fn_state(
+    block_fn: Callable[[jax.Array], tuple[jax.Array, jax.Array, jax.Array]],
+    n_blocks: int,
+    rhs_low: jax.Array,
+    keep_lowest: int,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Selected-head solve whose source support equals its retained length.
+
+    Thin compatibility wrapper over :func:`_block_thomas_selected_fn_state`
+    with ``source_blocks = retain_blocks = keep_lowest``; the behaviour of
+    :func:`block_thomas_truncated_fn` is unchanged.
+    """
+    return _block_thomas_selected_fn_state(
+        block_fn, n_blocks, rhs_low, keep_lowest, keep_lowest
+    )
+
+
+def _window_lengths(n_blocks: int, keep_lowest: int, adjoint_window: int):
+    """Retained row count ``W`` and primal window ``M`` of the exact-window rule.
+
+    ``W = min(K + w, N)`` rows contribute exactly to the parameter gradient.
+    Row ``W-1`` needs ``x_W`` to form its upper-block cotangent, so the primal
+    window carries one halo block: ``M = min(W + 1, N)``.
+    """
+    w_rows = min(keep_lowest + adjoint_window, n_blocks)
+    return w_rows, min(w_rows + 1, n_blocks)
+
+
+def _adjoint_t(a: jax.Array) -> jax.Array:
+    """Transpose used to build the adjoint chain, in JAX's cotangent convention.
+
+    The mathematical statement of the method transposes with a conjugate
+    (``A^*``) under a sesquilinear pairing. JAX, however, represents the
+    cotangent of a complex value so that reverse mode propagates through the
+    *plain* transpose: for a real objective the incoming output cotangent
+    already carries the conjugation, and re-conjugating here would apply it
+    twice. This is verified directly against ordinary reverse mode by the
+    complex tests rather than inferred from the real case -- with a conjugate
+    transpose the complex gradient is wrong at **every** window, including the
+    full window where it must be exact.
+    """
+    return jnp.swapaxes(a, -1, -2)
+
+
+def _generated_transpose_block_fn(block_fn, params, n_blocks: int):
+    """Row ``j`` of ``A^H`` for a generated chain: ``(U_{j-1}^H, D_j^H, L_{j+1}^H)``.
+
+    The out-of-domain slots (``L_0`` of the transpose at ``j = 0`` and its
+    ``U_{N-1}`` at ``j = N-1``) are never read by the elimination, so clamping
+    the neighbour index is safe and costs no branch.
+    """
+
+    def transposed_block_fn(j):
+        _, _, u_prev = block_fn(params, jnp.maximum(j - 1, 0))
+        _, d_j, _ = block_fn(params, j)
+        l_next, _, _ = block_fn(params, jnp.minimum(j + 1, n_blocks - 1))
+        return _adjoint_t(u_prev), _adjoint_t(d_j), _adjoint_t(l_next)
+
+    return transposed_block_fn
+
+
+def _retained_row_cotangents(lam_win: jax.Array, x_win: jax.Array):
+    """Exact block cotangents of the retained rows ``j < W``.
+
+    With exact adjoint blocks ``lam_win`` (length ``W``) and exact primal
+    blocks ``x_win`` (length ``M = min(W+1, N)``), the implicit rule
+    ``bar A = -lambda x^T`` (JAX cotangent convention; see :func:`_adjoint_t`)
+    restricted to row ``j`` gives
+
+        bar L_j = -lam_j x_{j-1}^T,
+        bar D_j = -lam_j x_j^T,
+        bar U_j = -lam_j x_{j+1}^T,
+
+    with ``x_{-1} = 0`` and, when ``W = N``, ``x_N = 0``. Trailing
+    right-hand-side axes are contracted. Because both windows hold exact blocks
+    of the full solutions, every returned row cotangent is exact -- no decay
+    assumption is used here.
+    """
+    w_rows = lam_win.shape[0]
+    lam2 = lam_win.reshape(w_rows, lam_win.shape[1], -1)
+    x2 = x_win.reshape(x_win.shape[0], x_win.shape[1], -1)
+    zero = jnp.zeros((1,) + lam2.shape[1:], x2.dtype)
+
+    x_at = x2[:w_rows]
+    x_below = jnp.concatenate([zero, x2[: w_rows - 1]], axis=0) if w_rows > 1 else zero
+    above = x2[1 : w_rows + 1]
+    if above.shape[0] < w_rows:  # W == N: no halo, x_N = 0
+        above = jnp.concatenate([above, zero], axis=0)
+
+    def outer(a, b):
+        # Plain (not conjugated) outer product: see _adjoint_t for why JAX's
+        # cotangent convention must not re-conjugate here.
+        return -jnp.einsum("jmr,jnr->jmn", a, b)
+
+    return outer(lam2, x_below), outer(lam2, x_at), outer(lam2, above)
+
+
 @partial(jax.custom_vjp, nondiff_argnums=(0, 1, 3, 4))
 def _truncated_fn_bounded(
     block_fn,
@@ -1008,41 +1142,85 @@ def _truncated_fn_bounded(
 
 
 def _truncated_fn_fwd(block_fn, n_blocks, params, keep_lowest, adjoint_window, rhs_low):
-    solution, _, _, _, _ = _block_thomas_truncated_fn_state(
-        lambda j: block_fn(params, j), n_blocks, rhs_low, keep_lowest
+    # Exact-window forward rule: run the full-tail selected-head elimination
+    # once, retaining the exact primal window x_0..x_{M-1} (physical head plus
+    # the one-block halo the reverse rule needs). Only x_0..x_{K-1} is returned.
+    _, primal_window = _window_lengths(n_blocks, keep_lowest, adjoint_window)
+    x_window, _, _, _, _ = _block_thomas_selected_fn_state(
+        lambda j: block_fn(params, j),
+        n_blocks,
+        rhs_low,
+        keep_lowest,
+        primal_window,
     )
-    return solution, (params, rhs_low)
+    return x_window[:keep_lowest], (params, rhs_low, x_window)
 
 
 def _truncated_fn_bwd(block_fn, n_blocks, keep_lowest, adjoint_window, residuals, ct):
-    params, rhs_low = residuals
+    """Exact-window reverse rule.
+
+    Both the right-hand-side cotangent and every retained row cotangent are
+    *exact* at any window: the adjoint is obtained from a full-tail
+    selected-head solve of the conjugate-transposed generated chain, so its
+    retained blocks are exact blocks of the full adjoint, and they are paired
+    with the exact primal window saved by the forward rule. The only
+    approximation is the omission of the operator rows ``j >= W``; nothing
+    inside the window is approximated (contrast the leading-principal closure
+    kept for ablation in :func:`_leading_principal_params_bar`).
+    """
+    params, rhs_low, x_window = residuals
     n, k = n_blocks, keep_lowest
+    retained_rows, _ = _window_lengths(n, k, adjoint_window)
 
-    # rhs-adjoint (exact): a generated truncated solve of A^T. Row j of A^T has
-    # bands (U_{j-1}^T, D_j^T, L_{j+1}^T); each transposed row costs three
-    # block assemblies, and the sweep keeps the generated path's flat memory.
-    def transposed_block_fn(j):
-        _, _, u_prev = block_fn(params, jnp.maximum(j - 1, 0))
-        _, d_j, _ = block_fn(params, j)
-        l_next, _, _ = block_fn(params, jnp.minimum(j + 1, n - 1))
-        t = lambda a: jnp.swapaxes(a, -1, -2)  # noqa: E731
-        return t(u_prev), t(d_j), t(l_next)
-
-    rhs_bar, _, _, _, _ = _block_thomas_truncated_fn_state(
-        transposed_block_fn, n, ct, k
+    # Exact adjoint window: full-tail selected-head solve of A^H with the
+    # output cotangent as its (K-supported) source, retaining W exact blocks.
+    transposed_block_fn = _generated_transpose_block_fn(block_fn, params, n)
+    lam_window, _, _, _, _ = _block_thomas_selected_fn_state(
+        transposed_block_fn, n, ct, k, retained_rows
     )
 
-    # params-adjoint (windowed): materialize only the leading K+w blocks,
-    # solve the windowed primal and adjoint there, form the band cotangents,
-    # and pull each one back through block_fn's own VJP at its index. Peak
-    # memory O((K+w) m^2) plus the params cotangent, independent of n_blocks.
-    w = min(k + adjoint_window, n)
-    indices = jnp.arange(w, dtype=jnp.int32)
+    # Exact source cotangent: bar b = P_K lambda, independent of the window.
+    rhs_bar = lam_window[:k]
+
+    # Exact retained-row cotangents, pulled back through the generator's own
+    # VJP at each index. Live state is O((W+1) m^2) plus the params cotangent,
+    # independent of n_blocks.
+    lower_bar, diag_bar, upper_bar = _retained_row_cotangents(lam_window, x_window)
+
+    def accumulate(carry, inputs):
+        j, l_bar, d_bar, u_bar = inputs
+        _, pullback = jax.vjp(lambda p: block_fn(p, j), params)
+        (contribution,) = pullback((l_bar, d_bar, u_bar))
+        return jax.tree.map(jnp.add, carry, contribution), None
+
+    zero = jax.tree.map(jnp.zeros_like, params)
+    indices = jnp.arange(retained_rows, dtype=jnp.int32)
+    params_bar, _ = jax.lax.scan(
+        accumulate, zero, (indices, lower_bar, diag_bar, upper_bar)
+    )
+    return params_bar, rhs_bar
+
+
+def _leading_principal_params_bar(
+    block_fn, n_blocks: int, params, keep_lowest: int, adjoint_window: int, rhs_low, ct
+):
+    """Superseded leading-principal closure, retained only for ablation.
+
+    Reconstructs the retained primal and adjoint states from the leading
+    ``W x W`` principal submatrix instead of the full chain. Its retained
+    blocks are therefore *not* blocks of the full solution, so its gradient
+    error contains an interface-induced term inside the window in addition to
+    the omitted tail. This is not the production path; it exists so the paper
+    can quantify what the exact-window construction removes.
+    """
+    n, k = n_blocks, keep_lowest
+    w_rows = min(k + adjoint_window, n)
+    indices = jnp.arange(w_rows, dtype=jnp.int32)
     lower_w, diag_w, upper_w = jax.lax.map(lambda j: block_fn(params, j), indices)
 
-    x_win, _ = _windowed_leading_solve(lower_w, diag_w, upper_w, rhs_low, k, w - k)
+    x_win, _ = _windowed_leading_solve(lower_w, diag_w, upper_w, rhs_low, k, w_rows - k)
     lower_t, diag_t, upper_t = _transpose_bands(lower_w, diag_w, upper_w)
-    lam_win, _ = _windowed_leading_solve(lower_t, diag_t, upper_t, ct, k, w - k)
+    lam_win, _ = _windowed_leading_solve(lower_t, diag_t, upper_t, ct, k, w_rows - k)
     lower_bar, diag_bar, upper_bar = _band_gradients(lam_win, x_win)
 
     def accumulate(carry, inputs):
@@ -1055,7 +1233,7 @@ def _truncated_fn_bwd(block_fn, n_blocks, keep_lowest, adjoint_window, residuals
     params_bar, _ = jax.lax.scan(
         accumulate, zero, (indices, lower_bar, diag_bar, upper_bar)
     )
-    return params_bar, rhs_bar
+    return params_bar
 
 
 _truncated_fn_bounded.defvjp(_truncated_fn_fwd, _truncated_fn_bwd)

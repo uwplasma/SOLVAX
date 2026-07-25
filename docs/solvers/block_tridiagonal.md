@@ -198,28 +198,52 @@ x_low = sx.block_thomas_truncated(
 )
 ```
 
-Two facts make this exact where it can be and controlled where it cannot:
+The rule is built as an *exact-window* adjoint, so most of it is exact and the
+single approximation is explicit. Writing $W=\min(K+w,N)$ for the retained rows
+and $M=\min(W+1,N)$ for the primal window:
 
-- **Right-hand-side gradient (exact).** The transpose of a block-tridiagonal
-  operator is block-tridiagonal with the off-diagonals swapped and transposed,
-  so the cotangent map $\bar b = P_K A^{-\top} E_K\,\bar x$ is *itself* a
-  truncated solve of $A^\top$. It runs at $O(Km^2)$ and carries no truncation
-  error, independent of `adjoint_window`.
-- **Band gradient (windowed).** The full primal and adjoint spread over all
-  blocks but decay geometrically away from the retained head for block
-  diagonally dominant systems {cite}`demko1984,benzi2013`. Reconstructing the
-  band gradients from a leading $(K+w)$-block re-solve — the leading principal
-  submatrix with a homogeneous closure — has error $O(\rho^{2w})$ at the head,
-  where $\rho\in(0,1)$ is the per-block block-inverse decay rate: the dropped
-  interface coupling is itself $O(\rho^{w})$ small and propagates back to the
-  head with a further $O(\rho^{w})$. Peak reverse-mode memory is $O((K+w)m^2)$;
-  setting `adjoint_window >= n_blocks` reproduces the exact gradient.
+- **The selected forward blocks are exact.** The elimination visits and
+  eliminates *every* one of the $N$ rows — the tail sweep folds the whole
+  remainder into the running Schur complement — so the returned blocks are
+  blocks of the full $N$-row solution, not of a leading principal submatrix.
+  Only storage and the upward substitution stop at the head. The method is
+  memory-localized, **not** work-localized: arithmetic remains $O(Nm^3)$.
+- **Both sweeps visit all rows.** The reverse pass solves the transposed
+  generated chain with the same full-tail strategy, retaining exact adjoint
+  blocks $\lambda_0,\dots,\lambda_{W-1}$.
+- **Right-hand-side gradient (exact, at every window).** $\bar b = P_K\lambda$
+  is exact and does not move with `adjoint_window`, including $w=0$. Only
+  invertibility is used: no decay, dominance, or normality assumption.
+- **Retained-row cotangents (exact).** For every $j<W$ the block cotangents
+  $\bar L_j=-\lambda_j x_{j-1}^\top$, $\bar D_j=-\lambda_j x_j^\top$,
+  $\bar U_j=-\lambda_j x_{j+1}^\top$ pair exact primal and exact adjoint
+  blocks, so each retained row contributes exactly. Row $W-1$ needs $x_W$,
+  which is why the primal window carries one halo block.
+- **The only approximation is the omitted tail.** The gradient error is exactly
+  $\sum_{j\ge W}$ of the omitted row contributions. Consequently
+  `adjoint_window >= n_blocks` gives the exact gradient, and a parameter whose
+  generator derivative vanishes above $W$ is differentiated exactly at *any*
+  window.
+- **Tail size.** Under uniform inverse localization
+  $\lVert (A^{-1})_{ji}\rVert\le C_A\rho^{|j-i|}$ {cite}`demko1984,benzi2013`,
+  the primal decays away from the source and the adjoint away from the output,
+  and the row density is bilinear in the two, giving the doubled exponent: the
+  error is $O(\rho^{2w})$ for bounded generator sensitivity and
+  $O((K+w)^{s}\rho^{2w})$ when the row sensitivity grows like $(1+j)^{s}$ — the
+  relevant case for kinetic operators whose collisional derivative scales with
+  mode number. A spectral gap alone is **not** sufficient for a nonnormal
+  operator.
 
-The result: forward *and* reverse run at memory independent of the block count,
-so `jax.grad` through a truncated kinetic solve stays flat as $N$ grows while
-the naive tape grows linearly. This is the differentiable counterpart of the
-truncated forward solve and the tool for adjoint-based source/transport
-inversion on tall block systems.
+Peak dense reverse workspace is $O((K+w)m^2)$ plus the primal halo and the
+parameter storage. Total memory is independent of $N$ only when the blocks are
+generated from compact parameters; a coefficient array of length $N$ is far
+smaller than dense bands but still scales with $N$, and is reported separately.
+
+The result: forward *and* reverse run at retained state independent of the
+block count, so `jax.grad` through a selected-head kinetic solve stays flat as
+$N$ grows while the naive tape grows linearly. No second-order guarantee is
+implied — at finite $W$ the windowed gradient need not be the gradient of any
+scalar surrogate, so differentiating it again does not yield a valid Hessian.
 
 With array bands, the bands themselves still occupy $O(Nm^2)$; when blocks are
 assembled from a low-dimensional parameterization, the generated path removes
