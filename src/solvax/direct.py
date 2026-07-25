@@ -19,7 +19,17 @@ common kinetic-equation structure: when the right-hand side vanishes for
 k >= K and only the lowest K blocks of the solution are needed (e.g. velocity
 moments touching only the first few spectral modes), the upward substitution
 can stop at block K and the downward sweep needs no storage above it, so peak
-memory is O(K m^2), *independent of N*.
+memory is O(K m^2), *independent of N*. This is a **selected-head** solve, not
+a principal-submatrix approximation: every one of the N rows is still visited
+and eliminated into the running Schur complement, so the returned blocks are
+exact blocks of the full solution and the arithmetic remains O(N m^3). Only
+storage and the final substitution are restricted to the head.
+
+Differentiating that solve with respect to generated block parameters uses the
+exact-window adjoint: with W = min(K+w, N) retained rows, the source cotangent
+and every retained row cotangent are exact at any window, and the only
+approximation is the omission of rows j >= W (see
+``_block_thomas_selected_fn_state`` and ``_retained_row_cotangents``).
 
 Stability note: block LU without pivoting is guaranteed stable only for
 block-diagonally-dominant systems (Demmel, Higham & Schreiber, Numer. Linear
