@@ -366,6 +366,71 @@ def test_gradient_is_jit_compatible_and_stable_under_pytree_params():
     )
 
 
+def test_selected_head_rejects_inconsistent_lengths():
+    """The primitive's contract: ``1 <= source <= retain <= n_blocks``."""
+    block_fn, _ = _chain(5, seed=17)
+    params = jnp.asarray([0.1, 0.05])
+    rhs = jnp.zeros((2, M_BLOCK))
+    gen = lambda j: block_fn(params, j)  # noqa: E731
+
+    with pytest.raises(ValueError, match="source_blocks"):
+        _block_thomas_selected_fn_state(gen, 5, rhs, 3, 2)  # source > retain
+    with pytest.raises(ValueError, match="source_blocks"):
+        _block_thomas_selected_fn_state(gen, 5, rhs, 2, 6)  # retain > n_blocks
+    with pytest.raises(ValueError, match="leading blocks"):
+        _block_thomas_selected_fn_state(gen, 5, rhs, 3, 3)  # rhs rows != source
+
+
+def test_exact_window_beats_the_leading_principal_ablation():
+    """The claim that motivates the replacement.
+
+    The superseded closure rebuilds the retained states from the leading
+    principal submatrix, so its error carries an interface term *inside* the
+    window in addition to the omitted tail. The exact-window rule omits only
+    the tail, so it is at least as accurate at every window and strictly better
+    at intermediate windows; both agree at the full window, where the leading
+    principal submatrix *is* the whole chain.
+    """
+    from solvax.direct import _leading_principal_params_bar
+
+    n_blocks, keep = 12, 2
+    block_fn, dense = _chain(n_blocks, seed=18)
+    params = jnp.asarray([0.11, 0.07])
+    rng = np.random.default_rng(19)
+    rhs = jnp.asarray(rng.standard_normal((keep, M_BLOCK)))
+    ref_p, _ = _reference_grads(block_fn, dense, n_blocks, keep, params, rhs)
+
+    y = block_thomas_truncated_fn(
+        block_fn, n_blocks, rhs, keep, params=params, adjoint_window=n_blocks
+    )
+    ct = 2.0 * y
+
+    improved = 0
+    for w in (1, 2, 3, 4):
+        exact_window = jax.grad(
+            lambda p, w=w: _sq(
+                block_thomas_truncated_fn(
+                    block_fn, n_blocks, rhs, keep, params=p, adjoint_window=w
+                )
+            )
+        )(params)
+        closure = _leading_principal_params_bar(
+            block_fn, n_blocks, params, keep, w, rhs, ct
+        )
+        err_new = float(jnp.linalg.norm(exact_window - ref_p))
+        err_old = float(jnp.linalg.norm(closure - ref_p))
+        assert err_new <= err_old * 1.001, f"w={w}: {err_new:.3e} > {err_old:.3e}"
+        if err_new < err_old * 0.5:
+            improved += 1
+    assert improved >= 2, "expected a clear gain at intermediate windows"
+
+    # both are exact once the window covers the chain
+    closure_full = _leading_principal_params_bar(
+        block_fn, n_blocks, params, keep, n_blocks, rhs, ct
+    )
+    np.testing.assert_allclose(np.asarray(closure_full), np.asarray(ref_p), atol=1e-10)
+
+
 def test_reverse_memory_is_flat_in_chain_length():
     """Fixed ``(K, w, m)`` and compact parameters: adjoint workspace flat in ``N``.
 
