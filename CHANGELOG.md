@@ -2,6 +2,44 @@
 
 ## Unreleased
 
+- Added `solvax.transfer`: separable restriction and prolongation operators for
+  structured grids, built as one small matrix per coarsened axis and applied as
+  per-axis contractions, so an N-D transfer never materializes an N-D operator
+  and unmasked axes are not contracted at all. Full-weighting and injection
+  restriction, linear and injection prolongation, and periodic, dirichlet and
+  reflective closures; the default pair satisfies `R = 2^-d P^T` exactly over
+  the `d` coarsened axes. `coarsening_plan` schedules a semicoarsening
+  hierarchy, stopping each axis as its parity or minimum size runs out.
+
+- Added `solvax.smoothers`: relaxation sweeps in the multigrid
+  `smooth(matvec, x, b)` protocol — damped point and block Jacobi, batched
+  tridiagonal line relaxation (periodic or not), exact banded plane relaxation
+  over two axes, upwind-ordered sweeps whose ordering follows a caller-supplied
+  advection field, and their multiplicative composition. `smoothing_factor`
+  measures Brandt's high-frequency error-reduction rate by power iteration on
+  the Fourier-projected error propagation operator. Measured against local
+  Fourier analysis in the test suite: damped Jacobi at `2/3`, line relaxation
+  on an anisotropic operator at `weak / (strong + weak)`, and an upwind sweep
+  beating every wind-agnostic ordering by a factor that grows with the mesh
+  Peclet number (over 200x at Pe = 100).
+
+- Extended the multigrid cycle. `multigrid` takes an explicit level list and
+  adds V-, W- and F-cycles, a general per-level cycle index, independent pre-
+  and post-smoothing counts, and a configurable damped-Jacobi weight;
+  `p_multigrid` keeps its signature and defaults and forwards the new options.
+  `semicoarsening_hierarchy` assembles the levels for a structured grid from
+  the transfers plus a caller-supplied *rediscretization* of the operator on
+  each coarse grid, rather than a Galerkin triple product. Measured
+  h-independence on an advection-dominated anisotropic operator: 0.0064 to
+  0.0072 residual reduction per cycle from 32x16 to 256x16, with
+  multigrid-preconditioned GMRES converging in 2 iterations at every size
+  while unpreconditioned GMRES does not converge at all.
+
+- `gmres` now iterates arrays of any rank in their own layout instead of
+  requiring a flat vector, so a multidimensional state never has to be raveled
+  and unraveled around each operator application. Flat `(n,)` arrays keep the
+  existing matrix path.
+
 - Added `block_thomas_checkpointed_fn`, an exact generated full-system solve
   that recomputes each radial segment during substitution. Its default
   square-root checkpoint spacing reduces factor storage from `O(N m^2)` to

@@ -550,11 +550,17 @@ def gmres(
     state has fixed shapes (the Krylov basis is zero-padded to the cycle
     size and early convergence exits via ``lax.while_loop``).
 
+    The iteration is structure-preserving: scalars, arrays of any rank, and
+    arbitrary pytrees are all iterated in their own layout, so a
+    multidimensional state — species, speed, pitch, and two angles, say —
+    never has to be raveled and unraveled around each operator application.
+    Flat ``(n,)`` arrays take a dedicated matrix path.
+
     Args:
         matvec: the operator ``v -> A v`` on an array or pytree; must be pure
-            JAX (traceable) and preserve the input tree structure.
-        b: array or pytree right-hand side. Pytree leaves must have one common
-            inexact dtype.
+            JAX (traceable) and preserve the input structure.
+        b: right-hand side: a scalar, an array of any rank, or a pytree.
+            Pytree leaves must have one common inexact dtype.
         x0: initial guess (defaults to zeros).
         precond: right preconditioner ``v -> M^{-1} v`` (defaults to the
             identity). May be flexible, i.e. nonlinear or changing between
@@ -572,7 +578,7 @@ def gmres(
         A :class:`KrylovSolution` with ``recycle=None``.
     """
     if (inner_product is not None or jax.tree.structure(b) != jax.tree.structure(0)
-            or jnp.ndim(b) == 0):
+            or jnp.ndim(b) != 1):
         b = jax.tree.map(jnp.asarray, b)
         structure = jax.tree.structure(b)
         leaves = jax.tree.leaves(b)

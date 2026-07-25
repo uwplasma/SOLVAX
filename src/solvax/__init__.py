@@ -62,6 +62,8 @@ from solvax.operators import (
 )
 from solvax.pcg import PCGDiagnostics, PCGSolution, pcg, pcg_linear_solve, status_name
 from solvax.precond import (
+    MultigridHierarchy,
+    MultigridLevel,
     additive_preconditioner,
     additive_tridiagonal_line_preconditioner,
     block_jacobi,
@@ -71,11 +73,34 @@ from solvax.precond import (
     kronecker_nkp,
     line_smoother,
     mixed_precision,
+    multigrid,
     nearest_kronecker,
     p_multigrid,
+    semicoarsening_hierarchy,
 )
 from solvax.randomized import nystrom_preconditioner
 from solvax.refine import as_low_precision, iterative_refinement
+from solvax.smoothers import (
+    alternating_smoother,
+    block_jacobi_smoother,
+    high_frequency_mask,
+    jacobi_smoother,
+    plane_smoother,
+    relaxation,
+    smoothing_factor,
+    tridiagonal_smoother,
+    upwind_smoother,
+)
+from solvax.transfer import (
+    CoarseningPlan,
+    coarse_axis_size,
+    coarse_grid_shape,
+    coarsenable,
+    coarsening_plan,
+    grid_transfer,
+    prolongation_matrix,
+    restriction_matrix,
+)
 from solvax.tridiagonal import (
     TridiagonalSolveDiagnostics,
     TridiagonalSolveResult,
@@ -145,7 +170,28 @@ __all__ = [
     "coarse_operator",
     "galerkin_deflation",
     "line_smoother",
+    "multigrid",
     "p_multigrid",
+    "MultigridLevel",
+    "MultigridHierarchy",
+    "semicoarsening_hierarchy",
+    "CoarseningPlan",
+    "coarse_axis_size",
+    "coarse_grid_shape",
+    "coarsenable",
+    "coarsening_plan",
+    "grid_transfer",
+    "restriction_matrix",
+    "prolongation_matrix",
+    "relaxation",
+    "jacobi_smoother",
+    "block_jacobi_smoother",
+    "tridiagonal_smoother",
+    "upwind_smoother",
+    "plane_smoother",
+    "alternating_smoother",
+    "high_frequency_mask",
+    "smoothing_factor",
     "mixed_precision",
     "kronecker_nkp",
     "nearest_kronecker",

@@ -6,6 +6,22 @@
    :member-order: bysource
 ```
 
+## Grid transfers
+
+```{eval-rst}
+.. automodule:: solvax.transfer
+   :members:
+   :member-order: bysource
+```
+
+## Smoothers
+
+```{eval-rst}
+.. automodule:: solvax.smoothers
+   :members:
+   :member-order: bysource
+```
+
 ## Randomized
 
 ```{eval-rst}
