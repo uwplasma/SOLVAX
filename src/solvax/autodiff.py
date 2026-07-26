@@ -8,7 +8,7 @@ The dense Jacobian of ``f : R^n -> R^m`` is assembled column by column
 program state that many times at once, so peak memory grows with the full
 Jacobian width. **Chunking** trades that peak for a modest slowdown: the basis
 is split into blocks of ``chunk_size``, each block is vmapped, and the blocks
-are walked with :func:`jax.lax.map`, so peak memory scales with
+are walked with :func:`jax.lax.scan`, so peak memory scales with
 
     memory ~ m0 + m1 * chunk_size,     time ~ t0 + t1 * (n / chunk_size),
 
@@ -34,7 +34,7 @@ References
 - D. Panici et al., *The DESC stellarator optimization code*, and the DESC
   ``jac_chunk_size`` memory option, https://github.com/PlasmaControl/DESC.
 - JAX documentation for :func:`jax.jacfwd`, :func:`jax.jacrev`,
-  :func:`jax.lax.map` (the ``batch_size`` chunking argument).
+  and :func:`jax.lax.scan`.
 """
 
 from __future__ import annotations
@@ -44,6 +44,9 @@ from collections.abc import Callable
 
 import jax
 import jax.numpy as jnp
+from adv_jax_math import batch_jacfwd as _batch_jacfwd
+from adv_jax_math import batch_jacrev as _batch_jacrev
+from adv_jax_math import batch_vmap as _batch_vmap
 
 __all__ = [
     "chunk_map",
@@ -60,15 +63,14 @@ def chunk_map(
     """Map ``fun`` over the leading axis of ``xs`` in fixed-size chunks.
 
     A thin wrapper choosing between a single wide :func:`jax.vmap` and a
-    chunked :func:`jax.lax.map`:
+    chunked :func:`jax.lax.scan`:
 
     - ``chunk_size is None``: one ``jax.vmap`` over all ``len(xs)`` slices
       (maximum parallelism, maximum memory).
-    - ``chunk_size = k``: ``jax.lax.map(fun, xs, batch_size=k)`` — the leading
-      axis is processed ``k`` slices at a time (vmapped within a chunk,
-      scanned across chunks), so peak memory scales with ``k`` instead of
-      ``len(xs)``. The final chunk is padded internally by ``lax.map`` and the
-      padding discarded.
+    - ``chunk_size = k``: the leading axis is processed ``k`` slices at a time
+      (vmapped within a chunk, scanned across chunks), so peak memory scales
+      with ``k`` instead of ``len(xs)``. A short final chunk is handled
+      separately.
 
     Args:
         fun: callable applied to a single leading-axis slice of ``xs``.
@@ -78,9 +80,7 @@ def chunk_map(
     Returns:
         The stacked results, leading axis equal to ``len(xs)``.
     """
-    if chunk_size is None:
-        return jax.vmap(fun)(xs)
-    return jax.lax.map(fun, xs, batch_size=int(chunk_size))
+    return _batch_vmap(fun, chunk_size=chunk_size)(xs)
 
 
 def auto_chunk_size(
@@ -178,28 +178,15 @@ def chunked_jacfwd(
         A callable ``jac(*args) -> Jacobian`` of shape
         ``output_shape + input_shape``.
     """
-
     def jacfun(*args):
         x = jnp.asarray(args[argnums])
-        in_shape = x.shape
-        n = x.size
 
         def single(a):
             return fun(*_sub(args, argnums, a))
 
-        basis = jnp.eye(n, dtype=x.dtype).reshape((n,) + in_shape)
-
-        def column(tangent):
-            _, jvp = jax.jvp(single, (x,), (tangent,))
-            return jvp
-
         out_size = int(jax.eval_shape(single, x).size)
-        chunk = _resolve_chunk(chunk_size, n, out_size)
-        cols = chunk_map(column, basis, chunk_size=chunk)
-        # cols: (n, *out_shape) -> (*out_shape, *in_shape) to match jacfwd.
-        return jax.tree.map(
-            lambda c: jnp.moveaxis(c, 0, -1).reshape(c.shape[1:] + in_shape), cols
-        )
+        chunk = _resolve_chunk(chunk_size, x.size, out_size)
+        return _batch_jacfwd(fun, argnums, chunk_size=chunk)(*args)
 
     return jacfun
 
@@ -227,26 +214,11 @@ def chunked_jacrev(
         A callable ``jac(*args) -> Jacobian`` of shape
         ``output_shape + input_shape``.
     """
-
     def jacfun(*args):
         x = jnp.asarray(args[argnums])
-        in_shape = x.shape
-
-        def single(a):
-            return fun(*_sub(args, argnums, a))
-
-        y, vjp = jax.vjp(single, x)
-        out_shape = y.shape
-        m = y.size
-        basis = jnp.eye(m, dtype=y.dtype).reshape((m,) + out_shape)
-
-        def row(cotangent):
-            return vjp(cotangent)[0]
-
-        chunk = _resolve_chunk(chunk_size, m, x.size)
-        rows = chunk_map(row, basis, chunk_size=chunk)
-        # rows: (m, *in_shape) -> (*out_shape, *in_shape) to match jacrev.
-        return rows.reshape(out_shape + in_shape)
+        output = jax.eval_shape(lambda a: fun(*_sub(args, argnums, a)), x)
+        chunk = _resolve_chunk(chunk_size, output.size, x.size)
+        return _batch_jacrev(fun, argnums, chunk_size=chunk)(*args)
 
     return jacfun
 

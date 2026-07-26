@@ -33,7 +33,7 @@ $$
 ## Chunking model
 
 Let $q$ be the number of basis directions and $c$ the chunk size. SOLVAX uses
-`vmap` inside each width-$c$ block and `jax.lax.map` across blocks. A useful
+`vmap` inside each width-$c$ block and `jax.lax.scan` across blocks. A useful
 cost model is
 
 $$
@@ -71,9 +71,9 @@ ys = sx.chunk_map(expensive_function, xs, chunk_size=16)
 ```
 
 `xs` may be an array or a pytree with a common leading axis. `None` performs a
-single `vmap`; an integer uses batched `lax.map`, including internal handling
-of a short final chunk. This helper is useful for parameter scans and batched
-local physics even when no Jacobian is formed.
+single `vmap`; an integer uses batched `lax.scan`, including handling of a
+short final chunk. This helper is useful for parameter scans and batched local
+physics even when no Jacobian is formed.
 
 ## Numerical equivalence
 

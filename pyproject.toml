@@ -10,7 +10,7 @@ license = { text = "MIT" }
 authors = [{ name = "UW Plasma", email = "rogerio.jorge@wisc.edu" }]
 requires-python = ">=3.10"
 dynamic = ["version"]
-dependencies = ["jax", "equinox"]
+dependencies = ["adv-jax-math>=1.1", "equinox", "jax"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Science/Research",
