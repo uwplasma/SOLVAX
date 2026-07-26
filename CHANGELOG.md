@@ -2,6 +2,46 @@
 
 ## Unreleased
 
+## 0.9.0 - 2026-07-25
+
+### Exact-window localized adjoint (breaking behaviour change)
+
+- The generated-block parameter VJP behind `block_thomas_truncated_fn(...,
+  params=, adjoint_window=)` is now an **exact-window** construction. The
+  previous release reconstructed the retained primal and adjoint states from
+  the leading principal submatrix; those states are not blocks of the full
+  solution, so the gradient carried an interface-induced error *inside* the
+  retained window in addition to the omitted tail. **The API is unchanged, so
+  code written against 0.8.x silently gets the stronger guarantee.**
+- What is now exact at every window: the selected forward blocks, the source
+  cotangent `bar b = P_K lambda` (including `w = 0`), every retained row
+  cotangent `j < W`, any parameter whose generator derivative vanishes above
+  `W`, and the full-window gradient. The only approximation is the omission of
+  operator rows `j >= W`.
+- Measured against the superseded closure, the advantage grows with the window
+  (2x at `w = 0`, 24x at `w = 4`) because the closure's interface error decays
+  more slowly than the true tail. The old path is retained privately as
+  `_leading_principal_params_bar` for ablation only.
+- `_block_thomas_selected_fn_state` decouples the source support from the
+  retained length so the reverse rule can request its one-block halo. Both
+  sweeps still visit all `N` rows: the method is memory-localized, not
+  work-localized.
+- Complex systems: the convention is established by explicit tests against
+  ordinary reverse mode rather than inferred from the real case.
+
+### Graded localization and a-priori window selection
+
+- `localization_profile_fn` returns the exact per-row factors
+  `rho_k = ||Delta_k^{-1} L_k||` from the Schur recursion the forward solve
+  already sweeps, so the diagnostic costs only the norm estimates.
+- `suggest_adjoint_window` turns the profile into a window: retained rows must
+  reach past the row where `rho_k` first falls below one. If the chain never
+  localizes within its length the full window is returned.
+- A single uniform rate is the wrong model for chains whose coupling and
+  diagonal scale differently with the row index; fitting one to the leading
+  rows reports the non-localized head and underestimates the window's value.
+
+
 - Added `solvax.transfer`: separable restriction and prolongation operators for
   structured grids, built as one small matrix per coarsened axis and applied as
   per-axis contractions, so an N-D transfer never materializes an N-D operator
