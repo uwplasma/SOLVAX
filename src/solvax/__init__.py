@@ -34,7 +34,9 @@ from solvax.direct import (
     block_thomas_truncated_fn_with_residual,
     block_tridiag_matvec,
     block_tridiag_relative_residual,
+    localization_profile_fn,
     mixed_precision_block_thomas,
+    suggest_adjoint_window,
 )
 from solvax.elliptic import (
     FourierHelmholtzOperator,
@@ -135,6 +137,8 @@ __all__ = [
     "block_thomas_solve",
     "block_thomas_truncated",
     "block_thomas_truncated_fn",
+    "localization_profile_fn",
+    "suggest_adjoint_window",
     "block_thomas_truncated_fn_with_residual",
     "mixed_precision_block_thomas",
     "FourierHelmholtzOperator",

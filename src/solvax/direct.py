@@ -54,6 +54,7 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.scipy.linalg import lu_factor, lu_solve
 
 from solvax.refine import iterative_refinement
@@ -1339,3 +1340,104 @@ def block_thomas_truncated_fn_with_residual(
         lus, pivs, residual_solution, residual_rhs
     )
     return solution, jnp.linalg.norm(residual) / jnp.sqrt(residual.size)
+
+
+def localization_profile_fn(
+    block_fn: Callable[[jax.Array], tuple[jax.Array, jax.Array, jax.Array]],
+    n_blocks: int,
+) -> jax.Array:
+    """Per-row localization factors ``rho_k = ||Delta_k^{-1} L_k||_2`` of a chain.
+
+    These are the *exact* per-step factors of the block inverse, not an
+    asymptotic envelope. Writing the downward Schur recursion that the
+    selected-head solve already runs,
+
+        Delta_{N-1} = D_{N-1},
+        Delta_k     = D_k - U_k Delta_{k+1}^{-1} L_{k+1},
+
+    the block inverse factorizes as an ordered product of the local ratios
+    ``-Delta_k^{-1} L_k`` (Meurant, SIAM J. Matrix Anal. Appl. 13, 707 (1992),
+    block form), so ``rho_k`` measures how much the influence of a source
+    shrinks when it is propagated across row ``k``.
+
+    This matters because a single uniform decay rate is the wrong model for
+    operators whose coupling and diagonal scale differently with the row index
+    -- for a Legendre-mode kinetic chain the collisional diagonal grows like
+    ``nu * k^2`` while the streaming coupling stays ``O(1)``, so the chain is
+    *not* localized at low ``k`` and becomes strongly localized above a
+    crossover. Fitting one ``rho`` to such a chain reports the non-localized
+    head and badly underestimates how well a window will work.
+
+    The profile is cheap: it reuses the forward sweep's own factors, so no
+    extra factorization is needed beyond the norm estimates.
+
+    Args:
+        block_fn: maps a traced int32 index ``k`` to ``(L_k, D_k, U_k)``.
+        n_blocks: static number of block rows (>= 2).
+
+    Returns:
+        ``rho`` of shape ``(n_blocks,)``. Entry ``k`` is
+        ``||Delta_k^{-1} L_k||_2`` for ``k >= 1``; entry ``0`` is set to
+        ``inf`` because row 0 has no sub-diagonal block to propagate.
+
+    See also:
+        :func:`suggest_adjoint_window`, which turns this profile into a window.
+    """
+    if n_blocks < 2:
+        raise ValueError("need n_blocks >= 2")
+
+    _, d_last, _ = block_fn(jnp.int32(n_blocks - 1))
+
+    def scan_step(delta, k):
+        lower, _, _ = block_fn(k + 1)
+        solved = jnp.linalg.solve(delta, lower)
+        rho_next = jnp.linalg.norm(solved, ord=2)
+        _, diag_k, upper_k = block_fn(k)
+        return diag_k - upper_k @ solved, rho_next
+
+    _, rhos = jax.lax.scan(
+        scan_step, d_last, jnp.arange(n_blocks - 2, -1, -1, dtype=jnp.int32)
+    )
+    # scan ran k = N-2 .. 0 and produced rho_{k+1}; restore ascending order and
+    # pad the missing row-0 entry.
+    rho_ascending = rhos[::-1]
+    return jnp.concatenate([jnp.array([jnp.inf], dtype=rho_ascending.dtype), rho_ascending])
+
+
+def suggest_adjoint_window(
+    block_fn: Callable[[jax.Array], tuple[jax.Array, jax.Array, jax.Array]],
+    n_blocks: int,
+    keep_lowest: int,
+    *,
+    threshold: float = 1.0,
+    margin: int = 2,
+) -> int:
+    """Smallest ``adjoint_window`` whose retained rows reach the localized region.
+
+    The windowed parameter gradient can only converge once the retained rows
+    extend past the row where the chain starts to localize, i.e. where
+    ``rho_k = ||Delta_k^{-1} L_k||`` first falls below ``threshold``. Below that
+    row the omitted tail contributions are not small and no window helps; above
+    it the row contributions fall off quickly, so a few further rows buy many
+    digits.
+
+    Args:
+        block_fn: row generator, as in :func:`localization_profile_fn`.
+        n_blocks: static number of block rows.
+        keep_lowest: source/output support ``K``.
+        threshold: localization criterion on ``rho_k`` (default 1).
+        margin: extra rows kept beyond the crossing.
+
+    Returns:
+        A window ``w`` such that ``K + w`` covers the crossing plus ``margin``,
+        clipped to ``n_blocks - keep_lowest``. If the chain never localizes
+        within ``n_blocks``, the full window is returned -- the honest answer,
+        since a shorter one would silently return a wrong gradient.
+    """
+    rho = np.asarray(localization_profile_fn(block_fn, n_blocks))
+    localized = np.flatnonzero(np.isfinite(rho) & (rho < threshold))
+    full = n_blocks - keep_lowest
+    if localized.size == 0:
+        return full
+    crossing = int(localized[0])
+    return int(min(max(crossing + margin - keep_lowest, 0), full))
