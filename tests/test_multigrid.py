@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 from solvax import (
+    dense_coarse_solve,
     gmres,
     jacobi_smoother,
     multigrid,
@@ -49,14 +50,6 @@ def advection_diffusion(shape, *, diffusion, velocity=None, reaction=0.0):
     return matvec, tuple((lowers[a], diagonal, uppers[a]) for a in range(ndim))
 
 
-def exact_inverse(matvec, shape):
-    """Dense inverse of a small coarsest-level operator."""
-    size = int(np.prod(shape))
-    columns = jax.vmap(matvec)(jnp.eye(size).reshape(size, *shape))
-    inverse = jnp.linalg.inv(columns.reshape(size, size).T)
-    return lambda b: (inverse @ b.reshape(-1)).reshape(shape)
-
-
 def build_cycle(shape, *, diffusion, speed=0.0, reaction=1.0, smoother="line", **options):
     """Semicoarsened hierarchy over axis 0 with a rediscretized coarse operator."""
     ny = shape[1]
@@ -81,7 +74,7 @@ def build_cycle(shape, *, diffusion, speed=0.0, reaction=1.0, smoother="line", *
     )
     coarse_matvec, _ = level(hierarchy.shapes[-1])
     cycle = multigrid(
-        hierarchy.levels, exact_inverse(coarse_matvec, hierarchy.shapes[-1]), **options
+        hierarchy.levels, dense_coarse_solve(coarse_matvec, hierarchy.shapes[-1]), **options
     )
     assert all(grid[1] == ny for grid in hierarchy.shapes)  # semicoarsening
     return hierarchy.levels[0].matvec, cycle, hierarchy

@@ -14,6 +14,7 @@ from solvax import (
     block_thomas_factor,
     block_thomas_solve,
     coarse_operator,
+    dense_coarse_solve,
     galerkin_deflation,
     gmres,
     jacobi,
@@ -749,3 +750,81 @@ def test_builder_validation():
         )
     with pytest.raises(ValueError, match="shape"):
         nearest_kronecker(jnp.eye(5), 2, 3)
+
+
+# ---------------------------------------------------------------------------
+# dense_coarse_solve
+# ---------------------------------------------------------------------------
+
+
+def _block_diagonal_operator(shape, seed=0):
+    """A dense operator acting independently on each leading (batch) index."""
+    blocks = int(np.prod(shape[:1]))
+    size = int(np.prod(shape[1:]))
+    rng = np.random.default_rng(seed)
+    matrices = jnp.asarray(
+        rng.standard_normal((blocks, size, size)) + size * np.eye(size)[None]
+    )
+
+    def matvec(v):
+        flat = jnp.reshape(v, (blocks, size))
+        return jnp.reshape(jnp.einsum("bij,bj->bi", matrices, flat), shape)
+
+    return matvec, matrices
+
+
+def test_dense_coarse_solve_inverts_a_matrix_free_operator_exactly():
+    """Probing plus dense LU reproduces the exact inverse to machine precision."""
+    shape = (5, 4, 3)
+    matvec, _ = _block_diagonal_operator(shape, seed=1)
+    solve = dense_coarse_solve(matvec, shape, batch_dims=1)
+    b = jnp.asarray(np.random.default_rng(7).standard_normal(shape))
+
+    x = solve(b)
+    np.testing.assert_allclose(matvec(x), b, rtol=1e-11, atol=1e-11)
+    assert x.shape == shape
+
+
+def test_dense_coarse_solve_batching_matches_the_unbatched_factorization():
+    """batch_dims only changes the cost, not the answer, for a block-diagonal A."""
+    shape = (3, 4, 2)
+    matvec, _ = _block_diagonal_operator(shape, seed=2)
+    b = jnp.asarray(np.random.default_rng(3).standard_normal(shape))
+    np.testing.assert_allclose(
+        dense_coarse_solve(matvec, shape, batch_dims=1)(b),
+        dense_coarse_solve(matvec, shape)(b),
+        rtol=1e-10,
+        atol=1e-12,
+    )
+
+
+def test_dense_coarse_solve_is_jit_and_gradient_transparent():
+    """The factors are closed over, so the solve traces and differentiates."""
+    shape = (2, 3, 3)
+    matvec, _ = _block_diagonal_operator(shape, seed=4)
+    solve = dense_coarse_solve(matvec, shape, batch_dims=1)
+    b = jnp.asarray(np.random.default_rng(5).standard_normal(shape))
+    np.testing.assert_allclose(jax.jit(solve)(b), solve(b), rtol=1e-12)
+
+    objective = lambda scale: jnp.sum(solve(scale * b) ** 2)  # noqa: E731
+    value, gradient = jax.value_and_grad(objective)(1.0)
+    assert float(gradient) == pytest.approx(2.0 * float(value), rel=1e-10)
+
+
+def test_dense_coarse_solve_as_a_preconditioner_solves_in_one_iteration():
+    """An exact inverse clusters the spectrum at 1, so GMRES stops immediately."""
+    shape = (2, 6)
+    matvec, _ = _block_diagonal_operator(shape, seed=6)
+    b = jnp.asarray(np.random.default_rng(8).standard_normal(shape))
+    iterations, solution = gmres_iters(
+        matvec, b, precond=dense_coarse_solve(matvec, shape, batch_dims=1)
+    )
+    assert iterations <= 2
+    np.testing.assert_allclose(matvec(solution.x), b, rtol=1e-9, atol=1e-11)
+
+
+def test_dense_coarse_solve_rejects_a_batch_covering_every_axis():
+    with pytest.raises(ValueError, match="at least one grid axis"):
+        dense_coarse_solve(lambda v: v, (4, 4), batch_dims=2)
+    with pytest.raises(ValueError, match="at least one grid axis"):
+        dense_coarse_solve(lambda v: v, (4, 4), batch_dims=-1)

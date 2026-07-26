@@ -33,7 +33,9 @@ The catalogue, roughly in order of increasing structure exploited:
   and p-/spectral hierarchies alike. :func:`semicoarsening_hierarchy`
   assembles the levels for a structured grid from
   :mod:`solvax.transfer` plus a caller-supplied *rediscretization* of the
-  operator on each coarse grid.
+  operator on each coarse grid, and :func:`dense_coarse_solve` supplies
+  the exact coarsest-level solve the recursion bottoms out on, probed
+  straight out of the same matrix-free operator.
 - :func:`galerkin_deflation` — balance a symmetric smoother around an
   adjoint-transfer Galerkin coarse correction, preserving the symmetry
   required by conjugate-gradient methods.
@@ -688,6 +690,78 @@ def semicoarsening_hierarchy(
         matvec, smoother = rediscretize(fine_shape)
         built.append(MultigridLevel(matvec, smoother, restrict, prolong))
     return MultigridHierarchy(tuple(built), plan.shapes)
+
+
+def dense_coarse_solve(
+    matvec: MatVec,
+    shape: Sequence[int],
+    *,
+    batch_dims: int = 0,
+) -> MatVec:
+    """Exact solve of a small matrix-free operator, by probing and dense LU.
+
+    A multigrid recursion has to bottom out on an *exact* solve of the
+    coarsest level, or the cycle inherits that level's condition number
+    (Trottenberg et al., section 2.4; Brandt 1977). Coarsest levels are
+    tiny by construction, so the cheapest exact solve is usually the
+    dumbest one: materialize the operator by applying it to every unit
+    vector, factor once with a dense LU, and reuse the factors. This
+    builder does that for the same matrix-free ``matvec`` the fine levels
+    use, so the coarsest operator needs no separate assembled form.
+
+    ``batch_dims`` exploits the structure semicoarsening usually leaves
+    behind. When the leading ``batch_dims`` axes are never coarsened *and*
+    the operator does not couple across them — a per-species, per-energy or
+    per-wavenumber block diagonal — one probe of a grid-local unit vector,
+    broadcast over the batch axes, returns the matching column of *every*
+    block at once. Both the probing cost and the factorization then drop
+    from the full size to the block size: ``O(n_b n^3)`` instead of
+    ``O((n_b n)^3)``. Pass ``batch_dims=0`` when the operator does couple
+    the leading axes; the result is then the exact dense inverse of the
+    whole level.
+
+    Args:
+        matvec: the coarsest-level operator ``v -> A v``, on arrays of
+            shape ``shape``.
+        shape: iterate shape, ``(*batch, *grid)``.
+        batch_dims: number of leading axes over which ``A`` is block
+            diagonal. The caller asserts that structure; it is not checked,
+            and a coupled operator would be silently replaced by its block
+            diagonal.
+
+    Returns:
+        A callable ``solve(b) -> A^{-1} b`` preserving ``shape``.
+
+    Raises:
+        ValueError: if ``batch_dims`` does not leave at least one grid axis.
+    """
+    shape = tuple(int(n) for n in shape)
+    batch_dims = int(batch_dims)
+    if not 0 <= batch_dims < len(shape):
+        raise ValueError(
+            f"batch_dims must leave at least one grid axis of {shape}, got {batch_dims}"
+        )
+    grid = shape[batch_dims:]
+    size = math.prod(grid)
+    blocks = math.prod(shape[:batch_dims])
+
+    # The output dtype settles whether the probe basis must be complex;
+    # eval_shape answers that by tracing, without running the operator.
+    spec = jax.ShapeDtypeStruct(shape, jnp.result_type(float))
+    basis = jnp.eye(size, dtype=jax.eval_shape(matvec, spec).dtype).reshape((size, *grid))
+
+    def column(unit: jax.Array) -> jax.Array:
+        return matvec(jnp.broadcast_to(unit, shape)).reshape(blocks, size)
+
+    # (size, blocks, size) indexed [column, block, row] -> (blocks, row, column)
+    matrix = jnp.transpose(jax.vmap(column)(basis), (1, 2, 0))
+    factors = jax.vmap(lu_factor)(matrix)
+
+    def solve(b: jax.Array) -> jax.Array:
+        flat = jnp.reshape(b, (blocks, size))
+        return jnp.reshape(jax.vmap(lu_solve)(factors, flat), shape)
+
+    return solve
 
 
 def galerkin_deflation(
