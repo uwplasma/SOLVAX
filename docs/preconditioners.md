@@ -213,8 +213,22 @@ def rediscretize(shape):
 hierarchy = sx.semicoarsening_hierarchy(
     (128, 16), coarsen=(True, False), rediscretize=rediscretize, levels=4
 )
-precond = sx.multigrid(hierarchy.levels, exact_solve_on(hierarchy.shapes[-1]))
+coarsest, _ = build_operator(hierarchy.shapes[-1])
+precond = sx.multigrid(
+    hierarchy.levels,
+    sx.dense_coarse_solve(coarsest, hierarchy.shapes[-1]),
+)
 ```
+
+The recursion has to bottom out on an *exact* solve, or the cycle inherits the
+coarsest level's condition number {cite}`trottenberg2001`. `dense_coarse_solve`
+supplies one without asking for an assembled matrix: it probes the same
+matrix-free operator with unit vectors, factors the result once with a dense
+LU, and closes over the factors. Coarsest grids are tiny by construction, so
+the cubic cost is irrelevant — and when semicoarsening has left leading axes
+the operator does not couple (per species, per energy, per wavenumber),
+`batch_dims=k` probes and factors one small block per index instead of the
+whole level.
 
 ## Smoothers
 
