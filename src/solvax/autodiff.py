@@ -58,7 +58,11 @@ __all__ = [
 
 
 def chunk_map(
-    fun: Callable, xs: jax.Array, *, chunk_size: int | None = None
+    fun: Callable,
+    xs: jax.Array,
+    *,
+    chunk_size: int | None = None,
+    **kwargs,
 ) -> jax.Array:
     """Map ``fun`` over the leading axis of ``xs`` in fixed-size chunks.
 
@@ -80,7 +84,7 @@ def chunk_map(
     Returns:
         The stacked results, leading axis equal to ``len(xs)``.
     """
-    return _batch_vmap(fun, chunk_size=chunk_size)(xs)
+    return _batch_vmap(fun, chunk_size=chunk_size, **kwargs)(xs)
 
 
 def auto_chunk_size(
@@ -156,7 +160,11 @@ def _resolve_chunk(chunk_size, dim: int, output_size: int) -> int | None:
 
 
 def chunked_jacfwd(
-    fun: Callable, argnums: int = 0, *, chunk_size: int | str | None = "auto"
+    fun: Callable,
+    argnums: int = 0,
+    *,
+    chunk_size: int | str | None = "auto",
+    **kwargs,
 ) -> Callable:
     """Forward-mode Jacobian assembled in column chunks.
 
@@ -178,21 +186,30 @@ def chunked_jacfwd(
         A callable ``jac(*args) -> Jacobian`` of shape
         ``output_shape + input_shape``.
     """
-    def jacfun(*args):
+    def jacfun(*args, **fun_kwargs):
         x = jnp.asarray(args[argnums])
 
         def single(a):
-            return fun(*_sub(args, argnums, a))
+            return fun(*_sub(args, argnums, a), **fun_kwargs)
 
-        out_size = int(jax.eval_shape(single, x).size)
+        output = jax.eval_shape(single, x)
+        if kwargs.get("has_aux", False):
+            output = output[0]
+        out_size = int(output.size)
         chunk = _resolve_chunk(chunk_size, x.size, out_size)
-        return _batch_jacfwd(fun, argnums, chunk_size=chunk)(*args)
+        return _batch_jacfwd(fun, argnums, chunk_size=chunk, **kwargs)(
+            *args, **fun_kwargs
+        )
 
     return jacfun
 
 
 def chunked_jacrev(
-    fun: Callable, argnums: int = 0, *, chunk_size: int | str | None = "auto"
+    fun: Callable,
+    argnums: int = 0,
+    *,
+    chunk_size: int | str | None = "auto",
+    **kwargs,
 ) -> Callable:
     """Reverse-mode Jacobian assembled in row chunks.
 
@@ -214,11 +231,17 @@ def chunked_jacrev(
         A callable ``jac(*args) -> Jacobian`` of shape
         ``output_shape + input_shape``.
     """
-    def jacfun(*args):
+    def jacfun(*args, **fun_kwargs):
         x = jnp.asarray(args[argnums])
-        output = jax.eval_shape(lambda a: fun(*_sub(args, argnums, a)), x)
+        output = jax.eval_shape(
+            lambda a: fun(*_sub(args, argnums, a), **fun_kwargs), x
+        )
+        if kwargs.get("has_aux", False):
+            output = output[0]
         chunk = _resolve_chunk(chunk_size, output.size, x.size)
-        return _batch_jacrev(fun, argnums, chunk_size=chunk)(*args)
+        return _batch_jacrev(fun, argnums, chunk_size=chunk, **kwargs)(
+            *args, **fun_kwargs
+        )
 
     return jacfun
 
@@ -229,6 +252,7 @@ def chunked_jacobian(
     *,
     mode: str = "rev",
     chunk_size: int | str | None = "auto",
+    **kwargs,
 ) -> Callable:
     """Memory-chunked Jacobian with forward/reverse/auto mode selection.
 
@@ -247,16 +271,22 @@ def chunked_jacobian(
         ``output_shape + input_shape``.
     """
     if mode == "fwd":
-        return chunked_jacfwd(fun, argnums, chunk_size=chunk_size)
+        return chunked_jacfwd(fun, argnums, chunk_size=chunk_size, **kwargs)
     if mode == "rev":
-        return chunked_jacrev(fun, argnums, chunk_size=chunk_size)
+        return chunked_jacrev(fun, argnums, chunk_size=chunk_size, **kwargs)
     if mode != "auto":
         raise ValueError(f"mode must be 'fwd', 'rev' or 'auto', got {mode!r}")
 
-    def jacfun(*args):
+    def jacfun(*args, **fun_kwargs):
         x = jnp.asarray(args[argnums])
-        out = jax.eval_shape(lambda a: fun(*_sub(args, argnums, a)), x)
+        out = jax.eval_shape(
+            lambda a: fun(*_sub(args, argnums, a), **fun_kwargs), x
+        )
+        if kwargs.get("has_aux", False):
+            out = out[0]
         builder = chunked_jacfwd if x.size <= out.size else chunked_jacrev
-        return builder(fun, argnums, chunk_size=chunk_size)(*args)
+        return builder(fun, argnums, chunk_size=chunk_size, **kwargs)(
+            *args, **fun_kwargs
+        )
 
     return jacfun
