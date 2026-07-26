@@ -238,6 +238,176 @@ def test_gcrot_recycling_saves_iterations():
     assert err <= 1e-8
 
 
+def test_krylov_methods_preserve_a_multidimensional_state_shape():
+    """A rank-3 state is iterated in its own layout: the operator never sees a
+    raveled vector, and the result matches the flat solve exactly."""
+    shape = (4, 3, 5)
+    rng = np.random.default_rng(21)
+    diagonal = jnp.asarray(rng.uniform(2.0, 3.0, shape))
+    seen = []
+
+    def matvec(u):
+        seen.append(u.shape)
+        return diagonal * u + 0.2 * jnp.roll(u, 1, 0) + 0.1 * jnp.roll(u, -1, 2)
+
+    rhs = jnp.asarray(rng.standard_normal(shape))
+    flat_matvec = lambda v: matvec(v.reshape(shape)).reshape(-1)  # noqa: E731
+
+    solution = gcrot(matvec, rhs, m=10, k=4, rtol=1e-12)
+    reference = gcrot(flat_matvec, rhs.reshape(-1), m=10, k=4, rtol=1e-12)
+    assert solution.x.shape == shape
+    np.testing.assert_array_equal(solution.x.reshape(-1), reference.x)
+    assert all(observed == shape for observed in seen)
+    # The recycle pair is a basis, so it stays in flat (n, k) columns.
+    assert solution.recycle[0].shape == (60, 4)
+
+    shaped_gmres = gmres(matvec, rhs, restart=10, rtol=1e-12)
+    assert shaped_gmres.x.shape == shape
+    np.testing.assert_allclose(
+        shaped_gmres.x, solution.x, rtol=1e-9, atol=1e-11
+    )
+
+    # A warm start accepts the flat pair and still returns the state's shape,
+    # and a mis-shaped pair is reported against the flattened size.
+    warm = gcrot(matvec, rhs, m=10, k=4, rtol=1e-12, recycle=solution.recycle)
+    assert warm.x.shape == shape and bool(warm.converged)
+    with pytest.raises(ValueError, match="recycle pair must have shape"):
+        gcrot(matvec, rhs, m=10, k=4, recycle=(jnp.zeros((60, 3)),) * 2)
+
+    # An initial guess is accepted in the state's shape too.
+    guessed = gmres(matvec, rhs, x0=solution.x, restart=10, rtol=1e-12)
+    assert guessed.x.shape == shape
+    np.testing.assert_allclose(guessed.x, solution.x, rtol=1e-9, atol=1e-11)
+
+
+def test_gcrot_rejects_multi_leaf_pytrees():
+    with pytest.raises(ValueError, match="multi-leaf pytrees"):
+        gcrot(lambda v: v, {"field": jnp.ones(3), "gauge": jnp.ones(2)})
+
+
+def outlying_eigenvalue_system(n=200, outliers=6, seed=0, skew=0.02):
+    """Clustered spectrum plus a few eigenvalues decades closer to the origin.
+
+    This is the regime deflated restarting exists for: the outliers alone
+    determine how slowly a restarted method converges.
+    """
+    rng = np.random.default_rng(seed)
+    eigenvalues = np.concatenate(
+        [np.linspace(1.0, 2.0, n - outliers), np.logspace(-3, -2, outliers)]
+    )
+    basis, _ = np.linalg.qr(rng.standard_normal((n, n)))
+    dense = basis @ np.diag(eigenvalues) @ basis.T
+    dense = dense + skew * rng.standard_normal((n, n)) / np.sqrt(n)
+    return jnp.asarray(dense), jnp.asarray(rng.standard_normal(n))
+
+
+def test_harmonic_recycling_beats_fifo_on_outlying_eigenvalues():
+    """GCRO-DR deflates the small eigenvalues directly; FIFO only indirectly."""
+    dense, rhs = outlying_eigenvalue_system()
+    matvec = lambda v: dense @ v  # noqa: E731
+    options = dict(m=15, k=6, rtol=1e-10, max_restarts=60)
+
+    fifo = gcrot(matvec, rhs, recycle_strategy="fifo", **options)
+    harmonic = gcrot(matvec, rhs, recycle_strategy="harmonic", **options)
+    plain = gmres(matvec, rhs, restart=15, rtol=1e-10, max_restarts=60)
+
+    assert bool(fifo.converged) and bool(harmonic.converged)
+    # Every inner iteration is one operator application, so this is a matvec
+    # count: deflated restarting must win by a clear margin.
+    assert int(harmonic.iterations) < int(fifo.iterations) * 0.75
+    assert int(fifo.iterations) < int(plain.iterations)
+
+    reference = np.linalg.solve(np.asarray(dense), np.asarray(rhs))
+    error = np.linalg.norm(np.asarray(harmonic.x) - reference)
+    assert error / np.linalg.norm(reference) <= 1e-8
+
+
+def test_harmonic_recycle_pair_stays_consistent():
+    """The returned pair must satisfy A U = C with orthonormal C, so that a
+    warm start can use it without re-deriving anything."""
+    dense, rhs = outlying_eigenvalue_system(n=120, seed=3)
+    matvec = lambda v: dense @ v  # noqa: E731
+    solution = gcrot(
+        matvec, rhs, m=12, k=5, rtol=1e-10, recycle_strategy="harmonic"
+    )
+    c, u = solution.recycle
+    assert c.shape == (120, 5) and u.shape == (120, 5)
+    np.testing.assert_allclose(dense @ u, c, atol=1e-8)
+    np.testing.assert_allclose(c.T @ c, np.eye(5), atol=1e-10)
+
+    # The recycled directions approximate the outlying eigenvalues: their
+    # Rayleigh quotients sit decades below the clustered bulk.
+    quotients = np.diag(np.asarray(u.T @ dense @ u)) / np.diag(np.asarray(u.T @ u))
+    assert np.max(np.abs(quotients)) < 0.1
+
+
+def test_harmonic_recycling_warm_starts_across_a_sequence():
+    n = 120
+    rng = np.random.default_rng(13)
+    diagonal = np.concatenate([np.full(5, 0.02), rng.uniform(1.0, 2.0, n - 5)])
+    base = np.diag(diagonal) + 0.05 * rng.standard_normal((n, n)) / np.sqrt(n)
+    drift = rng.standard_normal((n, n)) / np.sqrt(n)
+    mats = [jnp.asarray(base + step * 0.01 * drift) for step in range(4)]
+    rhs = jnp.asarray(rng.standard_normal(n))
+
+    def solve(a, recycle):
+        return gcrot(
+            lambda v: a @ v, rhs, m=20, k=8, rtol=1e-10,
+            recycle=recycle, recycle_strategy="harmonic",
+        )
+
+    cold = [int(solve(a, None).iterations) for a in mats]
+    warm, recycle = [], None
+    for a in mats:
+        solution = solve(a, recycle)
+        assert bool(solution.converged)
+        recycle = solution.recycle
+        warm.append(int(solution.iterations))
+    assert warm[0] == cold[0]
+    assert sum(warm[1:]) < sum(cold[1:])
+
+
+def test_harmonic_recycling_handles_complex_operators():
+    dense, rhs = random_complex_system(80, seed=5)
+    solution = gcrot(
+        lambda v: dense @ v, rhs, m=12, k=4, rtol=1e-10,
+        recycle_strategy="harmonic",
+    )
+    assert bool(solution.converged)
+    c, u = solution.recycle
+    np.testing.assert_allclose(dense @ u, c, atol=1e-8)
+    reference = np.linalg.solve(np.asarray(dense), np.asarray(rhs))
+    error = np.linalg.norm(np.asarray(solution.x) - reference)
+    assert error / np.linalg.norm(reference) <= 1e-8
+
+
+def test_harmonic_recycling_is_jit_compatible():
+    dense, rhs = outlying_eigenvalue_system(n=80, seed=4)
+
+    @jax.jit
+    def solve(b):
+        return gcrot(
+            lambda v: dense @ v, b, m=12, k=4, rtol=1e-10,
+            recycle_strategy="harmonic",
+        )
+
+    compiled = solve(rhs)
+    eager = gcrot(
+        lambda v: dense @ v, rhs, m=12, k=4, rtol=1e-10,
+        recycle_strategy="harmonic",
+    )
+    assert bool(compiled.converged)
+    np.testing.assert_allclose(compiled.x, eager.x, rtol=1e-10)
+
+
+def test_recycle_strategy_validation():
+    _, rhs = random_system(20, seed=6)
+    with pytest.raises(ValueError, match="unknown recycle_strategy"):
+        gcrot(lambda v: v, rhs, recycle_strategy="ritz")
+    with pytest.raises(ValueError, match="k <= m"):
+        gcrot(lambda v: v, rhs, m=4, k=8, recycle_strategy="harmonic")
+
+
 def test_gcrot_matches_dense_without_recycle():
     a, b = random_system(90, seed=9)
     sol = gcrot(lambda v: a @ v, b, m=15, k=5, rtol=1e-10)

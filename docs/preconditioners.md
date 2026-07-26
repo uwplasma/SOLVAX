@@ -141,10 +141,115 @@ Despite its historical name, the routine is agnostic to whether levels arise
 from mesh spacing $h$, polynomial degree $p$, spectral truncation, or a physics
 coarsening. The caller owns consistency of shapes and transfer operators.
 
-Arrays supplied as smoothers are interpreted as diagonal smoothers; callables
-may implement richer applications. Multigrid quality depends on complementary
-smoothing and coarse correction, not the recursion alone
-{cite}`trottenberg2001`.
+`multigrid` is the same cycle written over a list of `MultigridLevel` entries
+and adds the remaining cycle parameters:
+
+```python
+precond = sx.multigrid(
+    hierarchy.levels,
+    coarse_solve,
+    cycle="f",          # "v" (gamma = 1), "w" (gamma = 2) or the F-cycle
+    cycle_index=None,   # or an explicit gamma, scalar or per level
+    pre_smooth=2,
+    post_smooth=1,
+)
+```
+
+Arrays supplied as smoothers are interpreted as damped-diagonal smoothers,
+with the weight set by `damping`; callables may implement richer applications.
+Multigrid quality depends on complementary smoothing and coarse correction,
+not the recursion alone {cite}`trottenberg2001`. The recursion is unrolled at
+trace time, so a W-cycle over $L$ levels emits $2^{L-1}$ coarse solves into
+the program; prefer the F-cycle for deep hierarchies.
+
+## Geometric transfers and semicoarsening
+
+`solvax.transfer` builds the restriction and prolongation of a structured
+tensor-product grid as one small matrix per coarsened axis, applied as a
+sequence of per-axis contractions. No N-D transfer operator is ever formed,
+and an axis excluded by the mask is not contracted at all.
+
+```python
+restrict, prolong = sx.grid_transfer(
+    (64, 64, 16),
+    coarsen=(True, True, False),      # semicoarsening: the last axis stays fine
+    boundary=("periodic", "periodic", "dirichlet"),
+)
+```
+
+Three closures are available per axis — `"periodic"` ($n_f$ even, coarse point
+$i$ at fine point $2i$), `"dirichlet"` ($n_f$ odd, interior unknowns only,
+coarse point $i$ at fine point $2i+1$), and `"reflective"` (cell-centered with
+a mirror closure) — with `"full_weighting"` or `"injection"` restriction and
+`"linear"` or `"injection"` prolongation. The default pair satisfies the
+variational relation
+
+$$
+R = 2^{-d}P^{\mathsf T}
+$$
+
+exactly over the $d$ coarsened axes, and arrays may carry extra trailing field
+axes, which ride along untouched.
+
+Semicoarsening — coarsening only the axes along which the operator is strongly
+coupled — is what makes multigrid work for anisotropic and convection-dominated
+operators. Under full coarsening those problems leave error components that no
+local relaxation can damp, because they are inexpensive for the operator yet
+invisible to the coarse grid {cite}`trottenberg2001`. `coarsening_plan` handles
+the bookkeeping, stopping each axis as its parity or minimum size runs out
+while the others continue.
+
+`semicoarsening_hierarchy` assembles a complete level list. Coarse operators
+are obtained by **rediscretization** — rebuilding the same discrete physics on
+each coarse grid — rather than by the Galerkin product $RAP$: it is cheaper and
+it keeps every coarse operator in the structured (tridiagonal, banded) form the
+smoothers need.
+
+```python
+def rediscretize(shape):
+    matvec, bands = build_operator(shape)          # your own discretization
+    return matvec, sx.tridiagonal_smoother(*bands, axis=0, periodic=True)
+
+hierarchy = sx.semicoarsening_hierarchy(
+    (128, 16), coarsen=(True, False), rediscretize=rediscretize, levels=4
+)
+precond = sx.multigrid(hierarchy.levels, exact_solve_on(hierarchy.shapes[-1]))
+```
+
+## Smoothers
+
+`solvax.smoothers` builds relaxation sweeps in the multigrid protocol
+`smooth(matvec, x, b) -> x`, which improves a running iterate rather than
+applying a fixed inverse to a right-hand side. `relaxation` converts any
+approximate inverse into one:
+
+| builder | inverts | use when |
+|---|---|---|
+| `jacobi_smoother` | $\operatorname{diag}(A)$ | isotropic coupling |
+| `block_jacobi_smoother` | dense blocks along one axis | stiff within-cell physics |
+| `tridiagonal_smoother` | lines along one axis | one strongly coupled direction |
+| `plane_smoother` | whole 2-D planes | two strongly coupled directions |
+| `upwind_smoother` | the upstream-triangular part | streaming/advection |
+| `alternating_smoother` | composition of the above | mixed or unknown anisotropy |
+
+For a streaming operator the sweep *order* is what matters: relaxation must
+visit points downstream, otherwise the error is simply transported back in
+{cite}`brandt1993`. `upwind_smoother` expresses that ordering pointwise —
+keeping only the coupling to the upstream neighbour makes the swept operator
+triangular in the flow direction, so a single batched tridiagonal solve
+performs the whole ordered sweep with no sequential grid loop.
+
+Measure, do not guess. `smoothing_factor` estimates Brandt's smoothing factor
+{cite}`brandt1977` — the asymptotic error reduction restricted to the modes the
+coarsening cannot represent — by power iteration on the Fourier-projected error
+propagation operator:
+
+```python
+mu = sx.smoothing_factor(smooth, matvec, shape, key=key, coarsen=(True, False))
+```
+
+A smoother with $\mu$ near one will not be rescued by a better cycle, more
+levels, or a stronger coarse solve.
 
 ## Randomized Nystrom preconditioning
 

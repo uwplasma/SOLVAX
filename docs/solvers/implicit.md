@@ -116,6 +116,33 @@ semantics rather than independently imposing a Hermitian-adjoint convention.
 Use a real scalar objective and validate directional derivatives, as in
 `examples/18_complex_krylov_gradient.py`.
 
+## Recycling the forward Krylov space in the adjoint
+
+The adjoint system $A^T\lambda=\bar x$ has the same spectrum as the forward
+one, so the near-invariant subspace the forward solve paid to discover still
+governs adjoint convergence. `recycled_linear_solve` carries the forward
+solve's recycle pair into the adjoint solve instead of discarding it:
+
+```python
+def operator(params, x):          # linear in x, parameters explicit
+    return params["shift"] * x + laplacian(x)
+
+def solver(matvec, rhs, recycle):
+    solution = sx.gcrot(matvec, rhs, m=15, k=12, rtol=1e-10,
+                        recycle=recycle, recycle_strategy="harmonic")
+    return solution.x, solution.recycle
+
+x = sx.recycled_linear_solve(operator, params, b, solver)
+```
+
+The parameters are explicit rather than closed over, because the forward pair
+has to reach the backward pass through the residual of a custom VJP; that is
+the only difference from `linear_solve`. The adjoint remains exactly one
+transposed solve — it is simply a cheaper one. On a spectrum with eight
+eigenvalues decades below the bulk, the test suite pins the adjoint at 11
+inner iterations with reuse against 47 without, a saving that survives
+charging the warm start its $k$ operator applications.
+
 ## Root derivative
 
 Let $x^*(\theta)$ satisfy
@@ -194,6 +221,7 @@ branch. It should not be used to claim differentiability across a branch jump.
 
 - {func}`solvax.implicit.newton_krylov`
 - {func}`solvax.implicit.linear_solve`
+- {func}`solvax.implicit.recycled_linear_solve`
 - {func}`solvax.implicit.root_solve`
 - {func}`solvax.pcg.pcg_linear_solve`
 

@@ -5,7 +5,14 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from solvax import gmres, linear_solve, newton_krylov, root_solve
+from solvax import (
+    gcrot,
+    gmres,
+    linear_solve,
+    newton_krylov,
+    recycled_linear_solve,
+    root_solve,
+)
 
 jax.config.update("jax_enable_x64", True)
 
@@ -222,6 +229,132 @@ def test_adjoint_costs_one_extra_transposed_solve():
     jax.effects_barrier()
     # Forward solve plus exactly one additional (transposed) solve.
     assert counts["solve"] == 2
+
+
+def deflatable_operator(n=200, outliers=8, seed=1):
+    """Symmetric operator with a few eigenvalues decades below the bulk, plus a
+    symmetric perturbation the parameter scales."""
+    rng = np.random.default_rng(seed)
+    eigenvalues = np.concatenate(
+        [np.linspace(1.0, 2.0, n - outliers), np.logspace(-3, -2, outliers)]
+    )
+    basis, _ = np.linalg.qr(rng.standard_normal((n, n)))
+    base = basis @ np.diag(eigenvalues) @ basis.T
+    perturbation = rng.standard_normal((n, n)) / np.sqrt(n)
+    perturbation = 0.5 * (perturbation + perturbation.T)
+    rhs = jnp.asarray(rng.standard_normal(n))
+
+    def operator(params, x):
+        return jnp.asarray(base) @ x + params * (jnp.asarray(perturbation) @ x)
+
+    return operator, rhs
+
+
+RECYCLE_DIRECTIONS = 12
+
+
+def recording_solver(record, *, reuse):
+    """A GCRO-DR solver that reports its iteration count to the host."""
+
+    def solver(matvec, rhs, recycle):
+        solution = gcrot(
+            matvec, rhs, m=15, k=RECYCLE_DIRECTIONS, rtol=1e-10, max_restarts=80,
+            recycle=recycle if reuse else None, recycle_strategy="harmonic",
+        )
+        jax.debug.callback(record, solution.iterations)
+        return solution.x, solution.recycle
+
+    return solver
+
+
+def test_recycled_linear_solve_gradient_matches_finite_differences():
+    operator, rhs = deflatable_operator(n=80, outliers=4, seed=4)
+    solver = recording_solver(lambda value: None, reuse=True)
+
+    def loss(params):
+        return jnp.sum(recycled_linear_solve(operator, params, rhs, solver) ** 2)
+
+    gradient = float(jax.grad(loss)(0.05))
+    step = 1e-6
+    finite = float((loss(0.05 + step) - loss(0.05 - step)) / (2 * step))
+    assert gradient == pytest.approx(finite, rel=1e-6)
+
+    # And the primal agrees with the dense solve.
+    dense = jax.vmap(lambda v: operator(0.05, v))(jnp.eye(80)).T
+    solution = recycled_linear_solve(operator, 0.05, rhs, solver)
+    np.testing.assert_allclose(
+        solution, jnp.linalg.solve(dense, rhs), rtol=1e-7, atol=1e-9
+    )
+
+
+def test_adjoint_reuse_cuts_the_adjoint_iteration_count():
+    """The adjoint system has the same spectrum, so the subspace the forward
+    solve paid to find still deflates it."""
+    operator, rhs = deflatable_operator()
+
+    def measure(reuse):
+        counts = []
+        solver = recording_solver(lambda value: counts.append(int(value)), reuse=reuse)
+
+        def loss(params):
+            return jnp.sum(recycled_linear_solve(operator, params, rhs, solver) ** 2)
+
+        gradient = float(jax.grad(loss)(0.05))
+        jax.effects_barrier()
+        forward, adjoint = counts  # exactly two solves: forward and adjoint
+        return forward, adjoint, gradient
+
+    cold_forward, cold_adjoint, cold_gradient = measure(False)
+    warm_forward, warm_adjoint, warm_gradient = measure(True)
+
+    # Only the adjoint differs; the forward solve is identical work.
+    assert warm_forward == cold_forward
+    # Warm-starting costs one operator application per recycled direction, so
+    # require the saving to beat that too.
+    assert warm_adjoint + RECYCLE_DIRECTIONS < cold_adjoint
+    assert warm_adjoint < cold_adjoint / 2
+    assert warm_gradient == pytest.approx(cold_gradient, rel=1e-8)
+
+
+def test_recycled_linear_solve_takes_pytree_parameters_and_a_transpose_solver():
+    rng = np.random.default_rng(9)
+    n = 40
+    left = jnp.asarray(np.eye(n) + 0.1 * rng.standard_normal((n, n)) / np.sqrt(n))
+    right = jnp.asarray(rng.standard_normal((n, n)) / np.sqrt(n))
+    rhs = jnp.asarray(rng.standard_normal(n))
+
+    def operator(params, x):
+        return left @ x + params["scale"] * (right @ x) + params["shift"] * x
+
+    def solver(matvec, b, recycle):
+        solution = gcrot(matvec, b, m=20, k=5, rtol=1e-12, recycle=recycle)
+        return solution.x, solution.recycle
+
+    transposed = []
+
+    def transpose_solver(matvec, b, recycle):
+        transposed.append(True)
+        solution = gcrot(matvec, b, m=20, k=5, rtol=1e-12, recycle=recycle)
+        return solution.x, solution.recycle
+
+    params = {"scale": 0.3, "shift": 0.2}
+
+    def loss(values):
+        x = recycled_linear_solve(
+            operator, values, rhs, solver, transpose_solver=transpose_solver
+        )
+        return jnp.sum(x**2)
+
+    gradient = jax.grad(loss)(params)
+    assert transposed  # the adjoint went through the supplied transpose solver
+    step = 1e-6
+    for name in ("scale", "shift"):
+        shifted = dict(params)
+        shifted[name] = params[name] + step
+        plus = loss(shifted)
+        shifted[name] = params[name] - step
+        finite = float((plus - loss(shifted)) / (2 * step))
+        assert float(gradient[name]) == pytest.approx(finite, rel=1e-5)
 
 
 def newton_solver(f, x0):

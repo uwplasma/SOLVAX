@@ -26,10 +26,14 @@ The catalogue, roughly in order of increasing structure exploited:
 - :func:`additive_preconditioner` — a positive weighted sum of symmetric
   positive component inverse actions, suitable for PCG and additive line or
   Schwarz preconditioning on arrays and arbitrary pytrees.
-- :func:`p_multigrid` — a V-cycle over caller-supplied levels
-  (pre-smooth, restrict residual, recurse, prolong correction,
-  post-smooth), physics-agnostic: all matvecs, transfers, and smoothers
-  are injected. Covers h- and p-/spectral coarsening alike.
+- :func:`multigrid` / :func:`p_multigrid` — a V-, W-, F- or general
+  mu-cycle over caller-supplied levels (pre-smooth, restrict residual,
+  recurse, prolong correction, post-smooth), physics-agnostic: all
+  matvecs, transfers, and smoothers are injected. Covers h-, semicoarsened
+  and p-/spectral hierarchies alike. :func:`semicoarsening_hierarchy`
+  assembles the levels for a structured grid from
+  :mod:`solvax.transfer` plus a caller-supplied *rediscretization* of the
+  operator on each coarse grid.
 - :func:`galerkin_deflation` — balance a symmetric smoother around an
   adjoint-transfer Galerkin coarse correction, preserving the symmetry
   required by conjugate-gradient methods.
@@ -56,8 +60,12 @@ References
   https://arxiv.org/abs/1309.6243 — solve a fluid (physics-coarsened)
   operator exactly to precondition the kinetic one; the same strategy as
   the PETSc ``Pmat`` (preconditioner-matrix) idiom of production codes.
+- A. Brandt, "Multi-level adaptive solutions to boundary-value problems",
+  Math. Comp. 31, 333 (1977) — the multigrid algorithm and the
+  smoothing/coarse-grid complementarity principle.
 - U. Trottenberg, C. W. Oosterlee & A. Schüller, *Multigrid*, Academic
-  Press (2001) — smoothers, line relaxation, V-cycles.
+  Press (2001) — smoothers, line relaxation, V-/W-/F-cycles,
+  semicoarsening, rediscretized coarse operators.
 - L. Fischer et al., https://arxiv.org/abs/2110.07663 and M. Thompson et
   al., https://arxiv.org/abs/2108.01751 — p-multigrid / spectral
   coarsening with caller-supplied transfer operators.
@@ -74,7 +82,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import Any, NamedTuple
 
 import equinox as eqx
 import jax
@@ -82,6 +90,7 @@ import jax.numpy as jnp
 from jax.scipy.linalg import lu_factor, lu_solve
 
 from solvax.refine import as_low_precision
+from solvax.transfer import coarsening_plan, grid_transfer
 from solvax.tridiagonal import (
     _reusable_tridiagonal_solver,
     cyclic_tridiagonal_solve,
@@ -366,6 +375,173 @@ def additive_tridiagonal_line_preconditioner(
     return additive_preconditioner(line_solves)
 
 
+class MultigridLevel(NamedTuple):
+    """One fine level of a multigrid hierarchy.
+
+    Attributes:
+        matvec: the operator on this level, ``v -> A_l v``.
+        smoother: either a ``jax.Array`` holding ``diag(A_l)`` — giving a
+            damped-Jacobi sweep — or a callable
+            ``smoother(matvec, x, b) -> x`` improving the iterate ``x``
+            (the protocol produced by :mod:`solvax.smoothers`).
+        restrict: residual transfer to the next coarser level.
+        prolong: correction transfer from the next coarser level.
+    """
+
+    matvec: MatVec
+    smoother: jax.Array | Callable
+    restrict: MatVec
+    prolong: MatVec
+
+
+class MultigridHierarchy(NamedTuple):
+    """Levels and grid shapes returned by :func:`semicoarsening_hierarchy`.
+
+    Attributes:
+        levels: the fine levels, finest first; ``levels[l]`` carries the
+            operator, smoother and transfers of level ``l``.
+        shapes: grid shapes, finest first, with ``len(shapes) ==
+            len(levels) + 1``. ``shapes[-1]`` is the coarsest grid, for
+            which the caller supplies ``coarse_solve``.
+    """
+
+    levels: tuple[MultigridLevel, ...]
+    shapes: tuple[tuple[int, ...], ...]
+
+
+def _damped_jacobi_smoother(diagonal: jax.Array, damping: float) -> Callable:
+    """One damped-Jacobi sweep from a stored level diagonal."""
+    inv_diag = 1.0 / jnp.asarray(diagonal)
+
+    def smooth(matvec_l: MatVec, x: jax.Array, b: jax.Array) -> jax.Array:
+        return x + damping * inv_diag * (b - matvec_l(x))
+
+    return smooth
+
+
+def multigrid(
+    levels: Sequence[MultigridLevel | tuple],
+    coarse_solve: MatVec,
+    *,
+    cycle: str = "v",
+    cycle_index: int | Sequence[int] | None = None,
+    pre_smooth: int = 1,
+    post_smooth: int = 1,
+    cycles: int = 1,
+    damping: float = 2.0 / 3.0,
+) -> MatVec:
+    """Multigrid cycle preconditioner over an explicit level hierarchy.
+
+    Levels are ordered finest first; level ``l`` (0 <= l < L) carries its
+    operator ``A_l``, a smoother ``S_l``, and the transfers ``R_l``,
+    ``P_l`` to and from level ``l + 1``. The coarsest level ``L`` is
+    handled by ``coarse_solve``. One cycle on level ``l`` computes
+
+        x <- S_l^{nu1}(0, b)                      (pre-smoothing)
+        r <- R_l (b - A_l x)
+        e <- cycle_{l+1}(r)                       (coarse-grid correction,
+        e <- e + cycle_{l+1}(r - A_{l+1} e)        repeated to gamma_l calls)
+        x <- S_l^{nu2}(x + P_l e, b)              (post-smoothing)
+
+    with ``gamma_l = 1`` a V-cycle and ``gamma_l = 2`` a W-cycle. The
+    F-cycle replaces the repetition by a single following V-cycle, which
+    costs little more than a V-cycle but restores much of the robustness
+    of a W-cycle on hard (anisotropic, convection-dominated) operators
+    (Trottenberg et al., section 2.4; Brandt 1977).
+
+    Nothing is assumed about the transfers, so the same routine covers
+    geometric h-coarsening, semicoarsening (some axes never coarsen; build
+    the transfers with :func:`solvax.transfer.grid_transfer`), and
+    p-/spectral coarsening. Coarse operators may be Galerkin products or —
+    usually cheaper, and structure-preserving — rediscretizations of the
+    same physics on the coarse grid.
+
+    The recursion is plain Python over the static level list, so the whole
+    cycle is jit-able and free of dynamic control flow. It is also fully
+    unrolled: a W-cycle over ``L`` levels emits ``2^L`` coarse solves into
+    the jaxpr, so prefer the F-cycle for deep hierarchies.
+
+    Args:
+        levels: :class:`MultigridLevel` entries (or plain
+            ``(matvec, smoother, restrict, prolong)`` tuples), finest
+            first.
+        coarse_solve: exact (or strong) solve on the coarsest level,
+            ``b -> A_L^{-1} b``.
+        cycle: ``"v"`` (gamma = 1), ``"w"`` (gamma = 2) or ``"f"``
+            (F-cycle: one recursive F-cycle followed by one V-cycle).
+        cycle_index: explicit cycle index gamma, a scalar or one per fine
+            level. Overrides ``cycle`` when given.
+        pre_smooth: number of pre-smoothing sweeps ``nu1`` (may be 0).
+        post_smooth: number of post-smoothing sweeps ``nu2`` (may be 0).
+        cycles: number of cycles per application (static Python int);
+            cycles after the first act on the residual.
+        damping: relaxation weight used when a level's smoother is given
+            as a diagonal array rather than a callable.
+
+    Returns:
+        A callable ``precond(b) -> x`` approximating ``A_0^{-1} b``.
+    """
+    levels = tuple(MultigridLevel(*level) for level in levels)
+    n_fine = len(levels)
+    if cycles < 1:
+        raise ValueError("cycles must be >= 1")
+    if pre_smooth < 0 or post_smooth < 0:
+        raise ValueError("pre_smooth and post_smooth must be >= 0")
+    if cycle not in ("v", "w", "f"):
+        raise ValueError(f"unknown cycle {cycle!r}; expected 'v', 'w' or 'f'")
+
+    if cycle_index is None:
+        indices = ({"v": 1, "w": 2, "f": 1}[cycle],) * n_fine
+        kind = "f" if cycle == "f" else "mu"
+    else:
+        kind = "mu"
+        if isinstance(cycle_index, int):
+            indices = (int(cycle_index),) * n_fine
+        else:
+            indices = tuple(int(value) for value in cycle_index)
+            if len(indices) != n_fine:
+                raise ValueError("cycle_index must be a scalar or match len(levels)")
+        if any(value < 1 for value in indices):
+            raise ValueError("cycle_index entries must be >= 1")
+
+    matvecs = tuple(level.matvec for level in levels)
+    restricts = tuple(level.restrict for level in levels)
+    prolongs = tuple(level.prolong for level in levels)
+    smooth_fns = tuple(
+        level.smoother
+        if callable(level.smoother)
+        else _damped_jacobi_smoother(level.smoother, damping)
+        for level in levels
+    )
+
+    def correct(level: int, b: jax.Array, kind_l: str) -> jax.Array:
+        if level == n_fine:
+            return coarse_solve(b)
+        matvec_l = matvecs[level]
+        smooth = smooth_fns[level]
+        x = jnp.zeros_like(b)
+        for _ in range(pre_smooth):
+            x = smooth(matvec_l, x, b)
+        r = restricts[level](b - matvec_l(x))
+        e = correct(level + 1, r, kind_l)
+        if level + 1 < n_fine:  # repeating an exact coarsest solve is a no-op
+            extra = 1 if kind_l == "f" else indices[level] - 1
+            for _ in range(extra):
+                e = e + correct(level + 1, r - matvecs[level + 1](e), "mu")
+        x = x + prolongs[level](e)
+        for _ in range(post_smooth):
+            x = smooth(matvec_l, x, b)
+        return x
+
+    def apply(b: jax.Array) -> jax.Array:
+        x = correct(0, b, kind)
+        for _ in range(cycles - 1):
+            x = x + correct(0, b - matvecs[0](x), kind)
+        return x
+
+    return apply
+
+
 def p_multigrid(
     matvecs: Sequence[MatVec],
     restricts: Sequence[MatVec],
@@ -374,28 +550,28 @@ def p_multigrid(
     *,
     smoothers: Sequence[jax.Array | Callable],
     cycles: int = 1,
+    cycle: str = "v",
+    cycle_index: int | Sequence[int] | None = None,
+    pre_smooth: int = 1,
+    post_smooth: int = 1,
+    damping: float = 2.0 / 3.0,
 ) -> MatVec:
-    """Multigrid V-cycle preconditioner over caller-supplied levels.
+    """Multigrid cycle preconditioner from parallel per-level sequences.
 
-    Levels are ordered finest first; level ``l`` (0 <= l < L) carries a
-    fine matvec, a smoother, and transfers to/from level ``l + 1``, and
-    the coarsest level ``L`` is handled by ``coarse_solve``. One V-cycle
-    on level ``l`` with operator ``A_l``, restriction ``R_l`` and
-    prolongation ``P_l`` computes
+    The array-of-structures spelling of :func:`multigrid`: the levels are
+    given as four equal-length sequences instead of one sequence of
+    :class:`MultigridLevel`. Defaults reproduce the historical behaviour
+    exactly — one V-cycle with a single pre- and post-smoothing sweep and
+    ``omega = 2/3`` damped Jacobi for array smoothers — and every extra
+    keyword is forwarded to :func:`multigrid`.
 
-        x <- S_l(0, b)                       (pre-smooth from zero)
-        e <- V-cycle_{l+1}(R_l (b - A_l x))  (coarse-grid correction)
-        x <- S_l(x + P_l e, b)               (post-smooth)
-
-    with the recursion bottoming out at ``x = coarse_solve(b)``. The
-    recursion is plain Python over the static level list, so the whole
-    cycle stays jit-able. This library is physics-agnostic: nothing is
-    assumed about the transfers, so the same cycle covers geometric
-    h-coarsening and p-/spectral coarsening (lowering polynomial or
-    Legendre/Hermite resolution) alike — see Trottenberg et al. for the
-    classical theory and https://arxiv.org/abs/2110.07663 (Fischer et
-    al.) and https://arxiv.org/abs/2108.01751 (Thompson et al.) for
-    p-multigrid with spectral level hierarchies.
+    Despite the name the routine is agnostic to where the levels come
+    from: geometric h-coarsening, semicoarsening, and p-/spectral
+    coarsening (lowering polynomial or Legendre/Hermite resolution) are
+    all covered. See Trottenberg et al. for the classical theory and
+    https://arxiv.org/abs/2110.07663 (Fischer et al.) and
+    https://arxiv.org/abs/2108.01751 (Thompson et al.) for p-multigrid
+    with spectral level hierarchies.
 
     Args:
         matvecs: fine-level operators ``v -> A_l v``, finest first,
@@ -406,10 +582,15 @@ def p_multigrid(
             ``b -> A_L^{-1} b``.
         smoothers: one per fine level. Either a ``jax.Array`` holding
             ``diag(A_l)`` — giving one damped-Jacobi sweep
-            ``x + (2/3) diag^{-1} (b - A_l x)`` — or a callable
-            ``smoother(matvec, x, b) -> x`` improving the iterate ``x``.
-        cycles: number of V-cycles per application (static Python int);
+            ``x + damping * diag^{-1} (b - A_l x)`` — or a callable
+            ``smoother(matvec, x, b) -> x``.
+        cycles: number of cycles per application (static Python int);
             cycles after the first act on the residual.
+        cycle: ``"v"``, ``"w"`` or ``"f"``; see :func:`multigrid`.
+        cycle_index: explicit cycle index, scalar or per level.
+        pre_smooth: number of pre-smoothing sweeps.
+        post_smooth: number of post-smoothing sweeps.
+        damping: relaxation weight for array (diagonal) smoothers.
 
     Returns:
         A callable ``precond(b) -> x`` approximating ``A_0^{-1} b``.
@@ -418,42 +599,95 @@ def p_multigrid(
     restricts = tuple(restricts)
     prolongs = tuple(prolongs)
     smoothers = tuple(smoothers)
-    n_fine = len(matvecs)
-    if not (len(restricts) == len(prolongs) == len(smoothers) == n_fine):
+    if not (len(restricts) == len(prolongs) == len(smoothers) == len(matvecs)):
         raise ValueError(
             "matvecs, restricts, prolongs and smoothers must have equal length"
         )
-    if cycles < 1:
-        raise ValueError("cycles must be >= 1")
-
-    def _damped_jacobi(diagonal: jax.Array) -> Callable:
-        inv_diag = 1.0 / jnp.asarray(diagonal)
-
-        def smooth(matvec_l: MatVec, x: jax.Array, b: jax.Array) -> jax.Array:
-            return x + (2.0 / 3.0) * inv_diag * (b - matvec_l(x))
-
-        return smooth
-
-    smooth_fns = tuple(
-        s if callable(s) else _damped_jacobi(s) for s in smoothers
+    levels = tuple(
+        MultigridLevel(*level)
+        for level in zip(matvecs, smoothers, restricts, prolongs, strict=True)
+    )
+    return multigrid(
+        levels,
+        coarse_solve,
+        cycle=cycle,
+        cycle_index=cycle_index,
+        pre_smooth=pre_smooth,
+        post_smooth=post_smooth,
+        cycles=cycles,
+        damping=damping,
     )
 
-    def vcycle(level: int, b: jax.Array) -> jax.Array:
-        if level == n_fine:
-            return coarse_solve(b)
-        matvec_l = matvecs[level]
-        smooth = smooth_fns[level]
-        x = smooth(matvec_l, jnp.zeros_like(b), b)
-        e = vcycle(level + 1, restricts[level](b - matvec_l(x)))
-        return smooth(matvec_l, x + prolongs[level](e), b)
 
-    def apply(b: jax.Array) -> jax.Array:
-        x = vcycle(0, b)
-        for _ in range(cycles - 1):
-            x = x + vcycle(0, b - matvecs[0](x))
-        return x
+def semicoarsening_hierarchy(
+    shape: Sequence[int],
+    coarsen: Sequence[bool],
+    rediscretize: Callable[[tuple[int, ...]], tuple[MatVec, Any]],
+    *,
+    levels: int,
+    boundary: str | Sequence[str] = "periodic",
+    min_size: int = 4,
+    restriction: str | Sequence[str] = "full_weighting",
+    prolongation: str | Sequence[str] = "linear",
+    dtype: Any = None,
+) -> MultigridHierarchy:
+    """Assemble semicoarsened multigrid levels by rediscretization.
 
-    return apply
+    Plans the hierarchy with :func:`solvax.transfer.coarsening_plan`,
+    builds the separable transfers of each step with
+    :func:`solvax.transfer.grid_transfer`, and asks the caller to
+    *rediscretize* the operator on every fine level's grid. Only the axes
+    selected by ``coarsen`` are ever coarsened, so the strongly coupled
+    directions of an anisotropic or streaming operator can be coarsened
+    while the others stay fully resolved — the standard remedy when full
+    coarsening would break the smoother/coarse-grid complementarity
+    (Trottenberg et al., ch. 5).
+
+    Rediscretization — rebuilding ``A`` from the same discrete physics on
+    the coarse grid — is preferred here over the Galerkin product
+    ``R A P``: it costs nothing beyond evaluating coefficients, and it
+    keeps every coarse operator in the same structured form (tridiagonal
+    lines, banded planes) that the smoothers in :mod:`solvax.smoothers`
+    need. Galerkin coarse operators remain available by simply passing
+    them through ``rediscretize``.
+
+    Args:
+        shape: finest grid shape.
+        coarsen: one boolean per axis; False keeps that axis fine on every
+            level.
+        rediscretize: callable ``shape -> (matvec, smoother)`` building the
+            operator and its smoother on a given grid. It is called once
+            per *fine* level (never for the coarsest grid, whose solve the
+            caller supplies).
+        levels: maximum number of coarsening steps.
+        boundary: grid closure for every axis, or one per axis; see
+            :func:`solvax.transfer.coarse_axis_size`.
+        min_size: smallest coarse length an axis may reach.
+        restriction: restriction stencil, shared or per axis.
+        prolongation: prolongation stencil, shared or per axis.
+        dtype: transfer-matrix dtype.
+
+    Returns:
+        A :class:`MultigridHierarchy`; pass ``hierarchy.levels`` and a
+        solve for ``hierarchy.shapes[-1]`` to :func:`multigrid`.
+    """
+    plan = coarsening_plan(
+        shape, coarsen, levels=levels, boundary=boundary, min_size=min_size
+    )
+    built = []
+    for index, mask in enumerate(plan.masks):
+        fine_shape = plan.shapes[index]
+        restrict, prolong = grid_transfer(
+            fine_shape,
+            mask,
+            boundary=boundary,
+            restriction=restriction,
+            prolongation=prolongation,
+            dtype=dtype,
+        )
+        matvec, smoother = rediscretize(fine_shape)
+        built.append(MultigridLevel(matvec, smoother, restrict, prolong))
+    return MultigridHierarchy(tuple(built), plan.shapes)
 
 
 def galerkin_deflation(

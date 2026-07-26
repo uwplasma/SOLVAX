@@ -7,6 +7,7 @@ import pytest
 from jax.scipy.linalg import lu_factor
 
 from solvax import (
+    MultigridLevel,
     additive_preconditioner,
     additive_tridiagonal_line_preconditioner,
     block_jacobi,
@@ -22,6 +23,7 @@ from solvax import (
     lu_factor_banded,
     lu_solve_banded,
     mixed_precision,
+    multigrid,
     nearest_kronecker,
     p_multigrid,
     pcg,
@@ -446,6 +448,138 @@ def test_p_multigrid_as_gmres_preconditioner():
     x_ref = np.linalg.solve(np.asarray(mats[0]), np.asarray(b))
     err = np.linalg.norm(np.asarray(pre.x) - x_ref) / np.linalg.norm(x_ref)
     assert err <= 1e-7
+
+
+def test_multigrid_and_p_multigrid_are_the_same_cycle():
+    """The two spellings of the level hierarchy agree bit for bit."""
+    _, matvecs, restricts, prolongs, coarse_solve, diags = poisson_hierarchy()
+    parallel = p_multigrid(
+        matvecs, restricts, prolongs, coarse_solve, smoothers=diags, cycles=2
+    )
+    levels = [
+        MultigridLevel(matvec, smoother, restrict, prolong)
+        for matvec, smoother, restrict, prolong in zip(
+            matvecs, diags, restricts, prolongs, strict=True
+        )
+    ]
+    explicit = multigrid(levels, coarse_solve, cycles=2)
+    rhs = jnp.asarray(np.random.default_rng(20).standard_normal(129))
+    np.testing.assert_allclose(explicit(rhs), parallel(rhs), rtol=1e-14)
+
+
+def identity_levels(count):
+    """Levels whose every operation is the identity, for counting recursions."""
+    identity = lambda value: value  # noqa: E731
+    return [
+        MultigridLevel(identity, lambda matvec, x, b: x, identity, identity)
+        for _ in range(count)
+    ]
+
+
+def test_cycle_shape_selects_v_w_and_f_recursions():
+    """V, F and W differ only in how often the coarse level is revisited."""
+    visits = []
+
+    def coarse_solve(b):
+        visits.append(len(visits))
+        return b
+
+    levels = identity_levels(3)
+    counts = {}
+    for cycle in ("v", "f", "w"):
+        visits.clear()
+        multigrid(levels, coarse_solve, cycle=cycle)(jnp.ones(3))
+        counts[cycle] = len(visits)
+    assert counts == {"v": 1, "f": 3, "w": 4}
+
+    # An explicit per-level cycle index overrides the named shape: only the
+    # middle level is visited twice.
+    visits.clear()
+    multigrid(levels, coarse_solve, cycle_index=[1, 2, 1])(jnp.ones(3))
+    assert len(visits) == 2
+
+    visits.clear()
+    multigrid(levels, coarse_solve, cycle_index=2)(jnp.ones(3))
+    assert len(visits) == 4
+
+
+def test_pre_and_post_smoothing_counts_are_independent():
+    sweeps = []
+
+    def smoother(matvec, x, b):
+        sweeps.append(len(sweeps))
+        return x
+
+    identity = lambda value: value  # noqa: E731
+    level = MultigridLevel(identity, smoother, identity, identity)
+    multigrid([level], identity, pre_smooth=2, post_smooth=3)(jnp.ones(2))
+    assert len(sweeps) == 5
+
+    sweeps.clear()
+    multigrid([level], identity, pre_smooth=0, post_smooth=1)(jnp.ones(2))
+    assert len(sweeps) == 1
+
+
+def test_extra_smoothing_sweeps_improve_the_cycle():
+    _, matvecs, restricts, prolongs, coarse_solve, diags = poisson_hierarchy()
+    rng = np.random.default_rng(21)
+    b = jnp.asarray(rng.standard_normal(129))
+
+    def rate(**options):
+        cycle = p_multigrid(
+            matvecs, restricts, prolongs, coarse_solve, smoothers=diags, **options
+        )
+        x = jnp.zeros(129)
+        for _ in range(4):
+            x = x + cycle(b - matvecs[0](x))
+        return float(jnp.linalg.norm(b - matvecs[0](x)) / jnp.linalg.norm(b)) ** 0.25
+
+    assert rate(pre_smooth=2, post_smooth=2) < rate()
+
+
+def test_array_smoother_damping_is_configurable():
+    """The damped-Jacobi weight applied to diagonal smoothers is not fixed."""
+    _, matvecs, restricts, prolongs, coarse_solve, diags = poisson_hierarchy()
+    rhs = jnp.asarray(np.random.default_rng(22).standard_normal(129))
+
+    def explicit(diagonal, damping):
+        inverse = 1.0 / diagonal
+
+        def smooth(matvec, x, b):
+            return x + damping * inverse * (b - matvec(x))
+
+        return smooth
+
+    tuned = p_multigrid(
+        matvecs, restricts, prolongs, coarse_solve, smoothers=diags, damping=0.5
+    )
+    reference = p_multigrid(
+        matvecs,
+        restricts,
+        prolongs,
+        coarse_solve,
+        smoothers=[explicit(diagonal, 0.5) for diagonal in diags],
+    )
+    np.testing.assert_allclose(tuned(rhs), reference(rhs), rtol=1e-14)
+    default = p_multigrid(
+        matvecs, restricts, prolongs, coarse_solve, smoothers=diags
+    )
+    assert float(jnp.linalg.norm(tuned(rhs) - default(rhs))) > 0.0
+
+
+def test_multigrid_validation():
+    identity = lambda value: value  # noqa: E731
+    levels = identity_levels(2)
+    with pytest.raises(ValueError, match="unknown cycle"):
+        multigrid(levels, identity, cycle="z")
+    with pytest.raises(ValueError, match="pre_smooth and post_smooth"):
+        multigrid(levels, identity, pre_smooth=-1)
+    with pytest.raises(ValueError, match="cycle_index must be"):
+        multigrid(levels, identity, cycle_index=[1])
+    with pytest.raises(ValueError, match="cycle_index entries"):
+        multigrid(levels, identity, cycle_index=0)
+    with pytest.raises(ValueError, match="cycles"):
+        multigrid(levels, identity, cycles=0)
 
 
 def test_galerkin_deflation_is_spd_jittable_and_accelerates_pcg():

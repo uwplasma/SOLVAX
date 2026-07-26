@@ -1,8 +1,8 @@
 # Test taxonomy
 
-The suite (298 parameterized cases across 18 files, ~99% line coverage,
-enforced at 95% in CI) is organized so that every solver carries the same five
-kinds of evidence. The categories below say what is pinned and where.
+The suite (parameterized cases across 21 files, ~99% line coverage, enforced at
+95% in CI) is organized so that every solver carries the same five kinds of
+evidence. The categories below say what is pinned and where.
 
 ## Correctness against dense references
 
@@ -46,6 +46,22 @@ iteration limits), tiny-pivot clamping, ill-conditioned Anderson histories,
 input validation errors, and refinement behavior as conditioning degrades.
 `test_pcg.py`, `test_banded.py`, `test_fixed_point.py`,
 `test_mixed_precision.py`, `test_refine.py`.
+
+## Measured numerical behavior
+
+Some claims are only meaningful as measurements, so the suite measures them
+and asserts on the number. Multigrid smoothing factors are computed by power
+iteration on the Fourier-projected error propagation operator and compared
+with the local Fourier analysis value of the model operator: damped Jacobi at
+$2/3$ (and $3/5$ at the two-dimensional optimum $\omega=4/5$), line relaxation
+on an anisotropic operator at $\varepsilon_\perp/(\varepsilon_\parallel +
+\varepsilon_\perp)$ under semicoarsening while every smoother stalls above
+$0.95$ under full coarsening, and an upwind-ordered sweep beating every
+wind-agnostic ordering by a ratio that grows with the mesh Peclet number. The
+V-cycle convergence rate is pinned across an eightfold refinement to
+demonstrate h-independence, and the deflated Krylov variants are pinned by
+matvec count against their undeflated counterparts. `test_smoothers.py`,
+`test_transfer.py`, `test_multigrid.py`, `test_krylov.py`, `test_implicit.py`.
 
 Benchmark drivers are exercised by CI too: the problem-suite dense
 verification runs on every push ({doc}`benchmarks/sweeps`).

@@ -1,9 +1,12 @@
 # FGMRES and GCROT recycling
 
 SOLVAX provides restarted flexible GMRES for general matrix-free systems and a
-GCROT-style extension for sequences of related systems. GMRES supports real or
-complex arrays and arbitrary matching JAX pytrees; GCROT currently requires a
-one-dimensional array. Both use right preconditioning.
+GCROT-style extension for sequences of related systems. Both use right
+preconditioning, and both preserve the operand's layout: a state of any rank is
+handed to the operator in its own shape, never raveled and unraveled around
+each application. GMRES additionally supports arbitrary matching JAX pytrees;
+GCROT takes a single array (its recycle pair, being a basis rather than a
+state, is stored as flat `(n, k)` columns).
 
 ## Flexible GMRES
 
@@ -105,8 +108,40 @@ $$
 (I-CC^H)AZ_m=V_{m+1}\bar H_m.
 $$
 
-SOLVAX inserts the cycle's normalized correction into a fixed-size FIFO
-recycle space. When a recycle pair is supplied for a changed operator, it
+Two strategies decide what the recycle space keeps, selected with
+`recycle_strategy`.
+
+**`"fifo"`** (default) inserts the cycle's normalized correction into a
+fixed-size FIFO recycle space. It costs $O(nk)$ and retains what restarting
+would discard, but deflates slow eigenmodes only indirectly.
+
+**`"harmonic"`** is deflated restarting (GCRO-DR). Over the augmented space
+$W=[U,Z_m]$, the stored relations $AU=C$ and $AZ_m=CB_m+V_{m+1}\bar H_m$ give
+
+$$
+AW=Y\bar G,\qquad Y=[C,V_{m+1}],\qquad
+\bar G=\begin{pmatrix} I_k & B_m\\ 0 & \bar H_m\end{pmatrix},
+$$
+
+so the harmonic Ritz condition $AWg-\theta Wg\perp\operatorname{range}(AW)$
+becomes the small dense problem $\bar G^H\bar Gg=\theta\bar G^HY^HWg$, solved
+for $\mu=1/\theta$ and truncated to the $k$ largest $|\mu|$ — the eigenvalues
+nearest the origin, which are what make a restarted method stall. The new pair
+is reconstructed as $U_{\text{new}}=WG$ and $C_{\text{new}}=Y\bar GG=AU_{\text{new}}$,
+so deflated restarting needs no extra operator applications
+{cite}`parks2006,morgan2002`. Augmenting with $U$ is what lets the space
+accumulate across cycles rather than being rebuilt from a Krylov space the
+deflation has already emptied.
+
+On a spectrum with a handful of eigenvalues decades below the bulk, the test
+suite pins `"harmonic"` at under three quarters of the FIFO matvec count
+(measured 42 against 90, with unpreconditioned GMRES not converging at all).
+The small eigenproblem uses `jnp.linalg.eig`, which JAX implements on CPU;
+`"harmonic"` is not intended to be differentiated through — take gradients
+with `linear_solve` or `recycled_linear_solve`, which need no derivative of
+the solver.
+
+When a recycle pair is supplied for a changed operator, either strategy
 recomputes $AU$ and uses a thin QR factorization to restore $AU=C$ for the
 current system.
 
@@ -156,11 +191,12 @@ is the mechanism, not the deflation itself.
 ## Relationship to the literature
 
 The implementation follows the recycling framework of Parks et al. and the
-deflated-restart motivation of Morgan {cite}`parks2006,morgan2002`. It is not a
-full harmonic-Ritz GCRO-DR implementation: it retains one optimal cycle
-correction per restart rather than selecting harmonic Ritz vectors. This keeps
-the update shape-static and $O(nk)$ but may identify difficult invariant
-subspaces more slowly.
+deflated-restart motivation of Morgan {cite}`parks2006,morgan2002`. The default
+`"fifo"` strategy is not GCRO-DR: it retains one optimal cycle correction per
+restart rather than selecting harmonic Ritz vectors, which keeps the update
+shape-static and $O(nk)$ but may identify difficult invariant subspaces more
+slowly. `recycle_strategy="harmonic"` is the harmonic-Ritz deflated restart of
+Parks et al., section 3, over the augmented space.
 
 ## Choosing between Krylov methods
 
@@ -178,7 +214,8 @@ subspaces more slowly.
 - `block_jacobi` for strong within-cell coupling;
 - exact banded or block-Thomas inverse of a coupling-dropped operator;
 - `line_smoother` for anisotropy;
-- `p_multigrid` for scale-separated elliptic error;
+- `multigrid` / `p_multigrid` for scale-separated elliptic error, over a
+  semicoarsened geometric hierarchy when the coupling is directional;
 - mixed-precision or truncated inner solves, which flexibility permits.
 
 See {doc}`../preconditioners` for formulas and examples.

@@ -11,8 +11,9 @@
 `solvax` provides the solver infrastructure that kinetic and PDE codes keep
 re-implementing: structured direct solves (batched dense LU, block-tridiagonal
 Schur elimination with truncated storage), preconditioned and recycled Krylov
-methods, physics-agnostic preconditioners (coarse-operator LU, p-multigrid,
-Kronecker approximations, symmetric additive and line smoothers),
+methods, physics-agnostic preconditioners (coarse-operator LU, semicoarsened
+geometric and p-multigrid, Kronecker approximations, symmetric additive and
+line smoothers),
 mixed-precision iterative refinement, and implicit differentiation of every solve — all
 jit/vmap/grad-transparent, on CPU and GPU.
 
@@ -71,12 +72,14 @@ Everything is differentiable (`jax.grad` through the solve) and batchable
 | Module | Contents |
 |---|---|
 | `solvax.operators` | Matrix-free, sum, Kronecker, block-tridiagonal and bordered (constraint-row) operator containers with closed-form transposes |
-| `solvax.precond` | Jacobi/block-Jacobi, coarse-operator LU, Galerkin-deflation coarse correction, symmetric additive and alternating-direction line composition, p-multigrid V-cycles, nearest-Kronecker, mixed-precision wrappers |
+| `solvax.precond` | Jacobi/block-Jacobi, coarse-operator LU, Galerkin-deflation coarse correction, symmetric additive and alternating-direction line composition, V-/W-/F-cycle multigrid over explicit or semicoarsened rediscretized hierarchies, nearest-Kronecker, mixed-precision wrappers |
+| `solvax.transfer` | Separable per-axis restriction/prolongation (full weighting, linear, injection) with periodic, dirichlet and reflective closures, exact variational adjointness, and semicoarsening plans |
+| `solvax.smoothers` | Point/block Jacobi, batched tridiagonal line and exact banded plane relaxation, upwind-ordered sweeps for streaming operators, and a measured smoothing factor |
 | `solvax.direct` | Block-tridiagonal Schur elimination (block Thomas): full, factor/solve split, truncated-storage mode |
 | `solvax.banded` | Non-pivoted banded LU with row equilibration + static pivoting; periodic variant via the Woodbury capacitance trick |
 | `solvax.tridiagonal` | Batched scalar tridiagonal solve (reproducible Thomas / fused cuSPARSE backend) and periodic (cyclic) systems via a Sherman--Morrison correction |
 | `solvax.elliptic` | Spectral Fourier--Helmholtz solve for separable periodic-by-bounded elliptic problems — the drift-plane / vorticity `lap phi = rhs` inversion, one FFT + one batched tridiagonal sweep |
-| `solvax.krylov` | Flexible restarted GMRES (CGS2 + Givens) over arrays, scalars and arbitrary pytrees with optional custom inner products, and GCROT-style Krylov subspace recycling for parameter continuation |
+| `solvax.krylov` | Flexible restarted GMRES (CGS2 + Givens) over arrays, scalars and arbitrary pytrees with optional custom inner products, and GCROT Krylov subspace recycling with FIFO or harmonic-Ritz (GCRO-DR) deflated restarting |
 | `solvax.pcg` | Matrix-free pytree PCG with preconditioning, fixed-shape residual history, and explicit convergence/breakdown status |
 | `solvax.fixed_point` | Safeguarded Aitken, bounded-memory (condition-filtered) Anderson, and matrix-free affine fixed-point FGMRES |
 | `solvax.implicit` | Matrix-free `newton_krylov` (JFNK) plus implicit-function-theorem `linear_solve` and `root_solve` — gradients cost one extra (transposed) solve |
@@ -86,8 +89,8 @@ Everything is differentiable (`jax.grad` through the solve) and batchable
 
 Complex-valued GMRES/GCROT, tridiagonal solves, and fixed-point acceleration
 use Hermitian inner products and real-valued safeguards. Remaining roadmap:
-harmonic-Ritz recycle selection, pytree GCROT operands, and expanded GPU
-batched-LU benchmarks.
+multi-leaf pytree GCROT operands (GCROT takes arrays of any rank; GMRES is
+pytree-native) and expanded GPU batched-LU benchmarks.
 
 ```python
 # Preconditioned, recycled Krylov across a parameter scan:

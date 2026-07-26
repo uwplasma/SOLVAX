@@ -97,6 +97,20 @@ def _identity(v: jax.Array) -> jax.Array:
     return v
 
 
+def _reshaped(fn: MatVec, shape: tuple[int, ...]) -> MatVec:
+    """Run ``fn`` on the caller's array shape while the solver stays flat.
+
+    The reshapes are metadata-only for contiguous arrays, so a
+    multidimensional state costs nothing to iterate on and the operator
+    never sees a raveled vector.
+    """
+
+    def apply(value: jax.Array) -> jax.Array:
+        return jnp.reshape(fn(value.reshape(shape)), -1)
+
+    return apply
+
+
 def _adjoint(matrix: jax.Array) -> jax.Array:
     """Return the conjugate transpose used by complex Krylov projections."""
     return jnp.conj(matrix).T
@@ -218,10 +232,12 @@ def _fgmres_cycle(
         U: recycle source basis with ``A U = C``, shape ``(n, k)``.
 
     Returns:
-        Tuple ``(dx, adx, k_done, res_est)``: the correction
+        Tuple ``(dx, adx, k_done, res_est, factorization)``: the correction
         ``dx = Z y - U B y``, its image ``adx = A dx`` (reconstructed from
         the Arnoldi relation, no extra matvec), the number of inner steps
-        taken (``int32``), and the final least-squares residual norm.
+        taken (``int32``), the final least-squares residual norm, and the
+        cycle's Arnoldi factorization ``(V, Z, H, B)`` for deflated
+        restarting.
     """
     n = r0.shape[0]
     dtype = r0.dtype
@@ -298,7 +314,142 @@ def _fgmres_cycle(
 
     dx = y @ Z - U @ (B @ y)
     adx = (H @ y) @ V
-    return dx, adx, j_f, res_est
+    return dx, adx, j_f, res_est, (V, Z, H, B)
+
+
+def _orthonormalize_recycle(
+    c_new: jax.Array, u_new: jax.Array, threshold: jax.Array
+):
+    """Re-establish ``A U = C`` with orthonormal ``C`` by a thin QR.
+
+    Given any consistent pair ``(C_new, U_new)`` with ``A U_new = C_new``,
+    the QR factorization ``C_new = Q R`` gives the equivalent pair
+    ``(Q, U_new R^{-1})`` spanning the same space with an orthonormal image
+    basis. Numerically rank-deficient columns — zero padding from a short
+    solve, or duplicated directions — are masked out and sorted to the back
+    so FIFO insertion refills them first.
+
+    Args:
+        c_new: candidate image basis ``(n, k)``.
+        u_new: matching source basis ``(n, k)``.
+        threshold: relative floor on ``|diag(R)|`` below which a column is
+            treated as rank deficient.
+
+    Returns:
+        ``(C, U, fill)`` with ``fill`` the number of retained columns.
+    """
+    q, r = jnp.linalg.qr(c_new)
+    magnitudes = jnp.abs(jnp.diagonal(r))
+    good = magnitudes > threshold * jnp.max(magnitudes, initial=0.0)
+    r_safe = r + jnp.diag(jnp.where(good, 0.0, 1.0).astype(r.dtype))
+    u_scaled = solve_triangular(r_safe.T, u_new.T, lower=True).T
+    order = jnp.argsort(jnp.logical_not(good), stable=True)
+    return (
+        (q * good)[:, order],
+        (u_scaled * good)[:, order],
+        jnp.sum(good).astype(jnp.int32),
+    )
+
+
+def _harmonic_recycle(
+    C: jax.Array,
+    U: jax.Array,
+    factorization,
+    j_f: jax.Array,
+    m: int,
+    k: int,
+    threshold: jax.Array,
+):
+    r"""Rebuild the recycle pair from the smallest harmonic Ritz pairs.
+
+    This is the deflated restart of GCRO-DR (Parks et al. 2006, section 3).
+    Over the *augmented* space ``W = [U, Z]`` — the recycled directions
+    together with the cycle's preconditioned Krylov basis — the two stored
+    relations ``A U = C`` and ``A Z = C B + V_{m+1} Hbar`` combine into
+
+        A W = Y Gbar,   Y = [C, V_{m+1}],
+        Gbar = [[I_k, B], [0, Hbar]].
+
+    Harmonic Ritz pairs ``(theta, W g)`` impose ``A W g - theta W g ⊥
+    range(A W)``, i.e. ``(AW)^H (AW) g = theta (AW)^H W g``. Since ``Y`` is
+    orthonormal (``V`` is built orthogonal to ``C``), this is the small
+    dense generalized problem ``Gbar^H Gbar g = theta Gbar^H Y^H W g``,
+    which is solved here as the ordinary eigenproblem
+
+        (Gbar^H Gbar)^{-1} Gbar^H (Y^H W) g = mu g,   mu = 1 / theta,
+
+    keeping the ``k`` largest ``|mu|``. Those approximate the eigenvalues
+    nearest the origin — exactly the ones that make a restarted method
+    stall, and what the FIFO update reaches only indirectly. Augmenting
+    with ``U`` is what lets the space *accumulate* across cycles instead of
+    being rebuilt from a Krylov space that the deflation has already
+    emptied of those directions.
+
+    The new pair is reconstructed from the stored bases,
+
+        U_new = W G,     C_new = Y (Gbar G) = A U_new,
+
+    so deflated restarting costs no operator applications at all. Columns
+    beyond an early exit are padded to the identity to keep every shape
+    static; their ``Y^H W`` columns vanish, so they carry ``mu = 0`` and are
+    never selected, and the selected vectors are masked back onto the used
+    block so the reconstruction stays exact.
+
+    For a real operator the eigenvectors come in conjugate pairs. Rather
+    than splitting a pair across the cut (which would need ``k + 1``
+    columns), the real span of the selected vectors is taken and truncated
+    to its leading ``k`` singular directions, keeping the shapes static.
+
+    Args:
+        C: current recycle image basis ``(n, k)``.
+        U: current recycle source basis ``(n, k)`` with ``A U = C``.
+        factorization: the cycle's ``(V, Z, H, B)``.
+        j_f: number of inner steps the cycle actually took.
+        m: static cycle size.
+        k: static number of recycle directions.
+        threshold: relative rank floor for the re-orthonormalization.
+
+    Returns:
+        ``(C, U, fill)`` for the next cycle.
+    """
+    V, Z, H, B = factorization
+    dtype = H.dtype
+    used = jnp.arange(m) < j_f
+    active = jnp.concatenate([jnp.ones((k,), bool), used])
+
+    # Gbar = [[I_k, B], [0, Hbar]], with the unused Hessenberg columns padded
+    # to the identity so the pencil keeps full column rank.
+    hessenberg = H + jnp.pad(
+        jnp.diag(jnp.where(used, 0.0, 1.0).astype(dtype)), ((0, 1), (0, 0))
+    )
+    top = jnp.concatenate([jnp.eye(k, dtype=dtype), B], axis=1)
+    bottom = jnp.concatenate([jnp.zeros((m + 1, k), dtype), hessenberg], axis=1)
+    gbar = jnp.concatenate([top, bottom], axis=0)
+
+    # Y^H W, the only quantity that needs the long vectors (four products).
+    yw = jnp.concatenate(
+        [
+            jnp.concatenate([_adjoint(C) @ U, _adjoint(C) @ Z.T], axis=1),
+            jnp.concatenate([jnp.conj(V) @ U, jnp.conj(V) @ Z.T], axis=1),
+        ],
+        axis=0,
+    )
+    pencil = jnp.linalg.solve(_adjoint(gbar) @ gbar, _adjoint(gbar) @ yw)
+
+    values, vectors = jnp.linalg.eig(pencil)
+    basis = vectors[:, jnp.argsort(-jnp.abs(values))[:k]]
+    if jnp.issubdtype(dtype, jnp.complexfloating):
+        basis = basis.astype(dtype)
+    else:
+        parts = jnp.concatenate([jnp.real(basis), jnp.imag(basis)], axis=1)
+        left, _, _ = jnp.linalg.svd(parts, full_matrices=False)
+        basis = left[:, :k].astype(dtype)
+    basis = jnp.where(active[:, None], basis, 0.0)
+
+    u_new = U @ basis[:k] + Z.T @ basis[k:]
+    image = gbar @ basis
+    c_new = C @ image[:k] + V.T @ image[k:]
+    return _orthonormalize_recycle(c_new, u_new, threshold)
 
 
 def _restarted(
@@ -312,7 +463,7 @@ def _restarted(
     C: jax.Array,
     U: jax.Array,
     fill: jax.Array,
-    recycling: bool,
+    recycling: str,
 ):
     """Outer restart loop shared by :func:`gmres` (k = 0) and :func:`gcrot`.
 
@@ -327,8 +478,9 @@ def _restarted(
         C: recycle image basis ``(n, k)``, orthonormal up to zero padding.
         U: recycle source basis ``(n, k)`` with ``A U = C``.
         fill: number of recycle columns filled so far (``int32``).
-        recycling: static flag; when False the recycle update is skipped
-            entirely (``k`` may be 0).
+        recycling: static recycle update: ``"none"`` skips it entirely
+            (``k`` may be 0), ``"fifo"`` keeps the cycle's own correction,
+            ``"harmonic"`` deflates the smallest harmonic Ritz pairs.
 
     Returns:
         ``(x, residual_norm, iterations, converged, C, U, fill)``.
@@ -351,7 +503,9 @@ def _restarted(
         r = r - C @ ctr
         beta = jnp.linalg.norm(r)
 
-        dx, adx, k_done, _ = _fgmres_cycle(matvec, precond, r, beta, tol, m, C, U)
+        dx, adx, k_done, _, factorization = _fgmres_cycle(
+            matvec, precond, r, beta, tol, m, C, U
+        )
         x = x + dx
         # Recompute the residual exactly at the restart boundary (one extra
         # matvec per cycle): the incremental update r - adx inherits CGS2
@@ -360,10 +514,10 @@ def _restarted(
         r = b - _gmres_matvec(matvec, x)
         res = jnp.linalg.norm(r)
 
-        if recycling:
-            # v0.1 update: keep the cycle's own optimal correction. One
-            # projection pass against C for numerical hygiene (adx is
-            # orthogonal to C in exact arithmetic), then FIFO insertion.
+        if recycling == "fifo":
+            # Keep the cycle's own optimal correction. One projection pass
+            # against C for numerical hygiene (adx is orthogonal to C in
+            # exact arithmetic), then FIFO insertion.
             proj = _adjoint(C) @ adx
             c_new = adx - C @ proj
             u_new = dx - U @ proj
@@ -374,6 +528,10 @@ def _restarted(
             C = jnp.where(ok, C.at[:, slot].set(c_new / nc_safe), C)
             U = jnp.where(ok, U.at[:, slot].set(u_new / nc_safe), U)
             fill = fill + ok.astype(fill.dtype)
+        elif recycling == "harmonic":
+            C, U, fill = _harmonic_recycle(
+                C, U, factorization, k_done, m, k, C.shape[0] * eps
+            )
 
         return (x, r, res, iters + k_done, cycles + 1, C, U, fill)
 
@@ -550,11 +708,17 @@ def gmres(
     state has fixed shapes (the Krylov basis is zero-padded to the cycle
     size and early convergence exits via ``lax.while_loop``).
 
+    The iteration is structure-preserving: scalars, arrays of any rank, and
+    arbitrary pytrees are all iterated in their own layout, so a
+    multidimensional state — species, speed, pitch, and two angles, say —
+    never has to be raveled and unraveled around each operator application.
+    Flat ``(n,)`` arrays take a dedicated matrix path.
+
     Args:
         matvec: the operator ``v -> A v`` on an array or pytree; must be pure
-            JAX (traceable) and preserve the input tree structure.
-        b: array or pytree right-hand side. Pytree leaves must have one common
-            inexact dtype.
+            JAX (traceable) and preserve the input structure.
+        b: right-hand side: a scalar, an array of any rank, or a pytree.
+            Pytree leaves must have one common inexact dtype.
         x0: initial guess (defaults to zeros).
         precond: right preconditioner ``v -> M^{-1} v`` (defaults to the
             identity). May be flexible, i.e. nonlinear or changing between
@@ -572,7 +736,7 @@ def gmres(
         A :class:`KrylovSolution` with ``recycle=None``.
     """
     if (inner_product is not None or jax.tree.structure(b) != jax.tree.structure(0)
-            or jnp.ndim(b) == 0):
+            or jnp.ndim(b) != 1):
         b = jax.tree.map(jnp.asarray, b)
         structure = jax.tree.structure(b)
         leaves = jax.tree.leaves(b)
@@ -607,7 +771,7 @@ def gmres(
     empty = jnp.zeros((n, 0), b.dtype)
     x, res, iters, converged, _, _, _ = _restarted(
         matvec, b, x0, precond, restart, tol, max_restarts,
-        empty, empty, jnp.int32(0), recycling=False,
+        empty, empty, jnp.int32(0), recycling="none",
     )
     return KrylovSolution(x, res, iters, converged, None)
 
@@ -624,6 +788,7 @@ def gcrot(
     atol: float = 0.0,
     max_restarts: int = 50,
     recycle: tuple[jax.Array, jax.Array] | None = None,
+    recycle_strategy: str = "fifo",
 ) -> KrylovSolution:
     """GCROT(m, k)-style FGMRES with Krylov subspace recycling.
 
@@ -636,14 +801,36 @@ def gcrot(
     columns — e.g. zero padding from a short previous solve — are dropped),
     so a stale pair is always consistent, merely less effective.
 
-    The recycle space grows by one direction per cycle (the cycle's own
-    correction; see the module docstring for why this simplification, and
-    Parks et al. 2006 for the harmonic-Ritz alternative), stored FIFO in
-    fixed-shape ``(n, k)`` arrays so the whole solve stays jit-able.
+    Two strategies decide *what* the recycle space keeps:
+
+    - ``"fifo"`` (default) inserts one direction per cycle — the cycle's own
+      optimal correction, normalized — into fixed-shape ``(n, k)`` storage.
+      It is cheap, O(nk), and retains what restarting would otherwise throw
+      away, but it deflates slowly-converging eigenmodes only indirectly.
+    - ``"harmonic"`` is deflated restarting (GCRO-DR, Parks et al. 2006):
+      each cycle recomputes the pair from the ``k`` harmonic Ritz pairs of
+      smallest magnitude, which approximate the eigenvalues nearest the
+      origin — the ones that actually stall a restarted method. The
+      eigenproblem is ``m x m`` dense and the new pair is reconstructed from
+      the Arnoldi relation, so no extra operator applications are needed.
+      Because the eigenproblem is posed over the current cycle's Krylov
+      space rather than over the space augmented by ``U``, the previously
+      recycled directions influence it only through the deflated operator.
+      This strategy calls :func:`jax.numpy.linalg.eig`, which JAX implements
+      on CPU, and is not intended to be differentiated through — take
+      gradients with :func:`solvax.implicit.linear_solve`, which needs no
+      derivative of the solver.
+
+    Like :func:`gmres`, the iteration preserves the operand's shape: an
+    array of any rank is handed to ``matvec`` and ``precond`` in its own
+    layout, so a multidimensional state needs no ravel/unravel around each
+    application. The recycle pair itself is stored as flat ``(n, k)``
+    columns, since it is a *basis*, not a state. Multi-leaf pytrees are not
+    supported here — use :func:`gmres`, which is pytree-native.
 
     Args:
-        matvec: the operator ``v -> A v`` on flat ``(n,)`` arrays.
-        b: right-hand side, shape ``(n,)``.
+        matvec: the operator ``v -> A v``, on arrays shaped like ``b``.
+        b: right-hand side, an array of any rank; ``n`` below is its size.
         x0: initial guess (defaults to zeros).
         precond: right preconditioner ``v -> M^{-1} v`` (identity default).
         m: static inner FGMRES cycle size.
@@ -653,12 +840,33 @@ def gcrot(
         max_restarts: static maximum number of outer cycles.
         recycle: optional ``(C, U)`` pair of shape ``(n, k)`` from a
             previous :class:`KrylovSolution` to warm-start deflation.
+        recycle_strategy: ``"fifo"`` or ``"harmonic"``, as above.
 
     Returns:
-        A :class:`KrylovSolution` whose ``recycle`` field holds the updated
-        ``(C, U)`` pair, zero-padded to shape ``(n, k)``.
+        A :class:`KrylovSolution` whose ``x`` has the shape of ``b`` and
+        whose ``recycle`` field holds the updated ``(C, U)`` pair,
+        zero-padded to shape ``(n, k)``.
     """
+    if recycle_strategy not in ("fifo", "harmonic"):
+        raise ValueError(
+            f"unknown recycle_strategy {recycle_strategy!r}; "
+            "expected 'fifo' or 'harmonic'"
+        )
+    if recycle_strategy == "harmonic" and k > m:
+        raise ValueError("harmonic recycling needs k <= m")
+    if jax.tree.structure(b) != jax.tree.structure(0):
+        raise ValueError(
+            "gcrot operates on a single array; use gmres for multi-leaf pytrees"
+        )
     b = jnp.asarray(b)
+    shape = b.shape
+    if b.ndim != 1:
+        # Keep the caller's layout: the operator and preconditioner always see
+        # the state's own shape, and only the Krylov bookkeeping is flat.
+        matvec = _reshaped(matvec, shape)
+        precond = None if precond is None else _reshaped(precond, shape)
+        b = b.reshape(-1)
+        x0 = None if x0 is None else jnp.asarray(x0).reshape(-1)
     n = b.shape[0]
     dtype = b.dtype
     x0 = jnp.zeros_like(b) if x0 is None else jnp.asarray(x0)
@@ -684,15 +892,7 @@ def gcrot(
         # sorted to the back so FIFO insertion refills them first.
         U_in = jnp.asarray(U_in, dtype)
         W = jnp.stack([_gmres_matvec(matvec, U_in[:, i]) for i in range(k)], axis=1)
-        Q, R = jnp.linalg.qr(W)
-        diag = jnp.abs(jnp.diagonal(R))
-        good = diag > n * jnp.finfo(dtype).eps * jnp.max(diag, initial=0.0)
-        R_safe = R + jnp.diag(jnp.where(good, 0.0, 1.0).astype(dtype))
-        U_new = solve_triangular(R_safe.T, U_in.T, lower=True).T
-        order = jnp.argsort(jnp.logical_not(good), stable=True)
-        C = (Q * good)[:, order]
-        U = (U_new * good)[:, order]
-        fill = jnp.sum(good).astype(jnp.int32)
+        C, U, fill = _orthonormalize_recycle(W, U_in, n * jnp.finfo(dtype).eps)
         # Operator-drift diagnostic: the incoming image columns were
         # orthonormal (up to zero padding); after re-establishing A U = C for
         # the current operator, the mean sine of the principal angles between
@@ -707,6 +907,7 @@ def gcrot(
         drift = (jnp.sum(jnp.where(filled, sines, 0.0)) / count).real
 
     x, res, iters, converged, C, U, _ = _restarted(
-        matvec, b, x0, precond, m, tol, max_restarts, C, U, fill, recycling=True,
+        matvec, b, x0, precond, m, tol, max_restarts, C, U, fill,
+        recycling=recycle_strategy,
     )
-    return KrylovSolution(x, res, iters, converged, (C, U), drift)
+    return KrylovSolution(x.reshape(shape), res, iters, converged, (C, U), drift)
