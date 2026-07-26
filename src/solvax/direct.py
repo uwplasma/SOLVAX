@@ -1211,8 +1211,9 @@ def _leading_principal_params_bar(
     ``W x W`` principal submatrix instead of the full chain. Its retained
     blocks are therefore *not* blocks of the full solution, so its gradient
     error contains an interface-induced term inside the window in addition to
-    the omitted tail. This is not the production path; it exists so the paper
-    can quantify what the exact-window construction removes.
+    the omitted tail. This is not the production path; it is retained only so
+    that the cost of the superseded closure can be measured against the
+    exact-window construction.
     """
     n, k = n_blocks, keep_lowest
     w_rows = min(k + adjoint_window, n)
