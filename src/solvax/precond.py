@@ -437,11 +437,11 @@ def multigrid(
     ``P_l`` to and from level ``l + 1``. The coarsest level ``L`` is
     handled by ``coarse_solve``. One cycle on level ``l`` computes
 
-        x <- S_l^{nu1}(0, b)                       (pre-smoothing)
+        x <- S_l^{nu1}(0, b)                      (pre-smoothing)
         r <- R_l (b - A_l x)
-        e <- cycle_{l+1}(r)                        repeated gamma_l times,
-             e <- e + cycle_{l+1}(r - A_{l+1} e)   (coarse-grid correction)
-        x <- S_l^{nu2}(x + P_l e, b)               (post-smoothing)
+        e <- cycle_{l+1}(r)                       (coarse-grid correction,
+        e <- e + cycle_{l+1}(r - A_{l+1} e)        repeated to gamma_l calls)
+        x <- S_l^{nu2}(x + P_l e, b)              (post-smoothing)
 
     with ``gamma_l = 1`` a V-cycle and ``gamma_l = 2`` a W-cycle. The
     F-cycle replaces the repetition by a single following V-cycle, which

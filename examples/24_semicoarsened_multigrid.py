@@ -87,7 +87,9 @@ for nx in (32, 64, 128, 256):
     rhs = jnp.asarray(np.random.default_rng(0).standard_normal(shape))
 
     # Standalone: average residual reduction per cycle.
-    step = jax.jit(lambda x, matvec=matvec, cycle=cycle: x + cycle(rhs - matvec(x)))
+    step = jax.jit(
+        lambda x, matvec=matvec, cycle=cycle, rhs=rhs: x + cycle(rhs - matvec(x))
+    )
     x = jnp.zeros(shape)
     for _ in range(6):
         x = step(x)

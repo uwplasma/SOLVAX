@@ -43,6 +43,7 @@ References
 from __future__ import annotations
 
 from collections.abc import Callable
+from functools import partial
 from typing import Any, NamedTuple
 
 import jax
@@ -251,6 +252,91 @@ def linear_solve(
         transpose_solve=_transpose_solve,
         has_aux=has_aux,
     )
+
+
+@partial(jax.custom_vjp, nondiff_argnums=(0, 1, 2))
+def _recycled_solve(operator, solver, transpose_solver, params, b):
+    """Primal of :func:`recycled_linear_solve` (the recycle pair is discarded)."""
+    x, _ = solver(lambda value: operator(params, value), b, None)
+    return x
+
+
+def _recycled_solve_fwd(operator, solver, transpose_solver, params, b):
+    x, recycle = solver(lambda value: operator(params, value), b, None)
+    return x, (params, x, recycle)
+
+
+def _recycled_solve_bwd(operator, solver, transpose_solver, residuals, cotangent):
+    params, x, recycle = residuals
+
+    def transpose(value):
+        return jax.linear_transpose(lambda u: operator(params, u), x)(value)[0]
+
+    # The adjoint system has the *same* operator up to transposition, so the
+    # near-invariant subspace the forward solve paid to find is still the one
+    # that limits convergence here (Parks et al. 2006, section 5).
+    adjoint, _ = transpose_solver(transpose, cotangent, recycle)
+    _, pullback = jax.vjp(lambda values: operator(values, x), params)
+    return jax.tree.map(jnp.negative, pullback(adjoint)[0]), adjoint
+
+
+_recycled_solve.defvjp(_recycled_solve_fwd, _recycled_solve_bwd)
+
+
+def recycled_linear_solve(
+    operator: Callable,
+    params: PyTree,
+    b: PyTree,
+    solver: Callable,
+    *,
+    transpose_solver: Callable | None = None,
+) -> PyTree:
+    """Implicit-differentiation solve that recycles the forward Krylov space.
+
+    Same implicit-function-theorem adjoint as :func:`linear_solve` — one
+    transposed solve, nothing differentiated through the iteration — but the
+    Krylov *recycle space* built during the forward solve is handed to the
+    adjoint solve instead of being thrown away. The adjoint system
+    ``A^T lambda = xbar`` has the same spectrum as the forward one, so the
+    directions that limited forward convergence limit the adjoint too; a
+    solve warm-started with them skips rediscovering the same subspace
+    (Parks et al. 2006, section 5, recycling across a sequence of related
+    systems).
+
+    The parameters are explicit rather than closed over, because the
+    forward's recycle pair has to reach the backward pass through the
+    residual of a custom VJP. That is the only difference in usage::
+
+        def operator(params, x):
+            return params["diffusion"] * laplacian(x) + params["shift"] * x
+
+        def solver(matvec, rhs, recycle):
+            solution = gcrot(matvec, rhs, m=30, k=10, recycle=recycle)
+            return solution.x, solution.recycle
+
+        x = recycled_linear_solve(operator, params, b, solver)
+
+    Args:
+        operator: linear in its second argument, ``operator(params, x) -> A x``.
+            Gradients flow to ``params`` and ``b``.
+        params: pytree the operator depends on.
+        b: right-hand side.
+        solver: ``solver(matvec, b, recycle) -> (x, recycle)``. It is called
+            with ``recycle=None`` for the forward solve and must return the
+            recycle pair to hand on; a solver that cannot recycle may return
+            ``None`` and still be correct, merely without the saving.
+        transpose_solver: ``solver(matvec_T, y, recycle) -> (y, recycle)`` for
+            the adjoint system. Defaults to ``solver``. It receives the
+            forward pair, whose second element is ignored.
+
+    Returns:
+        The solution ``x``, differentiable with respect to ``params`` and
+        ``b``. ``operator``, ``solver`` and ``transpose_solver`` are static:
+        pass stable callables, not freshly built closures, to avoid
+        retracing.
+    """
+    transpose_solver = solver if transpose_solver is None else transpose_solver
+    return _recycled_solve(operator, solver, transpose_solver, params, b)
 
 
 def _default_tangent_solve(g: Callable, y: jax.Array) -> jax.Array:

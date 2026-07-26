@@ -35,10 +35,25 @@
   multigrid-preconditioned GMRES converging in 2 iterations at every size
   while unpreconditioned GMRES does not converge at all.
 
-- `gmres` now iterates arrays of any rank in their own layout instead of
-  requiring a flat vector, so a multidimensional state never has to be raveled
-  and unraveled around each operator application. Flat `(n,)` arrays keep the
-  existing matrix path.
+- `gmres` and `gcrot` now iterate arrays of any rank in their own layout
+  instead of requiring a flat vector, so a multidimensional state never has to
+  be raveled and unraveled around each operator application. Flat `(n,)`
+  arrays keep the existing matrix path, and GCROT's recycle pair — a basis
+  rather than a state — stays in flat `(n, k)` columns.
+
+- Added `recycle_strategy="harmonic"` to `gcrot`: harmonic-Ritz deflated
+  restarting (GCRO-DR) over the space augmented by the current recycle pair,
+  alongside the existing one-direction-per-cycle FIFO update. The eigenproblem
+  is small and dense and the new pair is reconstructed from the Arnoldi
+  relation, so deflated restarting costs no extra operator applications. On a
+  spectrum with six eigenvalues decades below the bulk it converges in 42
+  matvecs against 90 for FIFO, where unpreconditioned GMRES does not converge.
+
+- Added `recycled_linear_solve`: the same one-transposed-solve implicit
+  adjoint as `linear_solve`, but the forward solve's Krylov recycle space is
+  handed to the adjoint solve rather than discarded. Measured on a spectrum
+  with eight small outliers: 11 adjoint inner iterations with reuse against 47
+  without, at identical gradients.
 
 - Added `block_thomas_checkpointed_fn`, an exact generated full-system solve
   that recomputes each radial segment during substitution. Its default

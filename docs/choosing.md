@@ -16,6 +16,8 @@ requirements. No solver is uniformly best.
 | General Hermitian positive definite | PCG | FGMRES | PCG fails explicitly on nonpositive curvature |
 | General nonsymmetric or indefinite | FGMRES | native SuperLU on CPU | memory grows with restart size |
 | Slowly varying sequence | GCROT | warm-started FGMRES | recycle storage and startup QR cost |
+| A few eigenvalues far from the bulk | GCROT with harmonic deflation | FGMRES with a spectral preconditioner | small dense eigensolve per cycle, CPU-lowered |
+| Structured grid, directional coupling | semicoarsened `multigrid` with a matching smoother | FGMRES + line preconditioner | smoother and coarsening must be complementary; measure the smoothing factor |
 | Contractive nonlinear partitioned map | Aitken | Anderson mixing | neither method makes a noncontractive map globally convergent |
 | Affine (linearized) fixed-point map | `affine_fixed_point_gmres` | Anderson mixing | mapping must be affine over the trial space |
 | Large nonlinear implicit system | `newton_krylov` | Anderson mixing | Jacobian-free, but needs a good Jacobian preconditioner for mesh independence |
@@ -57,9 +59,15 @@ steps, or repeated right-hand sides. Recycling pays when difficult spectral
 directions persist between systems. It can hurt when the operator changes
 abruptly or when the system is already cheap.
 
-SOLVAX retains one normalized cycle correction per restart in a FIFO recycle
-space. This is simpler than harmonic-Ritz GCRO-DR and should not be described as
-an identical implementation of that algorithm {cite}`parks2006,morgan2002`.
+By default SOLVAX retains one normalized cycle correction per restart in a FIFO
+recycle space. This is simpler than harmonic-Ritz GCRO-DR and should not be
+described as an identical implementation of that algorithm. Pass
+`recycle_strategy="harmonic"` for the deflated restart itself: it selects the
+harmonic Ritz pairs of smallest magnitude over the space augmented by the
+current recycle pair {cite}`parks2006,morgan2002`. Prefer it when a few
+outlying eigenvalues, rather than the bulk spectrum, set the iteration count;
+prefer the default when the operator changes between solves and the space is
+carried mainly as a warm start.
 
 ## Aitken versus Anderson
 
