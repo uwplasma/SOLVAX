@@ -267,9 +267,17 @@ def test_krylov_methods_preserve_a_multidimensional_state_shape():
         shaped_gmres.x, solution.x, rtol=1e-9, atol=1e-11
     )
 
-    # A warm start accepts the flat pair and still returns the state's shape.
+    # A warm start accepts the flat pair and still returns the state's shape,
+    # and a mis-shaped pair is reported against the flattened size.
     warm = gcrot(matvec, rhs, m=10, k=4, rtol=1e-12, recycle=solution.recycle)
     assert warm.x.shape == shape and bool(warm.converged)
+    with pytest.raises(ValueError, match="recycle pair must have shape"):
+        gcrot(matvec, rhs, m=10, k=4, recycle=(jnp.zeros((60, 3)),) * 2)
+
+    # An initial guess is accepted in the state's shape too.
+    guessed = gmres(matvec, rhs, x0=solution.x, restart=10, rtol=1e-12)
+    assert guessed.x.shape == shape
+    np.testing.assert_allclose(guessed.x, solution.x, rtol=1e-9, atol=1e-11)
 
 
 def test_gcrot_rejects_multi_leaf_pytrees():
