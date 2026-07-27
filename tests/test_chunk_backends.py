@@ -207,3 +207,87 @@ def test_missing_optional_dependency_message(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", fake)
     with pytest.raises(ImportError, match=r"solvax\[adv\]"):
         chunk_map(lambda a: a, jnp.arange(4.0), chunk_size=2, backend="adv")
+
+
+# ------------------------------------------------------- resolution branches ---
+def test_available_backends_without_the_extra(monkeypatch):
+    """The advertised backend list must degrade to native, not raise."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake(name, *a, **k):
+        if name == "adv_jax_math":
+            raise ImportError("not installed")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", fake)
+    assert available_backends() == ("native",)
+
+
+@adv_only
+def test_auto_prefers_the_optional_backend_when_present():
+    from solvax.autodiff import _resolve_backend
+
+    assert _resolve_backend("auto") == "adv"
+
+
+def test_auto_falls_back_to_native_without_the_extra(monkeypatch):
+    import builtins
+
+    from solvax.autodiff import _resolve_backend
+
+    real_import = builtins.__import__
+
+    def fake(name, *a, **k):
+        if name == "adv_jax_math":
+            raise ImportError("not installed")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", fake)
+    assert _resolve_backend("auto") == "native"
+
+
+@pytest.mark.parametrize("dim,expected", [(0, 1), (1, 1)])
+def test_auto_chunk_size_degenerate_dimensions(dim, expected):
+    from solvax.autodiff import auto_chunk_size
+
+    assert auto_chunk_size(dim) == expected
+
+
+def test_auto_chunk_size_without_a_memory_budget():
+    from solvax.autodiff import auto_chunk_size
+
+    assert auto_chunk_size(100) == 10          # ceil(sqrt(100))
+
+
+def test_auto_chunk_size_respects_a_memory_budget():
+    from solvax.autodiff import auto_chunk_size
+
+    got = auto_chunk_size(1000, output_size=64, max_memory_bytes=1 << 20)
+    assert 1 <= got <= 1000
+
+
+def test_chunk_size_string_must_be_auto():
+    with pytest.raises(ValueError, match="must be 'auto'"):
+        chunked_jacfwd(_f, chunk_size="sometimes")(jnp.arange(1.0, 5.0))
+
+
+def test_chunk_size_must_be_positive():
+    with pytest.raises(ValueError, match=">= 1"):
+        chunked_jacfwd(_f, chunk_size=0)(jnp.arange(1.0, 5.0))
+
+
+def test_chunked_jacobian_rejects_an_unknown_mode():
+    with pytest.raises(ValueError, match="mode must be"):
+        chunked_jacobian(_f, mode="sideways")(jnp.arange(1.0, 5.0))
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_auto_chunk_size_is_the_default_and_is_correct(backend):
+    """``chunk_size='auto'`` is the default path and must match ``jax.jacfwd``."""
+    x = jnp.arange(1.0, 17.0)
+    got = chunked_jacfwd(_f, backend=backend)(x)          # chunk_size='auto'
+    np.testing.assert_allclose(
+        np.asarray(got), np.asarray(jax.jacfwd(_f)(x)), rtol=1e-5, atol=1e-6
+    )

@@ -19,8 +19,9 @@ large parameter vector) and matrix-free operator materializations fit on a
 single accelerator; it is the analogue of DESC's ``jac_chunk_size`` argument,
 factored out here for reuse across kinetic and equilibrium codes.
 
-The chunked Jacobians are numerically identical to their JAX counterparts (the
-same JVP/VJP is evaluated for every basis vector; only the batching changes),
+The chunked Jacobians evaluate the same JVP/VJP as their JAX counterparts for
+every basis vector -- only the batching changes -- so they agree to
+floating-point tolerance,
 and remain jit/vmap/grad-transparent.
 
 Contract: ``fun`` maps one array argument (selected by ``argnums``; arbitrary
@@ -31,7 +32,9 @@ Pytree inputs/outputs are out of scope — ravel them (e.g. with
 
 Backends
 --------
-Two implementations are available and are numerically identical:
+Two implementations are available. They evaluate mathematically equivalent
+operations and agree to floating-point tolerance; they are not bit-identical,
+because the optional backend can associate a reduction differently.
 
 ``"native"`` (default)
     SOLVAX's own chunking, built only on ``jax.vmap`` and ``jax.lax.map``. It

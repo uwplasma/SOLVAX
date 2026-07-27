@@ -137,8 +137,9 @@ sx.chunk_map(f, xs, chunk_size=8, backend="adv",
 ```
 
 On the benchmark in `benchmarks/benchmark_chunk_backends.py` that is a
-**16.4x** reduction in compiled temporary memory, with the two results agreeing
-to floating-point tolerance. See `examples/26_chunked_jacobian_backends.py` for
+**16.4x** reduction in compiled temporary memory on that problem and machine,
+with the two results agreeing to floating-point tolerance (1.5e-05 in float32;
+they are not bit-identical, since the reduction is associated differently). See `examples/26_chunked_jacobian_backends.py` for
 a runnable version.
 
 ## Numerical equivalence

@@ -42,7 +42,7 @@ def main() -> None:
         print(f"{label:>14}  {temp:>10}   {err:.2e}")
 
     # ------------------------------------------------------------------
-    # 2. Backends are interchangeable: same answer, your choice of engine.
+    # 2. Backends are interchangeable: same answer to floating-point tolerance.
     # ------------------------------------------------------------------
     print()
     for backend in available_backends():

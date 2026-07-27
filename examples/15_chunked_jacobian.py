@@ -5,7 +5,7 @@ replicating the intermediate program state across the full Jacobian width — an
 easy way to run out of accelerator memory. The chunked builders split the basis
 into blocks of `chunk_size` and walk them with `jax.lax.map`, so peak memory
 scales with the chunk instead of the whole Jacobian, at a modest time cost. The
-result is numerically identical to the JAX builders. This is the analogue of
+result agrees with the JAX builders to floating-point tolerance. This is the analogue of
 DESC's `jac_chunk_size` optimization-memory option.
 
 Expected runtime: a few seconds on a laptop CPU.

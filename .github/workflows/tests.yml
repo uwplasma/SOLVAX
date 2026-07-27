@@ -37,6 +37,12 @@ jobs:
           - os: macos-latest
             python: "3.12"
             stack: current
+          # Exercises the optional adv-jax-math chunking backend. Without this
+          # job the backend-parity tests skip everywhere in CI and the optional
+          # path is never independently verified.
+          - os: ubuntu-latest
+            python: "3.12"
+            stack: adv
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
@@ -46,12 +52,21 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
       - run: pip install -e '.[dev]'
+      - name: Install the optional chunking backend
+        if: matrix.stack == 'adv'
+        run: pip install -e '.[adv]'
       - name: Pin supported-minimum numerical stack
         if: matrix.stack == 'minimum'
         run: >-
           pip install 'jax==0.4.38' 'jaxlib==0.4.38'
           'equinox>=0.11,<0.12' 'lineax>=0.0.7,<0.1'
       - run: python -c "import jax, solvax; print(jax.__version__, solvax.__version__, solvax.__file__)"
+      - name: Confirm the optional backend is actually present
+        if: matrix.stack == 'adv'
+        run: >-
+          python -c "from solvax.autodiff import available_backends;
+          assert 'adv' in available_backends(), available_backends();
+          print('backends:', available_backends())"
       - run: pytest -n auto --cov --cov-report=xml
       - name: Benchmark problem-suite verification
         if: matrix.stack == 'current'
