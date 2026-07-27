@@ -19,8 +19,9 @@ large parameter vector) and matrix-free operator materializations fit on a
 single accelerator; it is the analogue of DESC's ``jac_chunk_size`` argument,
 factored out here for reuse across kinetic and equilibrium codes.
 
-The chunked Jacobians are numerically identical to their JAX counterparts (the
-same JVP/VJP is evaluated for every basis vector; only the batching changes),
+The chunked Jacobians evaluate the same JVP/VJP as their JAX counterparts for
+every basis vector -- only the batching changes -- so they agree to
+floating-point tolerance,
 and remain jit/vmap/grad-transparent.
 
 Contract: ``fun`` maps one array argument (selected by ``argnums``; arbitrary
@@ -29,18 +30,44 @@ returned Jacobian follows the JAX convention ``output_shape + input_shape``.
 Pytree inputs/outputs are out of scope — ravel them (e.g. with
 :func:`jax.flatten_util.ravel_pytree`) before calling.
 
+Backends
+--------
+Two implementations are available. They evaluate mathematically equivalent
+operations and agree to floating-point tolerance; they are not bit-identical,
+because the optional backend can associate a reduction differently.
+
+``"native"`` (default)
+    SOLVAX's own chunking, built only on ``jax.vmap`` and ``jax.lax.map``. It
+    has no dependency beyond JAX itself and therefore imposes no constraint on
+    which JAX version a downstream code may use.
+
+``"adv"`` (optional)
+    Wrappers around `adv-jax-math <https://pypi.org/project/adv-jax-math/>`_,
+    which adds capability the native path does not have --- in-chunk
+    ``reduction`` so the stacked result is never materialized, and explicit
+    ``shard``/``mesh`` placement. Install with ``pip install solvax[adv]``.
+
+Select per call with ``backend=``, or set ``SOLVAX_CHUNK_BACKEND`` to change
+the default. ``backend="auto"`` uses ``"adv"`` when it is importable and
+``"native"`` otherwise. Any keyword the native path does not understand (for
+instance ``reduction``) requires ``backend="adv"`` and raises otherwise, so a
+silently ignored option is not possible.
+
 References
 ----------
 - D. Panici et al., *The DESC stellarator optimization code*, and the DESC
   ``jac_chunk_size`` memory option, https://github.com/PlasmaControl/DESC.
 - JAX documentation for :func:`jax.jacfwd`, :func:`jax.jacrev`,
   :func:`jax.lax.map` (the ``batch_size`` chunking argument).
+- adv-jax-math, https://pypi.org/project/adv-jax-math/ (optional backend).
 """
 
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import Callable
+from typing import Literal
 
 import jax
 import jax.numpy as jnp
@@ -51,11 +78,78 @@ __all__ = [
     "chunked_jacfwd",
     "chunked_jacrev",
     "chunked_jacobian",
+    "available_backends",
+    "default_backend",
 ]
+
+Backend = Literal["native", "adv", "auto"]
+_ENV_VAR = "SOLVAX_CHUNK_BACKEND"
+
+
+def _adv():
+    """Import the optional backend, with an actionable message if absent."""
+    try:
+        import adv_jax_math
+    except ImportError as exc:  # pragma: no cover - exercised by the extra
+        raise ImportError(
+            "backend='adv' requires the optional dependency adv-jax-math. "
+            "Install it with `pip install solvax[adv]`. Note that adv-jax-math "
+            "pins a narrower JAX range than SOLVAX supports, so installing it "
+            "may constrain your JAX version; the default backend='native' has "
+            "no such constraint."
+        ) from exc
+    return adv_jax_math
+
+
+def available_backends() -> tuple[str, ...]:
+    """Backends importable in this environment, in preference order."""
+    try:
+        import adv_jax_math  # noqa: F401
+    except ImportError:
+        return ("native",)
+    return ("adv", "native")
+
+
+def default_backend() -> str:
+    """The backend used when ``backend`` is not given.
+
+    ``native`` unless ``SOLVAX_CHUNK_BACKEND`` says otherwise, so that adding
+    the optional dependency to an environment never silently changes results
+    or performance of code that did not ask for it.
+    """
+    return os.environ.get(_ENV_VAR, "native")
+
+
+def _resolve_backend(backend: Backend | None) -> str:
+    name = default_backend() if backend is None else backend
+    if name == "auto":
+        return available_backends()[0]
+    if name not in ("native", "adv"):
+        raise ValueError(
+            f"unknown chunking backend {name!r}; expected "
+            "'native', 'adv', or 'auto'"
+        )
+    return name
+
+
+def _reject_adv_only(kwargs: dict, where: str) -> None:
+    """Fail loudly rather than ignore an option the native path cannot honour."""
+    if kwargs:
+        raise TypeError(
+            f"{where}() got unsupported keyword(s) {sorted(kwargs)} for "
+            "backend='native'. These are provided by the optional adv-jax-math "
+            "backend; pass backend='adv' (and `pip install solvax[adv]`) to "
+            "use them."
+        )
 
 
 def chunk_map(
-    fun: Callable, xs: jax.Array, *, chunk_size: int | None = None
+    fun: Callable,
+    xs: jax.Array,
+    *,
+    chunk_size: int | None = None,
+    backend: Backend | None = None,
+    **kwargs,
 ) -> jax.Array:
     """Map ``fun`` over the leading axis of ``xs`` in fixed-size chunks.
 
@@ -78,6 +172,9 @@ def chunk_map(
     Returns:
         The stacked results, leading axis equal to ``len(xs)``.
     """
+    if _resolve_backend(backend) == "adv":
+        return _adv().batch_vmap(fun, batch_size=chunk_size, **kwargs)(xs)
+    _reject_adv_only(kwargs, "chunk_map")
     if chunk_size is None:
         return jax.vmap(fun)(xs)
     return jax.lax.map(fun, xs, batch_size=int(chunk_size))
@@ -156,7 +253,12 @@ def _resolve_chunk(chunk_size, dim: int, output_size: int) -> int | None:
 
 
 def chunked_jacfwd(
-    fun: Callable, argnums: int = 0, *, chunk_size: int | str | None = "auto"
+    fun: Callable,
+    argnums: int = 0,
+    *,
+    chunk_size: int | str | None = "auto",
+    backend: Backend | None = None,
+    **kwargs,
 ) -> Callable:
     """Forward-mode Jacobian assembled in column chunks.
 
@@ -195,6 +297,11 @@ def chunked_jacfwd(
 
         out_size = int(jax.eval_shape(single, x).size)
         chunk = _resolve_chunk(chunk_size, n, out_size)
+        if _resolve_backend(backend) == "adv":
+            return _adv().batch_jacfwd(
+                single, 0, batch_size=chunk, **kwargs
+            )(x)
+        _reject_adv_only(kwargs, "chunked_jacfwd")
         cols = chunk_map(column, basis, chunk_size=chunk)
         # cols: (n, *out_shape) -> (*out_shape, *in_shape) to match jacfwd.
         return jax.tree.map(
@@ -205,7 +312,12 @@ def chunked_jacfwd(
 
 
 def chunked_jacrev(
-    fun: Callable, argnums: int = 0, *, chunk_size: int | str | None = "auto"
+    fun: Callable,
+    argnums: int = 0,
+    *,
+    chunk_size: int | str | None = "auto",
+    backend: Backend | None = None,
+    **kwargs,
 ) -> Callable:
     """Reverse-mode Jacobian assembled in row chunks.
 
@@ -244,6 +356,11 @@ def chunked_jacrev(
             return vjp(cotangent)[0]
 
         chunk = _resolve_chunk(chunk_size, m, x.size)
+        if _resolve_backend(backend) == "adv":
+            return _adv().batch_jacrev(
+                single, 0, batch_size=chunk, **kwargs
+            )(x)
+        _reject_adv_only(kwargs, "chunked_jacrev")
         rows = chunk_map(row, basis, chunk_size=chunk)
         # rows: (m, *in_shape) -> (*out_shape, *in_shape) to match jacrev.
         return rows.reshape(out_shape + in_shape)
@@ -257,6 +374,8 @@ def chunked_jacobian(
     *,
     mode: str = "rev",
     chunk_size: int | str | None = "auto",
+    backend: Backend | None = None,
+    **kwargs,
 ) -> Callable:
     """Memory-chunked Jacobian with forward/reverse/auto mode selection.
 
@@ -275,9 +394,11 @@ def chunked_jacobian(
         ``output_shape + input_shape``.
     """
     if mode == "fwd":
-        return chunked_jacfwd(fun, argnums, chunk_size=chunk_size)
+        return chunked_jacfwd(fun, argnums, chunk_size=chunk_size,
+                                  backend=backend, **kwargs)
     if mode == "rev":
-        return chunked_jacrev(fun, argnums, chunk_size=chunk_size)
+        return chunked_jacrev(fun, argnums, chunk_size=chunk_size,
+                                  backend=backend, **kwargs)
     if mode != "auto":
         raise ValueError(f"mode must be 'fwd', 'rev' or 'auto', got {mode!r}")
 
@@ -285,6 +406,7 @@ def chunked_jacobian(
         x = jnp.asarray(args[argnums])
         out = jax.eval_shape(lambda a: fun(*_sub(args, argnums, a)), x)
         builder = chunked_jacfwd if x.size <= out.size else chunked_jacrev
-        return builder(fun, argnums, chunk_size=chunk_size)(*args)
+        return builder(fun, argnums, chunk_size=chunk_size,
+                       backend=backend, **kwargs)(*args)
 
     return jacfun

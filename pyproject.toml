@@ -10,7 +10,7 @@ license = { text = "MIT" }
 authors = [{ name = "UW Plasma", email = "rogerio.jorge@wisc.edu" }]
 requires-python = ">=3.10"
 dynamic = ["version"]
-dependencies = ["jax", "equinox"]
+dependencies = ["equinox", "jax"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Science/Research",
@@ -26,6 +26,10 @@ Homepage = "https://github.com/uwplasma/SOLVAX"
 Documentation = "https://solvax.readthedocs.io"
 
 [project.optional-dependencies]
+# Optional chunking backend. Kept optional on purpose: adv-jax-math pins a
+# narrower JAX range than SOLVAX supports, and SOLVAX must not constrain the
+# JAX version of the codes that depend on it.
+adv = ["adv-jax-math>=1.1"]
 native = ["scipy"]
 dev = ["pytest", "pytest-cov", "pytest-xdist", "scipy", "numpy", "ruff"]
 bench = ["lineax", "scipy"]

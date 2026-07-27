@@ -75,6 +75,73 @@ single `vmap`; an integer uses batched `lax.map`, including internal handling
 of a short final chunk. This helper is useful for parameter scans and batched
 local physics even when no Jacobian is formed.
 
+## Backends
+
+Chunking has two interchangeable implementations, selected with `backend=`:
+
+| | `"native"` (default) | `"adv"` (optional) |
+|---|---|---|
+| dependency | JAX only | `adv-jax-math` |
+| JAX versions | whatever SOLVAX supports | narrower; see below |
+| in-chunk `reduction` | no | yes |
+| explicit `shard`/`mesh` | no | yes |
+
+The native backend is the default and always available. It is built only on
+`jax.vmap` and `jax.lax.map`, so it places **no constraint on which JAX version
+a downstream code may use** — a deliberate policy for a library that other
+solvers depend on.
+
+The optional backend wraps
+[`adv-jax-math`](https://pypi.org/project/adv-jax-math/) and adds capability the
+native path does not have. Install it with:
+
+```bash
+pip install solvax[adv]
+```
+
+Be aware that `adv-jax-math` currently requires `jax>=0.6.2` and excludes
+several later releases, which is narrower than the range SOLVAX itself
+supports; installing the extra therefore constrains your environment, which is
+why it is opt-in.
+
+Select per call, or set `SOLVAX_CHUNK_BACKEND` to change the default:
+
+```python
+import solvax as sx
+
+sx.chunked_jacfwd(f, chunk_size=16)                    # native
+sx.chunked_jacfwd(f, chunk_size=16, backend="adv")     # optional backend
+sx.chunked_jacfwd(f, chunk_size=16, backend="auto")    # adv if importable
+```
+
+Installing the extra never changes a default: `backend="auto"` is the only
+setting that prefers it, and options the native path cannot honour raise
+`TypeError` rather than being silently ignored.
+
+### In-chunk reduction
+
+The one capability worth reaching for the extra to get. `jax.lax.map` always
+materializes the stacked `(n, *out_shape)` result; when the caller only wants a
+reduction of it, that array is pure waste. The optional backend folds each
+chunk into an accumulator instead:
+
+```python
+import jax.numpy as jnp
+
+# stack all 256 outer products, then sum  -> 262 232 bytes of temporaries
+jnp.sum(sx.chunk_map(f, xs, chunk_size=8), axis=0)
+
+# fold each chunk into a running sum      ->  16 024 bytes
+sx.chunk_map(f, xs, chunk_size=8, backend="adv",
+             reduction=jnp.add, chunk_reduction=lambda y: jnp.sum(y, 0))
+```
+
+On the benchmark in `benchmarks/benchmark_chunk_backends.py` that is a
+**16.4x** reduction in compiled temporary memory on that problem and machine,
+with the two results agreeing to floating-point tolerance (1.5e-05 in float32;
+they are not bit-identical, since the reduction is associated differently). See `examples/26_chunked_jacobian_backends.py` for
+a runnable version.
+
 ## Numerical equivalence
 
 Chunking changes batching, not the JVP or VJP being evaluated. Results should
