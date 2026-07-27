@@ -74,7 +74,15 @@ jobs:
       - name: Reproduction driver smoke
         if: matrix.stack == 'current' && matrix.os == 'ubuntu-latest'
         run: python -m benchmarks.reproduce --quick
+      # Upload from the optional-backend job too, under its own flag. Without
+      # it codecov sees a single session from the `current` job, in which the
+      # adv-only branches never execute, and reports them as uncovered even
+      # though the adv job exercises them.
       - uses: codecov/codecov-action@v4
-        if: matrix.os == 'ubuntu-latest' && matrix.stack == 'current'
+        if: >-
+          matrix.os == 'ubuntu-latest' &&
+          (matrix.stack == 'current' || matrix.stack == 'adv')
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+          flags: ${{ matrix.stack }}
+          name: ubuntu-${{ matrix.python }}-${{ matrix.stack }}
