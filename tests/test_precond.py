@@ -21,6 +21,7 @@ from solvax import (
     kronecker_nkp,
     line_smoother,
     linear_solve,
+    low_rank_corrected,
     lu_factor_banded,
     lu_solve_banded,
     mixed_precision,
@@ -828,3 +829,117 @@ def test_dense_coarse_solve_rejects_a_batch_covering_every_axis():
         dense_coarse_solve(lambda v: v, (4, 4), batch_dims=2)
     with pytest.raises(ValueError, match="at least one grid axis"):
         dense_coarse_solve(lambda v: v, (4, 4), batch_dims=-1)
+
+
+# ---------------------------------------------------------------------------
+# low_rank_corrected: Woodbury correction around an existing preconditioner
+# ---------------------------------------------------------------------------
+
+
+def _split_operator(n=48, rank=3, seed=0):
+    """A structured ``A`` plus a rank-``k`` coupling, with the pieces kept apart."""
+    rng = np.random.default_rng(seed)
+    structured = np.diag(rng.uniform(2.0, 4.0, n))
+    structured += np.diag(rng.uniform(-0.6, -0.2, n - 1), 1)
+    structured += np.diag(rng.uniform(-0.6, -0.2, n - 1), -1)
+    columns = rng.standard_normal((n, rank))
+    extraction = rng.standard_normal((n, rank))
+    full = structured + columns @ extraction.T
+    return (
+        jnp.asarray(structured),
+        jnp.asarray(columns),
+        jnp.asarray(extraction),
+        jnp.asarray(full),
+    )
+
+
+def test_low_rank_corrected_is_the_exact_inverse_when_the_base_is_exact():
+    """Woodbury is an identity, not an approximation: exact in, exact out.
+
+    This is what lets the correction carry physics that must not be
+    approximated (an exactly conserved moment, an exactly imposed
+    constraint) while the cycle underneath stays inexact.
+    """
+    structured, columns, extraction, full = _split_operator()
+    exact_structured = jnp.linalg.inv(structured)
+    precond = low_rank_corrected(
+        lambda v: exact_structured @ v, columns, extraction
+    )
+
+    identity = jnp.eye(structured.shape[0])
+    applied = jax.vmap(precond, in_axes=1, out_axes=1)(identity)
+    np.testing.assert_allclose(
+        np.asarray(applied), np.asarray(jnp.linalg.inv(full)), rtol=0, atol=1e-10
+    )
+
+
+def test_low_rank_corrected_beats_ignoring_the_coupling():
+    """The point of the split: the base preconditioner never sees ``U V^T``."""
+    structured, columns, extraction, full = _split_operator()
+    exact_structured = jnp.linalg.inv(structured)
+    base = lambda v: exact_structured @ v  # noqa: E731 - inline for the comparison
+    corrected = low_rank_corrected(base, columns, extraction)
+
+    rng = np.random.default_rng(1)
+    rhs = jnp.asarray(rng.standard_normal(structured.shape[0]))
+    matvec = lambda v: full @ v  # noqa: E731
+
+    uncorrected = gmres(matvec, rhs, precond=base, rtol=1e-10, restart=20)
+    with_correction = gmres(matvec, rhs, precond=corrected, rtol=1e-10, restart=20)
+
+    assert int(with_correction.iterations) < int(uncorrected.iterations)
+    assert int(with_correction.iterations) <= 1  # exact inverse: one step
+    np.testing.assert_allclose(
+        np.asarray(full @ with_correction.x), np.asarray(rhs), rtol=0, atol=1e-8
+    )
+
+
+def test_low_rank_corrected_carries_an_inexact_base_preconditioner():
+    """With an inexact base the correction still removes the coupling exactly.
+
+    Preconditioning with the *structured* diagonal alone, the corrected
+    operator must equal what the same base achieves on ``A`` by itself:
+    the rank-``k`` part contributes no error of its own.
+    """
+    structured, columns, extraction, full = _split_operator()
+    diagonal = jnp.diag(structured)
+    base = jacobi(diagonal)
+    corrected = low_rank_corrected(base, columns, extraction)
+
+    rng = np.random.default_rng(2)
+    rhs = jnp.asarray(rng.standard_normal(structured.shape[0]))
+
+    coupled = gmres(lambda v: full @ v, rhs, precond=corrected, rtol=1e-10, restart=30)
+    structured_only = gmres(
+        lambda v: structured @ v, rhs, precond=base, rtol=1e-10, restart=30
+    )
+    assert coupled.converged and structured_only.converged
+    # The coupling costs at most a couple of extra iterations, not a regime change.
+    assert int(coupled.iterations) <= int(structured_only.iterations) + 2
+
+
+def test_low_rank_corrected_accepts_multidimensional_state():
+    """Factors carry a trailing rank axis over whatever shape the cycle uses."""
+    shape = (4, 3)
+    rng = np.random.default_rng(3)
+    scale = jnp.asarray(rng.uniform(2.0, 3.0, shape))
+    columns = jnp.asarray(rng.standard_normal((*shape, 2)))
+    extraction = jnp.asarray(rng.standard_normal((*shape, 2)))
+
+    def dense(u):
+        coupling = jnp.tensordot(extraction, u, axes=((0, 1), (0, 1)))
+        return scale * u + jnp.tensordot(columns, coupling, axes=((-1,), (0,)))
+
+    precond = low_rank_corrected(lambda v: v / scale, columns, extraction)
+    rhs = jnp.asarray(rng.standard_normal(shape))
+    np.testing.assert_allclose(
+        np.asarray(dense(precond(rhs))), np.asarray(rhs), rtol=0, atol=1e-10
+    )
+
+
+def test_low_rank_corrected_rejects_mismatched_factors():
+    base = lambda v: v  # noqa: E731
+    with pytest.raises(ValueError, match="same shape"):
+        low_rank_corrected(base, jnp.zeros((4, 2)), jnp.zeros((4, 3)))
+    with pytest.raises(ValueError, match="trailing rank axis"):
+        low_rank_corrected(base, jnp.zeros(4), jnp.zeros(4))

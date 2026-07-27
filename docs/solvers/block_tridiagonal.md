@@ -198,6 +198,15 @@ x_low = sx.block_thomas_truncated(
 )
 ```
 
+Both public entry points share this rule. `block_thomas_truncated` (stored
+bands) routes its windowed reverse mode through the same generated
+construction as `block_thomas_truncated_fn(..., params=...)`, handing the bands
+over as the parameter pytree, so `adjoint_window` has one meaning across the
+API and the two produce bitwise-identical gradients. Earlier releases closed
+the array path at the window with a leading-principal subsystem, which is a
+strictly weaker approximation; that closure is retained only as an ablation in
+the test suite.
+
 The rule is built as an *exact-window* adjoint, so most of it is exact and the
 single approximation is explicit. Writing $W=\min(K+w,N)$ for the retained rows
 and $M=\min(W+1,N)$ for the primal window:
@@ -227,8 +236,10 @@ and $M=\min(W+1,N)$ for the primal window:
 - **Tail size.** Under uniform inverse localization
   $\lVert (A^{-1})_{ji}\rVert\le C_A\rho^{|j-i|}$ {cite}`demko1984,benzi2013`,
   the primal decays away from the source and the adjoint away from the output,
-  and the row density is bilinear in the two, giving the doubled exponent: the
-  error is $O(\rho^{2w})$ for bounded generator sensitivity and
+  and each row cotangent is an outer product of the two, giving the doubled
+  exponent. The least-decayed of the three band terms is the lower block
+  $\bar L_j = -\lambda_j x_{j-1}^\top$, which sets the rate: the error is
+  $O(\rho^{2w})$ for bounded generator sensitivity and
   $O((K+w)^{s}\rho^{2w})$ when the row sensitivity grows like $(1+j)^{s}$ — the
   relevant case for kinetic operators whose collisional derivative scales with
   mode number. A spectral gap alone is **not** sufficient for a nonnormal
