@@ -39,6 +39,11 @@ The catalogue, roughly in order of increasing structure exploited:
 - :func:`galerkin_deflation` — balance a symmetric smoother around an
   adjoint-transfer Galerkin coarse correction, preserving the symmetry
   required by conjugate-gradient methods.
+- :func:`low_rank_corrected` — extend any preconditioner for ``A`` to
+  ``A + U V^T`` through the Sherman-Morrison-Woodbury identity, so a
+  small-rank global coupling (moment-restoring collision terms, a
+  constraint border, a null-space shift) is applied exactly while the
+  cycle only ever sees the structured part.
 - :func:`mixed_precision` — run any preconditioner in low precision;
   flexible GMRES tolerates the inexactness and the outer residual is
   still accumulated in working precision (Carson & Higham).
@@ -74,6 +79,8 @@ References
 - E. Carson & N. J. Higham, "Accelerating the solution of linear systems
   by iterative refinement in three precisions", SIAM J. Sci. Comput.
   40(2), A817 (2018) — low-precision inner solves, high-precision outer.
+- W. W. Hager, "Updating the inverse of a matrix", SIAM Review 31, 221
+  (1989) — the Sherman-Morrison-Woodbury identity and its history.
 - C. F. Van Loan & N. Pitsianis, "Approximation with Kronecker products",
   in *Linear Algebra for Large Scale and Real-Time Applications*, Kluwer
   (1993) — the rearrangement turning nearest-Kronecker-product
@@ -803,6 +810,106 @@ def galerkin_deflation(
         return fine + coarse - smoother(matvec(coarse))
 
     return apply
+
+
+class _LowRankCorrected(eqx.Module):
+    """Woodbury-corrected preconditioner with its precomputed factors."""
+
+    precond: MatVec
+    solved_columns: jax.Array  # M^-1 U, shape (*shape, k)
+    extraction: jax.Array  # V, shape (*shape, k)
+    capacitance_lu: jax.Array
+    capacitance_pivots: jax.Array
+    contract: tuple[int, ...] = eqx.field(static=True)
+
+    def __call__(self, vector: jax.Array) -> jax.Array:
+        base = self.precond(vector)
+        weights = jnp.tensordot(
+            self.extraction, base, axes=(self.contract, self.contract)
+        )
+        correction = lu_solve((self.capacitance_lu, self.capacitance_pivots), weights)
+        return base - jnp.tensordot(
+            self.solved_columns, correction, axes=((-1,), (0,))
+        )
+
+
+def low_rank_corrected(
+    precond: MatVec, columns: jax.Array, extraction: jax.Array
+) -> MatVec:
+    r"""Extend a preconditioner for ``A`` to one for ``A + U V^T``.
+
+    Many operators are a structured part plus a *small-rank* coupling that
+    destroys the structure: a moment-restoring collision operator whose
+    field-particle term is a handful of outer products, a constraint or
+    source border, a rank-one null-space shift, a few dense long-range
+    rows. Coarsening or relaxing the sum directly is hopeless — the
+    correction is global, so no local smoother is complementary to it, and
+    it has no coarse-grid analogue. Splitting it off instead leaves
+    multigrid (or any other builder here) facing only the structured part,
+    which is what it was designed for, while the coupling is applied
+    *exactly* through the Sherman-Morrison-Woodbury identity
+
+    .. math::
+
+        (A + U V^\top)^{-1} = A^{-1} - A^{-1} U
+            \left(I_k + V^\top A^{-1} U\right)^{-1} V^\top A^{-1}.
+
+    Substituting the approximate inverse ``M^{-1}`` for ``A^{-1}`` gives an
+    approximate inverse of ``A + U V^T`` that reproduces the exact inverse
+    whenever ``precond`` is exact, and otherwise inherits the quality of
+    ``precond`` on the structured part alone. The rank ``k`` enters only
+    through a ``k x k`` dense solve, so the correction is negligible next
+    to one cycle whenever ``k`` is small.
+
+    ``M^{-1}U`` and the LU of the ``k x k`` capacitance matrix
+    ``I_k + V^T M^{-1} U`` are formed once here, at build time; applying
+    the result costs one ``precond`` call, two contractions against the
+    factors, and one ``k x k`` triangular solve.
+
+    Args:
+        precond: callable ``v -> M^{-1} v`` approximating ``A^{-1}``.
+        columns: the left factor ``U``, shape ``(*shape, k)``, where
+            ``shape`` is the shape ``precond`` acts on (``(n,)`` for flat
+            vectors). Applying ``precond`` to each of the ``k`` columns is
+            vectorized with :func:`jax.vmap`.
+        extraction: the right factor ``V``, same shape as ``columns``, so
+            that the correction to ``A`` is ``sum_j U[..., j] V[..., j]^T``.
+
+    Returns:
+        A callable applying the Woodbury-corrected approximate inverse.
+
+    Raises:
+        ValueError: if the two factors have different shapes, or fewer than
+            two dimensions (a rank axis is required even when ``k == 1``).
+
+    Note:
+        The capacitance matrix is singular exactly when ``-1`` is an
+        eigenvalue of ``V^T M^{-1} U`` — with an exact ``precond`` that is
+        precisely the case where ``A + U V^T`` itself is singular. The
+        factorization is not pivoted away from that: build the correction
+        from a decomposition in which the sum is nonsingular.
+    """
+    columns = jnp.asarray(columns)
+    extraction = jnp.asarray(extraction)
+    if columns.shape != extraction.shape:
+        raise ValueError(
+            f"columns and extraction must have the same shape, got "
+            f"{columns.shape} and {extraction.shape}"
+        )
+    if columns.ndim < 2:
+        raise ValueError(
+            "columns and extraction need a trailing rank axis, so at least two "
+            f"dimensions; got shape {columns.shape}"
+        )
+
+    rank = columns.shape[-1]
+    contract = tuple(range(columns.ndim - 1))
+    solved_columns = jax.vmap(precond, in_axes=-1, out_axes=-1)(columns)
+    capacitance = jnp.eye(rank, dtype=solved_columns.dtype) + jnp.tensordot(
+        extraction, solved_columns, axes=(contract, contract)
+    )
+    lu, pivots = lu_factor(capacitance)
+    return _LowRankCorrected(precond, solved_columns, extraction, lu, pivots, contract)
 
 
 def mixed_precision(precond: MatVec, dtype=jnp.float32) -> MatVec:
