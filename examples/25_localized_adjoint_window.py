@@ -62,7 +62,7 @@ def main() -> None:
         rho = np.asarray(sx.localization_profile_fn(generator, N))
         finite = np.isfinite(rho)
         crossing = np.flatnonzero(finite & (rho < 1.0))
-        advised = sx.suggest_adjoint_window(generator, N, KEEP)
+        advised = sx.localization_crossover_window(generator, N, KEEP)
 
         def loss(p, w, bf=block_fn):
             y = sx.block_thomas_truncated_fn(

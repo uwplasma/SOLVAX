@@ -36,7 +36,7 @@ work-localized**, and arithmetic remains `O(N m^3)`.
 ```python
 import solvax as sx
 
-w = sx.suggest_adjoint_window(block_fn, n_blocks, keep_lowest=3)
+w = sx.localization_crossover_window(block_fn, n_blocks, keep_lowest=3)
 x_low = sx.block_thomas_truncated_fn(
     block_fn, n_blocks, rhs_low, keep_lowest=3, params=p, adjoint_window=w
 )
