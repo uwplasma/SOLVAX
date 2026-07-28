@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+## 0.11.0 - 2026-07-28
+
+### The residual diagnostic works on the exact-window path
+
+- `block_thomas_truncated_fn_with_residual` gains `params` and
+  `adjoint_window`. Supplying `params` selects the exact-window reverse rule
+  for the solution instead of taping the elimination; the residual comes back
+  from the *same* forward sweep, so asking for both no longer costs two.
+- Before this, a caller who wanted the Schur-system residual and a bounded
+  reverse pass had to run the elimination twice. Measured on a stellarator
+  drift-kinetic chain (`N_xi = 128`, `m = 81`) that cost 1.7x on a
+  forward-only solve --- the case where the residual is usually the only thing
+  wanted. It is now 18.0 -> 18.5 ms at unchanged memory.
+- At full window the solution and the residual are bitwise identical to the
+  taped path. The gradient goes from 90.6 to 50.6 ms and 41.6 to 33.2 MiB; at
+  the advised window, 9.4 MiB and flat in `N_xi`.
+- The residual is returned through `stop_gradient`. It is a diagnostic, and
+  the reverse rule ignores its cotangent --- which is sound only because that
+  cotangent is structurally zero. A test pins `d(residual)/dp == 0`.
+
+### Known limitation, now documented
+
+- The exact-window rule is a `custom_vjp`, so JAX cannot push **forward-mode**
+  autodiff through it: `jax.jacfwd` and `jax.jvp` raise rather than falling
+  back. Integrating it into a production solver made this concrete --- a code
+  whose gradients are reverse but whose derivative audits are forward must
+  keep an unwindowed path, and applying the window is a per-call-site choice
+  rather than a global switch. This is stated in the docstrings and in the
+  release notes; it is not new behaviour, only newly written down.
+
 ## 0.10.1 - 2026-07-28
 
 Corrections to 0.10.0. Nothing in the exact-window algorithm changed; what
