@@ -39,9 +39,28 @@ def _import_scipy_sparse():
     return sparse, sparse_linalg
 
 
+def _is_tracer(value) -> bool:
+    """Whether ``value`` is a JAX tracer, without depending on where it lives.
+
+    ``jax.core.Tracer`` is the documented check, but ``jax.core`` has been
+    shrinking toward private status across JAX releases and already resolves
+    into ``jax._src``. Using it while it exists and degrading to the tracer
+    protocol otherwise keeps this working across an upgrade that moves it,
+    instead of raising ``AttributeError`` from inside a guard whose whole job
+    is to produce a clear error.
+    """
+    tracer = getattr(jax, "core", None)
+    tracer = getattr(tracer, "Tracer", None) if tracer is not None else None
+    if tracer is not None:
+        return isinstance(value, tracer)
+    # A tracer carries an abstract value and no concrete buffer; a committed
+    # array carries both a shape and its data.
+    return hasattr(value, "aval") and not hasattr(value, "addressable_shards")
+
+
 def _check_not_traced(b, name: str) -> None:
     """Raise if ``b`` is a JAX tracer (i.e. we are under jit/vmap/grad)."""
-    if isinstance(b, jax.core.Tracer):
+    if _is_tracer(b):
         raise RuntimeError(
             f"solvax.native.{name} runs SciPy's SuperLU on the host and is "
             "not traceable: it must not be called under jit, vmap, or grad. "
