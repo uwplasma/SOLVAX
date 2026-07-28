@@ -56,6 +56,9 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
 addopts = "-ra"
+markers = [
+  "slow_examples: spawns a subprocess per example; what it checks is that the code runs, which is not platform-specific, so CI runs it on one OS only",
+]
 testpaths = ["tests"]
 pythonpath = ["src"]
 

@@ -71,7 +71,14 @@ jobs:
       # execute the README and the examples, the external-API contracts, and
       # the randomised property checks. Naming any of them again as a separate
       # step would run them a second time, serially, for no extra signal.
+      # Executing every example spawns one subprocess each. What that checks
+      # is that the code runs at all, which is not platform-specific, so one
+      # OS is enough --- and running it on the slower macOS runner as well was
+      # what pushed that job past its fifteen-minute limit.
       - run: pytest -n auto --cov --cov-report=xml
+        if: matrix.os == 'ubuntu-latest'
+      - run: pytest -n auto --cov --cov-report=xml -m "not slow_examples"
+        if: matrix.os != 'ubuntu-latest' 
       - name: Benchmark problem-suite verification
         if: matrix.stack == 'current'
         run: python -m benchmarks.benchmark_sweeps --verify

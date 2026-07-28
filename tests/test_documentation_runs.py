@@ -125,6 +125,7 @@ def _python_blocks(text: str) -> list[str]:
     return re.findall(r"```python\n(.*?)```", text, re.S)
 
 
+@pytest.mark.slow_examples
 @pytest.mark.parametrize("index", range(len(_python_blocks(README.read_text()))))
 def test_readme_snippet_runs(index: int, tmp_path: Path) -> None:
     block = _python_blocks(README.read_text())[index]
@@ -188,6 +189,7 @@ def test_localization_window_documented_fields_exist() -> None:
     assert advice.certified is False
 
 
+@pytest.mark.slow_examples
 @pytest.mark.parametrize(
     "script", sorted(p.name for p in EXAMPLES.glob("*.py")) if EXAMPLES.is_dir() else []
 )
