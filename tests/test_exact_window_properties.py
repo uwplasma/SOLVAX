@@ -277,3 +277,77 @@ def test_uniform_scaling_is_exact_at_every_window(seed, n_blocks):
 
     # J(s) = J(1)/s^2, so dJ/ds at s=1 is exactly -2 J(1).
     assert jnp.allclose(exact, -2.0 * loss(one, n_blocks), rtol=1e-12)
+
+
+# --------------------------------------------------------------------------
+# Generator invocation count
+#
+# The manuscript's complexity model quotes a constant: a differentiated solve
+# calls the row generator ``4N + W + K`` times against ``N`` for a forward-only
+# one. That number is the honest price of not taping -- rows are rebuilt rather
+# than stored -- and it is quoted in print, so a refactor that adds a sweep must
+# fail here rather than quietly making a published constant wrong.
+#
+# Counting has to happen at run time, not trace time. A plain Python counter in
+# the generator counts *tracings*, of which there are a handful regardless of
+# ``N``; ``jax.debug.callback`` fires once per scan iteration, which is what the
+# cost model is about.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("n_blocks", "keep_lowest", "window"),
+    [(24, 2, 6), (24, 2, 12), (48, 2, 6), (48, 2, 24), (24, 4, 6)],
+)
+def test_generator_call_count_matches_the_published_model(
+    n_blocks: int, keep_lowest: int, window: int
+) -> None:
+    m = 3
+    eye = jnp.eye(m)
+    calls = {"n": 0}
+
+    def bump(_):
+        calls["n"] += 1
+
+    def block_fn(params, j):
+        jax.debug.callback(bump, j)
+        return (
+            eye * 0.2 * (j > 0),
+            eye * (4.0 + params[0] * (1.0 + j)),
+            eye * 0.2 * (j < n_blocks - 1),
+        )
+
+    rhs_low = jnp.ones((keep_lowest, m))
+    p = jnp.array([0.7])
+
+    def count(fn):
+        calls["n"] = 0
+        jax.block_until_ready(fn())
+        return calls["n"]
+
+    forward = count(
+        lambda: sx.block_thomas_truncated_fn(
+            block_fn, n_blocks, rhs_low, keep_lowest, params=p, adjoint_window=window
+        )
+    )
+    assert forward == n_blocks, (
+        f"forward-only solve made {forward} generator calls, expected one per row"
+    )
+
+    differentiated = count(
+        lambda: jax.grad(
+            lambda q: jnp.sum(
+                sx.block_thomas_truncated_fn(
+                    block_fn, n_blocks, rhs_low, keep_lowest,
+                    params=q, adjoint_window=window,
+                )
+                ** 2
+            )
+        )(p)
+    )
+    expected = 4 * n_blocks + window + keep_lowest
+    assert differentiated == expected, (
+        f"differentiated solve made {differentiated} generator calls, model says "
+        f"4N + W + K = {expected}. If this change is intended, the constant in "
+        f"the complexity model has to move with it."
+    )

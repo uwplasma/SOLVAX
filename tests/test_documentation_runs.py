@@ -217,3 +217,22 @@ def test_example_run_lines_name_themselves() -> None:
             if not (ROOT / match).is_file():
                 wrong.append(f"{path.name} points at missing {match}")
     assert not wrong, "\n".join(wrong)
+
+
+def test_every_release_note_is_in_the_toctree() -> None:
+    """A notes file outside the toctree fails the docs build, not the tests.
+
+    ``sphinx -W`` treats "document isn't included in any toctree" as an error,
+    so writing release notes and forgetting the index entry breaks CI at the
+    build step -- after the whole test matrix has already run. Catching it here
+    turns a fifteen-minute round trip into a one-line failure.
+    """
+    docs = ROOT / "docs"
+    index = (docs / "index.md").read_text()
+    missing = sorted(
+        p.stem for p in docs.glob("release-notes-*.md") if p.stem not in index
+    )
+    assert not missing, (
+        f"release notes not listed in docs/index.md: {missing}. Add them to the "
+        f"Reference toctree or `sphinx -W` will fail the build."
+    )
