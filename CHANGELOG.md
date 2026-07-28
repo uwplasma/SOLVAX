@@ -2,6 +2,47 @@
 
 ## Unreleased
 
+## 0.10.0 - 2026-07-27
+
+### Uniform `adjoint_window` semantics across both entry points
+
+- `block_thomas_truncated` (stored bands) now routes its bands through the same
+  generated construction as `block_thomas_truncated_fn`, so both entry points
+  produce **bitwise-identical** finite-window gradients and `adjoint_window`
+  has one meaning across the API. Previously the array path closed the window
+  with a leading-principal subsystem, whose retained states are not blocks of
+  the full solution; that closure is kept privately and exercised only as an
+  ablation in the test suite.
+- This is a behaviour change at finite window for the stored-band path. Full
+  window is unaffected: it was exact before and is exact now.
+
+### The window advisor is explicitly an estimate
+
+- `suggest_adjoint_window` is renamed `localization_crossover_window` and now
+  returns a `LocalizationWindow` dataclass carrying the per-row transfer
+  profile, the crossover row, and `certified=False`. The name and the field
+  both say what the old name did not: the value is a diagnostic read off the
+  chain's transfer norms, not a window certified against a tolerance.
+- `suggest_adjoint_window` remains as a deprecated alias returning the integer
+  window, and will be removed in 0.12.0.
+- `check_localized_gradient` is added for confirming a chosen window against
+  the full-window gradient on a problem small enough to afford it.
+
+### Optional chunking backend
+
+- The `adv-jax-math` chunking backend is optional and selected at runtime;
+  `available_backends()` reports what is installed. SOLVAX pins no JAX version
+  and no Python version on its account, and the default install does not
+  require the extra. CI runs a dedicated job with the extra installed and
+  asserts the backend is actually reachable before exercising it.
+
+### Notes
+
+- 0.9.1 was published without a changelog entry, so two code states could both
+  report `0.9.1` while differing in their exact-window semantics and public
+  API. This release restores the correspondence between version and behaviour;
+  anything depending on the finite-window gradient should pin `>=0.10.0`.
+
 ## 0.9.0 - 2026-07-25
 
 ### Exact-window localized adjoint (breaking behaviour change)

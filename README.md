@@ -66,10 +66,14 @@ x_low = sx.block_thomas_truncated(lower, diag, upper, rhs[:3], keep_lowest=3)
 
 Differentiate a generated selected-head solve with respect to the compact
 parameters that build its rows, at retained state independent of the block
-count. The window is chosen up front from the chain's own localization profile:
+count. The window is estimated up front from the chain's own localization
+profile. The estimate is a diagnostic, not a certificate: it reports where the
+chain's transfer norms drop below one, and you should confirm the accuracy you
+need by widening the window until the gradient stops moving.
 
 ```python
-w = sx.suggest_adjoint_window(lambda k: block_fn(p, k), N, keep_lowest=3)
+adv = sx.localization_crossover_window(lambda k: block_fn(p, k), N, keep_lowest=3)
+w = adv.window  # adv.certified is False: this is an estimate, not a guarantee
 x_low = sx.block_thomas_truncated_fn(
     block_fn, N, rhs[:3], keep_lowest=3, params=p, adjoint_window=w
 )
