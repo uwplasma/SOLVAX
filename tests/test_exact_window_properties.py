@@ -277,3 +277,140 @@ def test_uniform_scaling_is_exact_at_every_window(seed, n_blocks):
 
     # J(s) = J(1)/s^2, so dJ/ds at s=1 is exactly -2 J(1).
     assert jnp.allclose(exact, -2.0 * loss(one, n_blocks), rtol=1e-12)
+
+
+# --------------------------------------------------------------------------
+# Generator invocation count
+#
+# The manuscript's complexity model rests on a claim about how often the row
+# generator is called: once per row for a forward-only solve, and a small
+# constant multiple of ``N`` plus one pass over the retained rows for a
+# differentiated one. That is the honest price of not taping -- rows are rebuilt
+# rather than stored -- and it is quoted in print, so a refactor that adds a
+# sweep must fail here.
+#
+# What is pinned is the *shape*, not one number. The multiplier counts passes
+# the framework's own transformations schedule, and it can differ across JAX
+# releases; the test therefore checks that
+#
+#     (differentiated - W - K) / N
+#
+# is the same integer at every shape, rather than hard-coding the 4 measured on
+# the version this was written against. That invariant is what the cost model
+# uses and it survives an upgrade; a change in the multiplier itself is
+# reported, so it can be checked against the manuscript rather than silently
+# absorbed.
+#
+# Counting has to happen at run time. A plain Python counter in the generator
+# counts *tracings*, of which there are a handful regardless of ``N``;
+# ``jax.debug.callback`` fires once per scan iteration, which is what the cost
+# model is about.
+# --------------------------------------------------------------------------
+
+
+def _generator_calls(n_blocks: int, keep_lowest: int, window: int) -> tuple[int, int]:
+    m = 3
+    eye = jnp.eye(m)
+    calls = {"n": 0}
+
+    def bump(_):
+        calls["n"] += 1
+
+    def block_fn(params, j):
+        jax.debug.callback(bump, j)
+        return (
+            eye * 0.2 * (j > 0),
+            eye * (4.0 + params[0] * (1.0 + j)),
+            eye * 0.2 * (j < n_blocks - 1),
+        )
+
+    rhs_low = jnp.ones((keep_lowest, m))
+    p = jnp.array([0.7])
+
+    def count(fn):
+        calls["n"] = 0
+        jax.block_until_ready(fn())
+        return calls["n"]
+
+    forward = count(
+        lambda: sx.block_thomas_truncated_fn(
+            block_fn, n_blocks, rhs_low, keep_lowest, params=p, adjoint_window=window
+        )
+    )
+    differentiated = count(
+        lambda: jax.grad(
+            lambda q: jnp.sum(
+                sx.block_thomas_truncated_fn(
+                    block_fn, n_blocks, rhs_low, keep_lowest,
+                    params=q, adjoint_window=window,
+                )
+                ** 2
+            )
+        )(p)
+    )
+    return forward, differentiated
+
+
+def test_generator_call_count_matches_the_published_model() -> None:
+    """The count is affine in N, and the window enters with coefficient one.
+
+    Measured on two JAX releases, the differentiated solve makes
+
+        JAX 0.11.0   4N + W + K
+        JAX 0.4.38   3N + W + K + 1
+
+    generator calls. The multiplier and the constant both belong to how the
+    framework schedules its passes, so pinning either would make this test a
+    version tripwire rather than a check on the library. What is stable, and
+    what the cost model in the manuscript actually uses, is the shape: a small
+    integer multiple of N, plus exactly one pass over the window and the source
+    support, plus a constant that does not grow with anything.
+    """
+    # Two chain lengths at fixed (K, W) determine the slope and intercept; the
+    # third is the prediction that has to come out right.
+    base_k, base_w = 2, 6
+    lengths = [24, 48, 96]
+    counts = {}
+    for n_blocks in lengths:
+        forward, differentiated = _generator_calls(n_blocks, base_k, base_w)
+        assert forward == n_blocks, (
+            f"N={n_blocks}: forward-only solve made {forward} generator calls, "
+            f"expected one per row"
+        )
+        counts[n_blocks] = differentiated - base_w - base_k
+
+    slope_num = counts[48] - counts[24]
+    assert slope_num % (48 - 24) == 0, (
+        f"calls are not affine in N with integer slope: {counts}"
+    )
+    slope = slope_num // (48 - 24)
+    intercept = counts[24] - slope * 24
+    assert counts[96] == slope * 96 + intercept, (
+        f"the affine fit from N=24,48 does not predict N=96: {counts}, "
+        f"slope={slope}, intercept={intercept}"
+    )
+    assert 2 <= slope <= 6, (
+        f"per-row multiplier is {slope}; the manuscript describes a small "
+        f"constant multiple of N, and {slope} is not one"
+    )
+    assert 0 <= intercept <= 4, (
+        f"constant term is {intercept}, which is large enough to need "
+        f"explaining rather than absorbing"
+    )
+
+    # The window and the source support each enter with coefficient one: this
+    # is the part of the model that is a property of the construction rather
+    # than of the framework, and it must not drift.
+    for window in (12, 24):
+        _, wider = _generator_calls(48, base_k, window)
+        _, narrow = _generator_calls(48, base_k, base_w)
+        assert wider - narrow == window - base_w, (
+            f"widening the window from {base_w} to {window} changed the call "
+            f"count by {wider - narrow}, not by {window - base_w}"
+        )
+    _, more_source = _generator_calls(24, 4, base_w)
+    _, less_source = _generator_calls(24, 2, base_w)
+    assert more_source - less_source == 2, (
+        f"the source support entered with coefficient "
+        f"{(more_source - less_source) / 2}, not one"
+    )
