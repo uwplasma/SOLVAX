@@ -352,30 +352,65 @@ def _generator_calls(n_blocks: int, keep_lowest: int, window: int) -> tuple[int,
 
 
 def test_generator_call_count_matches_the_published_model() -> None:
-    shapes = [(24, 2, 6), (24, 2, 12), (48, 2, 6), (48, 2, 24), (96, 2, 6), (24, 4, 6)]
-    multipliers = {}
-    for n_blocks, keep_lowest, window in shapes:
-        forward, differentiated = _generator_calls(n_blocks, keep_lowest, window)
+    """The count is affine in N, and the window enters with coefficient one.
+
+    Measured on two JAX releases, the differentiated solve makes
+
+        JAX 0.11.0   4N + W + K
+        JAX 0.4.38   3N + W + K + 1
+
+    generator calls. The multiplier and the constant both belong to how the
+    framework schedules its passes, so pinning either would make this test a
+    version tripwire rather than a check on the library. What is stable, and
+    what the cost model in the manuscript actually uses, is the shape: a small
+    integer multiple of N, plus exactly one pass over the window and the source
+    support, plus a constant that does not grow with anything.
+    """
+    # Two chain lengths at fixed (K, W) determine the slope and intercept; the
+    # third is the prediction that has to come out right.
+    base_k, base_w = 2, 6
+    lengths = [24, 48, 96]
+    counts = {}
+    for n_blocks in lengths:
+        forward, differentiated = _generator_calls(n_blocks, base_k, base_w)
         assert forward == n_blocks, (
             f"N={n_blocks}: forward-only solve made {forward} generator calls, "
             f"expected one per row"
         )
-        excess = differentiated - window - keep_lowest
-        assert excess % n_blocks == 0, (
-            f"N={n_blocks} W={window} K={keep_lowest}: {differentiated} calls is "
-            f"not N*k + W + K for integer k; the cost model in the manuscript "
-            f"assumes it is"
-        )
-        multipliers[(n_blocks, keep_lowest, window)] = excess // n_blocks
+        counts[n_blocks] = differentiated - base_w - base_k
 
-    distinct = set(multipliers.values())
-    assert len(distinct) == 1, (
-        f"the per-row multiplier is not constant across shapes: {multipliers}. "
-        f"The manuscript quotes a single constant."
+    slope_num = counts[48] - counts[24]
+    assert slope_num % (48 - 24) == 0, (
+        f"calls are not affine in N with integer slope: {counts}"
     )
-    (k,) = distinct
-    assert 2 <= k <= 6, (
-        f"per-row multiplier is {k}; the manuscript describes a small constant "
-        f"multiple of N, and {k} is not one. Either the implementation changed "
-        f"or the model needs rewriting."
+    slope = slope_num // (48 - 24)
+    intercept = counts[24] - slope * 24
+    assert counts[96] == slope * 96 + intercept, (
+        f"the affine fit from N=24,48 does not predict N=96: {counts}, "
+        f"slope={slope}, intercept={intercept}"
+    )
+    assert 2 <= slope <= 6, (
+        f"per-row multiplier is {slope}; the manuscript describes a small "
+        f"constant multiple of N, and {slope} is not one"
+    )
+    assert 0 <= intercept <= 4, (
+        f"constant term is {intercept}, which is large enough to need "
+        f"explaining rather than absorbing"
+    )
+
+    # The window and the source support each enter with coefficient one: this
+    # is the part of the model that is a property of the construction rather
+    # than of the framework, and it must not drift.
+    for window in (12, 24):
+        _, wider = _generator_calls(48, base_k, window)
+        _, narrow = _generator_calls(48, base_k, base_w)
+        assert wider - narrow == window - base_w, (
+            f"widening the window from {base_w} to {window} changed the call "
+            f"count by {wider - narrow}, not by {window - base_w}"
+        )
+    _, more_source = _generator_calls(24, 4, base_w)
+    _, less_source = _generator_calls(24, 2, base_w)
+    assert more_source - less_source == 2, (
+        f"the source support entered with coefficient "
+        f"{(more_source - less_source) / 2}, not one"
     )
