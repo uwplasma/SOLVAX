@@ -1298,6 +1298,74 @@ def _leading_principal_params_bar(
 _truncated_fn_bounded.defvjp(_truncated_fn_fwd, _truncated_fn_bwd)
 
 
+@partial(jax.custom_vjp, nondiff_argnums=(0, 1, 3, 4, 6))
+def _truncated_fn_bounded_with_residual(
+    block_fn,
+    n_blocks: int,
+    params,
+    keep_lowest: int,
+    adjoint_window: int,
+    rhs_low: jax.Array,
+    residual_rhs_index,
+):
+    """Exact-window solve that also reports the residual of its own sweep.
+
+    The residual is a by-product of factors the forward elimination already
+    forms, so it costs no extra sweep. It is *not* differentiated: the reverse
+    rule below returns cotangents from the solution alone, which is sound only
+    because the public wrapper hands the residual back through
+    ``stop_gradient``, making its incoming cotangent structurally zero.
+    """
+    solution, lus, pivs, sigmas, lowers = _block_thomas_truncated_fn_state(
+        lambda j: block_fn(params, j), n_blocks, rhs_low, keep_lowest
+    )
+    residual = _residual_from_state(
+        solution, lus, pivs, sigmas, lowers, rhs_low, residual_rhs_index
+    )
+    return solution, residual
+
+
+def _truncated_fn_residual_fwd(
+    block_fn, n_blocks, params, keep_lowest, adjoint_window, rhs_low,
+    residual_rhs_index,
+):
+    _, primal_window = _window_lengths(n_blocks, keep_lowest, adjoint_window)
+    x_window, lus, pivs, sigmas, lowers = _block_thomas_selected_fn_state(
+        lambda j: block_fn(params, j),
+        n_blocks,
+        rhs_low,
+        keep_lowest,
+        primal_window,
+    )
+    residual = _residual_from_state(
+        x_window[:keep_lowest],
+        lus[:keep_lowest],
+        pivs[:keep_lowest],
+        sigmas[:keep_lowest],
+        lowers[:keep_lowest],
+        rhs_low,
+        residual_rhs_index,
+    )
+    return (x_window[:keep_lowest], residual), (params, rhs_low, x_window)
+
+
+def _truncated_fn_residual_bwd(
+    block_fn, n_blocks, keep_lowest, adjoint_window, residual_rhs_index,
+    residuals, cotangents,
+):
+    solution_cotangent, _ = cotangents  # the residual's cotangent is zero
+    return _truncated_fn_bwd(
+        block_fn, n_blocks, keep_lowest, adjoint_window, residuals,
+        solution_cotangent,
+    )
+
+
+_truncated_fn_bounded_with_residual.defvjp(
+    _truncated_fn_residual_fwd, _truncated_fn_residual_bwd
+)
+
+
+
 def block_thomas_truncated_fn(
     block_fn: Callable[..., tuple[jax.Array, jax.Array, jax.Array]],
     n_blocks: int,
@@ -1356,24 +1424,16 @@ def block_thomas_truncated_fn(
     return solution
 
 
-def block_thomas_truncated_fn_with_residual(
-    block_fn: Callable[[jax.Array], tuple[jax.Array, jax.Array, jax.Array]],
-    n_blocks: int,
-    rhs_low: jax.Array,
-    keep_lowest: int,
-    *,
-    residual_rhs_index: int | None = None,
-) -> tuple[jax.Array, jax.Array]:
-    """Return the generated truncated solution and its Schur-system RMS residual.
+def _residual_from_state(solution, lus, pivs, sigmas, lowers, rhs_low,
+                         residual_rhs_index):
+    """RMS residual of the Schur system, from factors the sweep already formed.
 
-    The residual is evaluated from the retained pivoted LU factors as
-    ``L @ (U @ x) - P @ rhs``. It therefore includes the eliminated high-mode
-    tail without reconstructing another solution block or materializing the
-    original diagonal band.
+    Evaluates ``L @ (U @ x) - P @ rhs`` on the retained rows. The eliminated
+    tail is already folded into ``sigmas``, so this measures the whole system
+    without reconstructing a block above the window or materializing a band.
+    Shared by both entry points so the diagnostic means the same thing on the
+    taped and the exact-window paths.
     """
-    solution, lus, pivs, sigmas, lowers = _block_thomas_truncated_fn_state(
-        block_fn, n_blocks, rhs_low, keep_lowest
-    )
     effective_rhs = sigmas
     effective_rhs = effective_rhs.at[1:].add(
         -jnp.einsum("kij,kj...->ki...", lowers[1:], solution[:-1])
@@ -1397,10 +1457,68 @@ def block_thomas_truncated_fn_with_residual(
         permutation = jax.lax.linalg.lu_pivots_to_permutation(piv, size)
         return lower @ (upper @ value) - rhs[permutation]
 
-    residual = jax.vmap(factor_residual)(
-        lus, pivs, residual_solution, residual_rhs
+    residual = jax.vmap(factor_residual)(lus, pivs, residual_solution, residual_rhs)
+    return jnp.linalg.norm(residual) / jnp.sqrt(residual.size)
+
+
+def block_thomas_truncated_fn_with_residual(
+    block_fn,
+    n_blocks: int,
+    rhs_low: jax.Array,
+    keep_lowest: int,
+    *,
+    params=None,
+    adjoint_window=None,
+    residual_rhs_index: int | None = None,
+) -> tuple[jax.Array, jax.Array]:
+    """Return the generated truncated solution and its Schur-system RMS residual.
+
+    The residual is evaluated from the retained pivoted LU factors as
+    ``L @ (U @ x) - P @ rhs``. It therefore includes the eliminated high-mode
+    tail without reconstructing another solution block or materializing the
+    original diagonal band.
+
+    Args:
+        block_fn: generator of row ``j``. Takes ``(j)`` when ``params`` is
+            ``None`` and ``(params, j)`` otherwise.
+        n_blocks: chain length.
+        rhs_low: right-hand side on the leading ``keep_lowest`` blocks.
+        keep_lowest: number of leading blocks returned.
+        params: compact parameters the rows are generated from. Supplying them
+            selects the exact-window reverse rule of
+            :func:`block_thomas_truncated_fn` for the solution, instead of
+            taping the elimination, and requires ``adjoint_window``.
+        adjoint_window: retained adjoint rows beyond ``keep_lowest``. Accepts an
+            integer or a :class:`LocalizationWindow`. ``adjoint_window >=
+            n_blocks`` retains every row and is exact.
+        residual_rhs_index: which right-hand-side column the residual measures.
+
+    Returns:
+        ``(solution, residual)``. The residual is a diagnostic and carries no
+        derivative: it is returned through ``stop_gradient`` so that
+        differentiating a function of it yields zero rather than a wrong
+        number. Differentiate the solution.
+    """
+    if params is None:
+        solution, lus, pivs, sigmas, lowers = _block_thomas_truncated_fn_state(
+            block_fn, n_blocks, rhs_low, keep_lowest
+        )
+        residual = _residual_from_state(
+            solution, lus, pivs, sigmas, lowers, rhs_low, residual_rhs_index
+        )
+        return solution, residual
+
+    if adjoint_window is None:
+        raise ValueError("params requires a non-negative adjoint_window")
+    window = _as_window(adjoint_window)
+    if window < 0:
+        raise ValueError("params requires a non-negative adjoint_window")
+
+    solution, residual = _truncated_fn_bounded_with_residual(
+        block_fn, n_blocks, params, keep_lowest, window, rhs_low,
+        residual_rhs_index,
     )
-    return solution, jnp.linalg.norm(residual) / jnp.sqrt(residual.size)
+    return solution, jax.lax.stop_gradient(residual)
 
 
 def localization_profile_fn(
