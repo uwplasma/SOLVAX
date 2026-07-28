@@ -11,6 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+import solvax
 from solvax import (
     cyclic_tridiagonal_solve,
     tridiagonal_solve,
@@ -369,3 +370,36 @@ def test_cyclic_rejects_ambiguous_or_mismatched_shapes():
     lower, diag, upper, _ = make_tridiag(4, (2,))
     with pytest.raises(ValueError, match="must begin"):
         cyclic_tridiagonal_solve(lower, diag, upper, jnp.ones((4, 3)))
+
+
+def test_degenerate_shapes_are_handled_rather_than_crashing():
+    """The corners: an empty system, a one-row system, a dtype mismatch.
+
+    These were the only uncovered lines in the module. They are guards, which
+    is exactly the code that rots unnoticed --- nothing exercises them until a
+    caller hits one, and then it fails in a way that looks like a solver bug.
+    """
+    # An empty right-hand side must return an empty solution and diagnostics
+    # of the right shape rather than raising from inside the sweep.
+    empty = solvax.tridiagonal_solve_checked(
+        jnp.zeros((0, 2)), jnp.ones((0, 2)), jnp.zeros((0, 2)), jnp.zeros((0, 2))
+    )
+    assert empty.solution.shape == (0, 2)
+    assert empty.diagnostics.well_conditioned.shape == (2,)
+    assert bool(jnp.all(empty.diagnostics.well_conditioned))
+
+    # A single row is a scalar divide, with no elimination to do.
+    one = solvax.tridiagonal_solve(
+        jnp.zeros((1, 1)), jnp.full((1, 1), 4.0), jnp.zeros((1, 1)), jnp.ones((1, 1))
+    )
+    assert jnp.allclose(one, 0.25)
+
+    # Two rows: below the length at which any fused backend is worth using.
+    two = solvax.tridiagonal_solve(
+        jnp.asarray([[0.0], [1.0]]),
+        jnp.asarray([[4.0], [4.0]]),
+        jnp.asarray([[1.0], [0.0]]),
+        jnp.asarray([[1.0], [1.0]]),
+    )
+    dense = jnp.asarray([[4.0, 1.0], [1.0, 4.0]])
+    assert jnp.allclose(two.ravel(), jnp.linalg.solve(dense, jnp.ones(2)))
