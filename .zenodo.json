@@ -17,5 +17,12 @@
     "preconditioning",
     "mixed precision",
     "plasma physics"
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "10.5281/zenodo.21651844",
+      "relation": "isVersionOf",
+      "scheme": "doi"
+    }
   ]
 }

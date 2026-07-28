@@ -1,5 +1,7 @@
 # SOLVAX
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21651844.svg)](https://doi.org/10.5281/zenodo.21651844)
+
 [![tests](https://github.com/uwplasma/SOLVAX/actions/workflows/tests.yml/badge.svg)](https://github.com/uwplasma/SOLVAX/actions/workflows/tests.yml)
 [![codecov](https://codecov.io/gh/uwplasma/SOLVAX/branch/main/graph/badge.svg)](https://codecov.io/gh/uwplasma/SOLVAX)
 [![PyPI](https://img.shields.io/pypi/v/solvax)](https://pypi.org/project/solvax/)

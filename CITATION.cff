@@ -6,6 +6,7 @@ authors:
     given-names: Rogerio
     email: rogerio.jorge@wisc.edu
     affiliation: University of Wisconsin-Madison
+doi: 10.5281/zenodo.21651844
 repository-code: "https://github.com/uwplasma/SOLVAX"
 license: MIT
 type: software
