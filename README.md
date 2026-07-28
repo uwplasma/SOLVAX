@@ -16,8 +16,15 @@ Schur elimination with truncated storage), preconditioned and recycled Krylov
 methods, physics-agnostic preconditioners (coarse-operator LU, semicoarsened
 geometric and p-multigrid, Kronecker approximations, symmetric additive and
 line smoothers),
-mixed-precision iterative refinement, and implicit differentiation of every solve — all
-jit/vmap/grad-transparent, on CPU and GPU.
+mixed-precision iterative refinement, and implicit differentiation of every solve —
+traceable under `jit`, `vmap` and `grad`, on CPU and GPU.
+
+Two documented exceptions, because "transparent to every transform" would not be
+true: the exact-window reverse rule is a `custom_vjp`, so `jax.jacfwd` and
+`jax.jvp` raise on it rather than falling back to the taped path (pass the full
+window, or differentiate the untruncated entry point, when forward mode is what
+you need); and `solvax.native` runs SciPy's SuperLU on the host, so it refuses
+to be traced at all and says so.
 
 It complements general JAX solver libraries with block-structured direct
 elimination, coarse-operator and multigrid preconditioning, and Krylov
