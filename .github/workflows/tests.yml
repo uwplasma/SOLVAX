@@ -67,15 +67,11 @@ jobs:
           python -c "from solvax.autodiff import available_backends;
           assert 'adv' in available_backends(), available_backends();
           print('backends:', available_backends())"
+      # This collects all of tests/, which already includes the suites that
+      # execute the README and the examples, the external-API contracts, and
+      # the randomised property checks. Naming any of them again as a separate
+      # step would run them a second time, serially, for no extra signal.
       - run: pytest -n auto --cov --cov-report=xml
-      # Execute the README snippets and every example, not merely lint them.
-      # Linting passes on a gradient that differentiates a closed-over
-      # constant, on a call that raises TypeError, and on a docstring naming a
-      # field that does not exist; all three shipped before this ran.
-      - run: pytest tests/test_documentation_runs.py -q
-      # The seam tests: these fail loudly when a JAX upgrade moves something
-      # we depend on, instead of letting a solve or a benchmark drift.
-      - run: pytest tests/test_external_api_contract.py tests/test_exact_window_properties.py -q
       - name: Benchmark problem-suite verification
         if: matrix.stack == 'current'
         run: python -m benchmarks.benchmark_sweeps --verify
