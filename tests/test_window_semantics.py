@@ -20,6 +20,7 @@ from solvax import (
     LocalizationWindow,
     block_thomas_truncated,
     block_thomas_truncated_fn,
+    block_thomas_truncated_fn_with_residual,
     check_localized_gradient,
     localization_crossover_window,
 )
@@ -289,4 +290,116 @@ def test_non_integral_window_is_rejected():
     with pytest.raises(TypeError, match="__index__"):
         block_thomas_truncated(
             *bands, jnp.ones((keep, m)), keep_lowest=keep, adjoint_window=2.5
+        )
+
+
+def _residual_chain(n_blocks, m):
+    def block_fn(p, j):
+        eye = jnp.eye(m)
+        return (
+            eye * 0.3 * (j > 0),
+            eye * (4.0 + p[0] * (1.0 + j)),
+            eye * 0.3 * (j < n_blocks - 1),
+        )
+
+    return block_fn
+
+
+def test_residual_entry_point_matches_taped_path_at_full_window():
+    """The residual diagnostic must mean the same thing on both paths.
+
+    ``block_thomas_truncated_fn_with_residual`` gained a ``params`` path so the
+    diagnostic survives when the solve is differentiated by the exact-window
+    rule. At full window that rule is exact, so both the solution and the
+    residual must come back bitwise identical to the taped path.
+    """
+    n_blocks, m, keep = 16, 3, 2
+    block_fn = _residual_chain(n_blocks, m)
+    params = jnp.array([0.6])
+    rhs = jnp.zeros((keep, m, 2)).at[1, :, 0].set(1.0)
+
+    x_taped, r_taped = block_thomas_truncated_fn_with_residual(
+        lambda j: block_fn(params, j), n_blocks, rhs, keep, residual_rhs_index=0
+    )
+    x_exact, r_exact = block_thomas_truncated_fn_with_residual(
+        block_fn, n_blocks, rhs, keep,
+        params=params, adjoint_window=n_blocks, residual_rhs_index=0,
+    )
+    assert jnp.array_equal(x_taped, x_exact)
+    assert jnp.array_equal(r_taped, r_exact)
+
+
+def test_residual_entry_point_gradient_matches_at_full_window():
+    n_blocks, m, keep = 16, 3, 2
+    block_fn = _residual_chain(n_blocks, m)
+    params = jnp.array([0.6])
+    rhs = jnp.zeros((keep, m, 2)).at[1, :, 0].set(1.0)
+
+    def taped_loss(p):
+        x, _ = block_thomas_truncated_fn_with_residual(
+            lambda j: block_fn(p, j), n_blocks, rhs, keep, residual_rhs_index=0
+        )
+        return jnp.sum(x**2)
+
+    def exact_loss(p):
+        x, _ = block_thomas_truncated_fn_with_residual(
+            block_fn, n_blocks, rhs, keep,
+            params=p, adjoint_window=n_blocks, residual_rhs_index=0,
+        )
+        return jnp.sum(x**2)
+
+    g_taped = jax.grad(taped_loss)(params)
+    g_exact = jax.grad(exact_loss)(params)
+    assert jnp.allclose(g_taped, g_exact, rtol=1e-12, atol=1e-14)
+    assert jnp.any(g_exact != 0.0)
+
+
+def test_residual_carries_no_derivative():
+    """The residual is a diagnostic; the reverse rule ignores its cotangent.
+
+    That is only sound because the wrapper detaches it. If the detachment were
+    removed, this would silently return a wrong number rather than zero.
+    """
+    n_blocks, m, keep = 12, 2, 2
+    block_fn = _residual_chain(n_blocks, m)
+    params = jnp.array([0.5])
+    rhs = jnp.zeros((keep, m, 2)).at[1, :, 0].set(1.0)
+
+    def residual_only(p):
+        _, r = block_thomas_truncated_fn_with_residual(
+            block_fn, n_blocks, rhs, keep,
+            params=p, adjoint_window=4, residual_rhs_index=0,
+        )
+        return r
+
+    assert jnp.array_equal(jax.grad(residual_only)(params), jnp.zeros_like(params))
+
+
+def test_residual_entry_point_accepts_localization_window():
+    n_blocks, m, keep = 12, 2, 2
+    block_fn = _residual_chain(n_blocks, m)
+    params = jnp.array([0.5])
+    rhs = jnp.zeros((keep, m, 2)).at[1, :, 0].set(1.0)
+    advice = localization_crossover_window(
+        lambda j: block_fn(params, j), n_blocks, keep_lowest=keep
+    )
+    x_record, r_record = block_thomas_truncated_fn_with_residual(
+        block_fn, n_blocks, rhs, keep,
+        params=params, adjoint_window=advice, residual_rhs_index=0,
+    )
+    x_int, r_int = block_thomas_truncated_fn_with_residual(
+        block_fn, n_blocks, rhs, keep,
+        params=params, adjoint_window=advice.window, residual_rhs_index=0,
+    )
+    assert jnp.array_equal(x_record, x_int)
+    assert jnp.array_equal(r_record, r_int)
+
+
+def test_residual_entry_point_requires_a_window_with_params():
+    n_blocks, m, keep = 8, 2, 2
+    block_fn = _residual_chain(n_blocks, m)
+    rhs = jnp.zeros((keep, m, 2)).at[1, :, 0].set(1.0)
+    with pytest.raises(ValueError, match="adjoint_window"):
+        block_thomas_truncated_fn_with_residual(
+            block_fn, n_blocks, rhs, keep, params=jnp.array([0.5])
         )
