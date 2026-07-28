@@ -38,15 +38,24 @@ crossover is typically far faster than geometric, so a few rows beyond it often
 buy several orders of magnitude. The honest way to use it:
 
 ```python
-adv = sx.localization_crossover_window(generator, n_blocks, keep_lowest=3)
-w = adv.window          # a starting point
-adv.certified           # False, always: this is a diagnostic
-adv.profile             # the per-row factors it was read from
+advice = sx.localization_crossover_window(generator, n_blocks, keep_lowest=3)
+advice.window           # a starting point
+advice.certified        # False, always: this is a diagnostic
+advice.crossover_row    # the row where the transfer norms drop below one
+advice.primal_profile   # the per-row factors it was read from
+advice.localized        # whether the profile fell below one at all
 ```
 
-then widen `w` until the gradient stops moving. On a problem small enough to
-afford the comparison, `check_localized_gradient` does that check against the
-full-window gradient directly.
+The record can be passed straight back to the solver as `adjoint_window`, or
+unpacked with `.window`.
+
+Then widen the window until the gradient stops moving. `check_localized_gradient`
+automates exactly that step: it compares the gradient at the window under test
+against the gradient at a *wider* window, `window + delta`, and reports the
+relative movement. It is a convergence check, not a bound, and not a comparison
+against the full window --- which would usually cost more than the calculation
+being checked. What is guaranteed by construction is that the full window is
+exact, so widening until the movement stops is the honest way to choose.
 
 `suggest_adjoint_window` still works, returns the plain integer, and warns. It
 will be removed in 0.12.0.

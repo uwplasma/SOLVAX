@@ -15,5 +15,5 @@ keywords:
   - automatic differentiation
   - adjoint methods
   - plasma physics
-version: 0.10.0
-date-released: 2026-07-27
+version: 0.10.1
+date-released: 2026-07-28

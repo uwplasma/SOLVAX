@@ -7,8 +7,9 @@ guarantees:
 * the selected forward blocks are blocks of the *full* solution;
 * the source cotangent is exact at every window, including ``w = 0``;
 * a parameter supported inside the window is differentiated exactly;
-* the global parameter gradient converges to the exact one, and the window it
-  needs is read off the chain's own localization profile before the solve.
+* the global parameter gradient converges to the exact one, and a starting
+  window can be estimated from the chain's own localization profile before the
+  solve --- an estimate to be confirmed by widening, not a certificate.
 
 The chain is modelled on a Legendre-mode kinetic operator: a coupling that does
 not grow with the row index against a diagonal that grows like ``nu k(k+1)``.
@@ -16,7 +17,7 @@ Such a chain is *not* localized at low ``k``, which is why a single decay rate
 fitted to the leading rows is misleading and the per-row profile is used
 instead.
 
-Run:  python examples/12_localized_adjoint_window.py
+Run:  python examples/25_localized_adjoint_window.py
 """
 
 from __future__ import annotations
@@ -62,7 +63,8 @@ def main() -> None:
         rho = np.asarray(sx.localization_profile_fn(generator, N))
         finite = np.isfinite(rho)
         crossing = np.flatnonzero(finite & (rho < 1.0))
-        advised = sx.localization_crossover_window(generator, N, KEEP)
+        advice = sx.localization_crossover_window(generator, N, KEEP)
+        advised = advice.window  # int; advice.certified is False
 
         def loss(p, w, bf=block_fn):
             y = sx.block_thomas_truncated_fn(
@@ -74,7 +76,9 @@ def main() -> None:
 
         print(f"\n=== nu = {nu:g} ===")
         print(f"  first row with rho_k < 1 : {int(crossing[0]) if crossing.size else None}")
-        print(f"  advised adjoint_window   : {advised}")
+        print(f"  advised adjoint_window   : {advised} "
+              f"(crossover row {advice.crossover_row}, "
+              f"certified={advice.certified})")
 
         # --- the source cotangent does not move with the window -------------
         base = None

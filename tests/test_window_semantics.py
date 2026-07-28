@@ -213,3 +213,80 @@ def test_nested_window_check_detects_an_inadequate_window():
     assert loose["passed"] is True
     assert loose["relative_difference"] < tight["relative_difference"]
     assert "adjoint_window" in tight["recommendation"]
+
+
+def test_localization_window_passes_directly_to_both_entry_points():
+    """The advisor's record is documented as usable as ``adjoint_window``.
+
+    It defines ``__index__`` precisely so it can be handed straight back to the
+    solver. Both entry points used to compare it against a bound before
+    coercing it, which raised ``TypeError`` on the documented call; only the
+    coercion itself was covered, not the call it exists for.
+    """
+    n_blocks, m, keep = 12, 3, 2
+
+    def block_fn(p, j):
+        eye = jnp.eye(m)
+        return (
+            eye * 0.3 * (j > 0),
+            eye * (4.0 + p[0] * (1.0 + j)),
+            eye * 0.3 * (j < n_blocks - 1),
+        )
+
+    params = jnp.array([0.5])
+    rhs = jnp.ones((keep, m))
+    advice = localization_crossover_window(
+        lambda k: block_fn(params, k), n_blocks, keep_lowest=keep
+    )
+
+    generated = block_thomas_truncated_fn(
+        block_fn, n_blocks, rhs, keep_lowest=keep,
+        params=params, adjoint_window=advice,
+    )
+    as_int = block_thomas_truncated_fn(
+        block_fn, n_blocks, rhs, keep_lowest=keep,
+        params=params, adjoint_window=advice.window,
+    )
+    assert jnp.array_equal(generated, as_int)
+
+    bands = [
+        jnp.stack([block_fn(params, j)[i] for j in range(n_blocks)])
+        for i in range(3)
+    ]
+    stored = block_thomas_truncated(
+        *bands, rhs, keep_lowest=keep, adjoint_window=advice
+    )
+    assert jnp.array_equal(stored, as_int)
+
+    # And through jit, where the window is a static argument.
+    jitted = jax.jit(
+        lambda p: block_thomas_truncated_fn(
+            block_fn, n_blocks, rhs, keep_lowest=keep,
+            params=p, adjoint_window=advice,
+        )
+    )
+    assert jnp.allclose(jitted(params), as_int)
+
+    # A gradient through the documented call must be nonzero and match the
+    # integer form exactly.
+    def loss(p, window):
+        return jnp.sum(
+            block_thomas_truncated_fn(
+                block_fn, n_blocks, rhs, keep_lowest=keep,
+                params=p, adjoint_window=window,
+            ) ** 2
+        )
+
+    g_record = jax.grad(loss)(params, advice)
+    g_int = jax.grad(loss)(params, advice.window)
+    assert jnp.array_equal(g_record, g_int)
+    assert jnp.any(g_record != 0.0)
+
+
+def test_non_integral_window_is_rejected():
+    n_blocks, m, keep = 6, 2, 1
+    bands = [jnp.tile(jnp.eye(m) * c, (n_blocks, 1, 1)) for c in (0.2, 3.0, 0.2)]
+    with pytest.raises(TypeError, match="__index__"):
+        block_thomas_truncated(
+            *bands, jnp.ones((keep, m)), keep_lowest=keep, adjoint_window=2.5
+        )

@@ -31,6 +31,7 @@ pip install solvax
 ## Quickstart
 
 ```python
+import jax
 import jax.numpy as jnp
 import solvax as sx
 
@@ -53,11 +54,13 @@ x1 = sx.block_thomas_solve(factors, rhs1)
 x2 = sx.block_thomas_solve(factors, rhs2)
 
 # Generate each block once when reusable factors are needed without a stored
-# diagonal band.
-generated_factors = sx.block_thomas_factor_fn(block_fn, n_blocks=N)
+# diagonal band. `row(j)` returns the triple (L_j, D_j, U_j) of row j; the
+# parameterized form `block_fn(params, j)` used further down takes the
+# parameters as its first argument.
+generated_factors = sx.block_thomas_factor_fn(row, n_blocks=N)
 
 # One generated solve with O(sqrt(N) m^2) factor storage and exact JVP/VJP.
-x = sx.block_thomas_checkpointed_fn(block_fn, N, rhs)
+x = sx.block_thomas_checkpointed_fn(row, N, rhs)
 
 # Memory-truncated mode: rhs nonzero only in the lowest K blocks and only the
 # lowest K solution blocks needed -> O(K m^2) memory, independent of N.
@@ -72,12 +75,25 @@ chain's transfer norms drop below one, and you should confirm the accuracy you
 need by widening the window until the gradient stops moving.
 
 ```python
-adv = sx.localization_crossover_window(lambda k: block_fn(p, k), N, keep_lowest=3)
-w = adv.window  # adv.certified is False: this is an estimate, not a guarantee
-x_low = sx.block_thomas_truncated_fn(
-    block_fn, N, rhs[:3], keep_lowest=3, params=p, adjoint_window=w
+advice = sx.localization_crossover_window(lambda k: block_fn(p, k), N, keep_lowest=3)
+# advice.certified is False: an estimate, not a guarantee. It can be passed
+# straight back to the solver, or unpacked as advice.window.
+
+def objective(params):
+    x_low = sx.block_thomas_truncated_fn(
+        block_fn, N, rhs[:3], keep_lowest=3,
+        params=params, adjoint_window=advice,
+    )
+    return loss(x_low)
+
+grad = jax.grad(objective)(p)
+
+# Confirm the window before trusting it: widen it and see if the gradient moves.
+report = sx.check_localized_gradient(
+    lambda w: jax.grad(lambda q: loss(sx.block_thomas_truncated_fn(
+        block_fn, N, rhs[:3], keep_lowest=3, params=q, adjoint_window=w)))(p),
+    window=advice.window,
 )
-grad = jax.grad(lambda p: loss(x_low))(p)
 ```
 
 Everything is differentiable (`jax.grad` through the solve) and batchable
@@ -120,8 +136,8 @@ root = sx.newton_krylov(residual_fn, x0, precond=approx_inverse, rtol=1e-8)
 # Weakly contractive affine coupling map G(x) = L x + c, solved as (I - L) x = c:
 fixed = sx.affine_fixed_point_gmres(coupling_map, x0, restart=20)
 
-# Periodic (cyclic) tridiagonal line, corners in lower[0] and upper[-1]:
-x = sx.cyclic_tridiagonal_solve(lower, diag, upper, rhs)
+# Periodic (cyclic) scalar tridiagonal line, corners in sub[0] and sup[-1]:
+x_line = sx.cyclic_tridiagonal_solve(sub, dia, sup, line_rhs)
 
 # Differentiable solve wrapping any solver:
 x = sx.linear_solve(matvec, b, solver=lambda mv, rhs: sx.gmres(mv, rhs).x)

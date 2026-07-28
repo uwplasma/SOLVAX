@@ -2,6 +2,48 @@
 
 ## Unreleased
 
+## 0.10.1 - 2026-07-28
+
+Corrections to 0.10.0. Nothing in the exact-window algorithm changed; what
+changed is that the documented ways of calling it now work.
+
+### `LocalizationWindow` can be passed where the docstring says it can
+
+- `LocalizationWindow` defines `__index__` so the advisor's result can be handed
+  straight back to the solver as `adjoint_window`. Both public entry points
+  compared it against a bound *before* coercing it, so the documented call
+  raised `TypeError`. Coercion now happens first, through `operator.index`, at
+  `block_thomas_truncated` and `block_thomas_truncated_fn` alike. A float is
+  still rejected, now with a message that says why.
+- The only test covering this checked `int(advice) == advice.window` rather than
+  the call the method exists for. There are now tests that pass the record
+  through both entry points, under `jit`, and through a gradient.
+
+### Documentation that runs
+
+- The README's gradient example differentiated a closed-over solution, so it
+  returned zeros. It now builds the objective inside the function being
+  differentiated, and shows `check_localized_gradient` alongside it.
+- The README reused `lower`/`diag`/`upper` for both block and scalar
+  tridiagonal shapes, and `block_fn` for both the plain generator `row(j)` and
+  the parameterized `block_fn(params, j)`. Both are disambiguated.
+- `examples/25_localized_adjoint_window.py` passed the advisor's record where an
+  integer was wanted, named a file that does not exist in its `Run:` line, and
+  described the advised window more strongly than the advisor warrants.
+- `block_thomas_truncated`'s argument documentation still described the
+  superseded leading-window re-solve that 0.10.0 replaced.
+- The 0.10.0 release notes named a field `profile` that is called
+  `primal_profile`, and said `check_localized_gradient` compares against the
+  full-window gradient; it compares against a *wider* window.
+
+### The gate that would have caught all of it
+
+- `tests/test_documentation_runs.py` executes every README python block and
+  every example in a subprocess against the tree under test, checks that the
+  documented `LocalizationWindow` fields exist, checks that no documented
+  gradient is identically zero, and checks that every `Run:` line names a file
+  that exists. CI runs it. Linting alone passed all six defects above.
+
 ## 0.10.0 - 2026-07-27
 
 ### Uniform `adjoint_window` semantics across both entry points

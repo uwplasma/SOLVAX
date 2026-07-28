@@ -48,6 +48,7 @@ References
 from __future__ import annotations
 
 import dataclasses
+import operator
 import warnings
 from collections.abc import Callable
 from functools import partial
@@ -862,6 +863,26 @@ def _bounded_bwd(keep_lowest, adjoint_window, residual, cotangent):
 _block_thomas_truncated_bounded.defvjp(_bounded_fwd, _bounded_bwd)
 
 
+
+def _as_window(adjoint_window):
+    """Coerce a window argument to an int, accepting :class:`LocalizationWindow`.
+
+    The advisor returns a record rather than a bare integer, and its whole
+    point is to be handed straight back to the solver. Comparing it against a
+    bound before coercing it is what made that documented call fail, so the
+    coercion happens first, through ``operator.index`` so that anything with
+    ``__index__`` --- the advisor's record, a NumPy integer --- is accepted and
+    a float is not.
+    """
+    try:
+        return operator.index(adjoint_window)
+    except TypeError as exc:
+        raise TypeError(
+            "adjoint_window must be an integer or expose __index__ "
+            f"(got {type(adjoint_window).__name__})"
+        ) from exc
+
+
 def block_thomas_truncated(
     lower: jax.Array,
     diag: jax.Array,
@@ -887,12 +908,17 @@ def block_thomas_truncated(
             (1 <= keep_lowest <= n_blocks; equality recovers the full solve).
         adjoint_window: if ``None`` (default), reverse mode differentiates the
             elimination directly, taping the sweep at ``O(n_blocks * m^2)``. If
-            an integer ``w``, a structure-preserving custom VJP is used: the
-            right-hand-side gradient is the exact transposed truncated solve and
-            the band gradients come from a leading ``(keep_lowest + w)``-block
-            re-solve, so the *differentiated* solve also runs at
+            an integer ``w`` --- or any object exposing ``__index__``, such as
+            the :class:`LocalizationWindow` returned by
+            :func:`localization_crossover_window` --- the exact-window custom
+            VJP is used. The bands are routed through the same generated
+            construction as :func:`block_thomas_truncated_fn`, so both entry
+            points give bitwise-identical finite-window gradients: the
+            right-hand-side cotangent is exact at every window, every retained
+            row ``j < keep_lowest + w`` contributes exactly, and the only error
+            is the omission of the rows above. The differentiated solve runs at
             ``O((keep_lowest + w) m^2)`` memory, independent of ``n_blocks``.
-            Band-gradient error decays geometrically in ``w`` for block
+            That omitted tail decays geometrically in ``w`` for block
             diagonally dominant systems; ``w >= n_blocks`` reproduces the exact
             gradient.
 
@@ -905,6 +931,7 @@ def block_thomas_truncated(
         raise ValueError("rhs_low must have keep_lowest leading blocks")
     if adjoint_window is None:
         return _block_thomas_truncated_impl(lower, diag, upper, rhs_low, keep_lowest)
+    adjoint_window = _as_window(adjoint_window)
     if adjoint_window < 0:
         raise ValueError("adjoint_window must be non-negative")
     # Route the windowed reverse mode through the generated exact-window rule so
@@ -1315,7 +1342,10 @@ def block_thomas_truncated_fn(
         The lowest ``keep_lowest`` solution blocks, same layout as ``rhs_low``.
     """
     if params is not None:
-        if adjoint_window is None or adjoint_window < 0:
+        if adjoint_window is None:
+            raise ValueError("params requires a non-negative adjoint_window")
+        adjoint_window = _as_window(adjoint_window)
+        if adjoint_window < 0:
             raise ValueError("params requires a non-negative adjoint_window")
         return _truncated_fn_bounded(
             block_fn, n_blocks, params, keep_lowest, adjoint_window, rhs_low
