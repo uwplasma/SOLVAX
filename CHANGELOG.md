@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.11.1 - 2026-07-28
+
+### A version number that names one tree
+
+- Five commits landed after `0.11.0` was tagged while `__version__` still read
+  `0.11.0`, so the same version string described two different trees: the one
+  published to the index and the one measurements were then run against. That
+  is a small thing until someone tries to reproduce a number, at which point it
+  is the whole problem. This release gives the current tree its own version.
+- The only library change since `0.11.0` is in `solvax.native`, which now
+  detects JAX tracers without reaching for `jax.core.Tracer`. `jax.core` has
+  been shrinking toward private status across releases; the guard degrades to
+  the tracer protocol if it moves, rather than raising `AttributeError` from
+  inside a check whose job is to produce a clear error. No solver path and no
+  numerical result changes.
+- The rest is test and CI work: coverage of the degenerate tridiagonal paths
+  (`n = 1`, `n = 2`), explicit tests for the JAX seams the library depends on,
+  and a CI fix -- three suites were being collected twice, which pushed the
+  macOS job into its timeout.
+
 ## 0.11.0 - 2026-07-28
 
 ### The residual diagnostic works on the exact-window path

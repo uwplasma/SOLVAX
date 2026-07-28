@@ -122,7 +122,7 @@ from solvax.tridiagonal import (
     tridiagonal_solve_checked,
 )
 
-__version__ = "0.11.0"
+__version__ = "0.11.1"
 
 __all__ = [
     "BandedLUFactors",
