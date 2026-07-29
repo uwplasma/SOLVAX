@@ -98,6 +98,12 @@ from solvax.precond import (
     p_multigrid,
     semicoarsening_hierarchy,
 )
+from solvax.propagator import (
+    AdaptiveEigenSolution,
+    RK4Timestep,
+    adaptive_eigenpair,
+    estimate_rk4_timestep,
+)
 from solvax.randomized import nystrom_preconditioner
 from solvax.refine import as_low_precision, iterative_refinement
 from solvax.smoothers import (
@@ -133,7 +139,10 @@ __version__ = "0.11.1"
 
 __all__ = [
     "BandedLUFactors",
+    "AdaptiveEigenSolution",
     "PeriodicBandedLUFactors",
+    "RK4Timestep",
+    "adaptive_eigenpair",
     "banded_matvec",
     "lu_factor_banded",
     "lu_factor_banded_periodic",
@@ -147,6 +156,7 @@ __all__ = [
     "eigenpair",
     "eigenvalue",
     "harmonic_krylov_schur",
+    "estimate_rk4_timestep",
     "block_thomas",
     "block_thomas_checkpointed_fn",
     "block_thomas_factor",
