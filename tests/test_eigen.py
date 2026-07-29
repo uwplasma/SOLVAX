@@ -13,7 +13,13 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from solvax import EigenSolution, eigenvalue, harmonic_krylov_schur
+from solvax import (
+    EigenSolution,
+    block_harmonic_krylov,
+    eigenpair,
+    eigenvalue,
+    harmonic_krylov_schur,
+)
 from solvax.eigen import _extend, _harmonic_restart
 
 jax.config.update("jax_enable_x64", True)
@@ -33,6 +39,22 @@ def operator_with_spectrum(eigenvalues, seed=0):
 def start_vector(n, seed=1):
     generator = np.random.default_rng(seed)
     return jnp.asarray(generator.standard_normal(n) + 1j * generator.standard_normal(n))
+
+
+def nonnormal_operator(eigenvalues, condition=30.0, seed=0):
+    """Diagonalizable operator with a prescribed eigenvector condition."""
+
+    generator = np.random.default_rng(seed)
+    n = len(eigenvalues)
+    left, _ = np.linalg.qr(
+        generator.standard_normal((n, n)) + 1j * generator.standard_normal((n, n))
+    )
+    right, _ = np.linalg.qr(
+        generator.standard_normal((n, n)) + 1j * generator.standard_normal((n, n))
+    )
+    singular_values = np.geomspace(1.0, condition, n)
+    eigenvectors = left @ np.diag(singular_values) @ right.conj().T
+    return jnp.asarray(eigenvectors @ np.diag(eigenvalues) @ np.linalg.inv(eigenvectors))
 
 
 def interior_spectrum(n, target, imaginary_extent, seed=0):
@@ -329,6 +351,140 @@ def test_nonnormal_interior_spectrum_converges():
     assert abs(complex(solution.eigenvalues[0]) - target) < 1e-10
 
 
+def test_block_harmonic_krylov_resolves_a_cluster_without_duplicates():
+    """A candidate block must retain distinct nearby branches through restart."""
+
+    targets = np.asarray([0.50 + 0.20j, 0.48 + 0.22j, 0.46 + 0.18j])
+    bulk = interior_spectrum(77, -0.8 + 4.0j, 25.0, seed=9)
+    matrix = nonnormal_operator(np.concatenate((targets, bulk)), condition=25.0, seed=4)
+    dense_values, dense_vectors = np.linalg.eig(np.asarray(matrix))
+    candidate_indices = [int(np.argmin(np.abs(dense_values - target))) for target in targets]
+    generator = np.random.default_rng(6)
+    candidates = dense_vectors[:, candidate_indices].T
+    candidates += 1.0e-8 * (
+        generator.standard_normal(candidates.shape)
+        + 1j * generator.standard_normal(candidates.shape)
+    )
+    sigma = 0.48 + 0.2j
+    shifted = matrix - sigma * jnp.eye(matrix.shape[0])
+    solution = block_harmonic_krylov(
+        lambda vector: matrix @ vector,
+        start_vector(80, seed=5),
+        initial_subspace=jnp.asarray(candidates),
+        subspace_apply=lambda vector: jnp.linalg.solve(shifted, vector),
+        sigma=sigma,
+        k=3,
+        m=36,
+        block_size=5,
+        restart_keep=10,
+        tol=1e-9,
+        max_restarts=50,
+    )
+
+    observed = np.asarray(solution.eigenvalues)
+    matching = [
+        np.min(np.abs(observed - target))
+        for target in targets
+    ]
+    pair_separation = np.min(
+        np.abs(observed[:, None] - observed[None, :] + np.eye(3))
+    )
+    assert np.max(matching) < 2e-7
+    assert pair_separation > 1e-3
+    assert np.all(np.asarray(solution.converged))
+    assert solution.orthogonality < 1e-10
+
+
+def test_block_harmonic_krylov_accepts_recycled_structured_candidates():
+    """Continuation candidates keep their state shape and accelerate a nearby solve."""
+
+    shape = (4, 5)
+    n = int(np.prod(shape))
+    targets = np.asarray([0.5 + 0.2j, 0.45 + 0.25j])
+    eigenvalues = np.concatenate((targets, interior_spectrum(n - 2, -0.7 + 3j, 15.0)))
+    matrix = nonnormal_operator(eigenvalues, condition=10.0, seed=7)
+    dense_values, dense_vectors = np.linalg.eig(np.asarray(matrix))
+    candidate_indices = [int(np.argmin(np.abs(dense_values - target))) for target in targets]
+    candidates = jnp.reshape(
+        jnp.asarray(dense_vectors[:, candidate_indices].T),
+        (2, *shape),
+    )
+
+    def apply(state):
+        return jnp.reshape(matrix @ jnp.ravel(state), shape)
+
+    solution = block_harmonic_krylov(
+        apply,
+        jnp.reshape(start_vector(n, seed=8), shape),
+        initial_subspace=candidates,
+        sigma=0.48 + 0.22j,
+        k=2,
+        m=12,
+        block_size=3,
+        tol=1e-10,
+        max_restarts=5,
+    )
+
+    assert solution.eigenvectors.shape == (2, *shape)
+    assert np.all(np.asarray(solution.converged))
+    assert np.max(
+        [np.min(np.abs(np.asarray(solution.eigenvalues) - target)) for target in targets]
+    ) < 1e-9
+
+
+def test_block_harmonic_krylov_handles_an_exact_target_in_the_seed_subspace():
+    """An exact target makes the harmonic pencil singular, not the eigenpair bad."""
+
+    n = 24
+    targets = np.asarray([0.5 + 0.2j, 0.46 + 0.18j])
+    eigenvalues = np.concatenate((targets, interior_spectrum(n - 2, -1.0 + 3j, 20.0)))
+    matrix = jnp.diag(jnp.asarray(eigenvalues))
+    candidates = jnp.eye(n, dtype=matrix.dtype)[:2]
+    solution = block_harmonic_krylov(
+        lambda vector: matrix @ vector,
+        candidates[0],
+        initial_subspace=candidates,
+        sigma=targets[0],
+        k=2,
+        m=10,
+        block_size=3,
+        tol=1e-12,
+        max_restarts=2,
+    )
+
+    assert np.all(np.asarray(solution.converged))
+    assert np.max(
+        [np.min(np.abs(np.asarray(solution.eigenvalues) - target)) for target in targets]
+    ) < 1e-12
+
+
+def test_block_harmonic_krylov_supports_a_rational_subspace_operator():
+    """A shifted inverse may generate the subspace without changing residual semantics."""
+
+    n = 48
+    targets = np.asarray([0.5 + 0.2j, 0.46 + 0.18j])
+    eigenvalues = np.concatenate((targets, interior_spectrum(n - 2, -1.0 + 2j, 40.0)))
+    matrix = nonnormal_operator(eigenvalues, condition=12.0, seed=10)
+    sigma = 0.48 + 0.2j
+    shifted = matrix - sigma * jnp.eye(n)
+    solution = block_harmonic_krylov(
+        lambda vector: matrix @ vector,
+        start_vector(n, seed=11),
+        subspace_apply=lambda vector: jnp.linalg.solve(shifted, vector),
+        sigma=sigma,
+        k=2,
+        m=14,
+        block_size=3,
+        tol=1e-9,
+        max_restarts=5,
+    )
+
+    assert np.all(np.asarray(solution.converged))
+    assert np.max(
+        [np.min(np.abs(np.asarray(solution.eigenvalues) - target)) for target in targets]
+    ) < 1e-8
+
+
 def test_invalid_arguments_are_rejected():
     matrix = operator_with_spectrum(interior_spectrum(40, 0.5 + 0.2j, 2.0))
     v0 = start_vector(40)
@@ -450,3 +606,82 @@ def test_eigenvalue_is_differentiable_through_a_structured_operator():
     step = 1e-6
     difference = float((value(step) - value(-step)) / (2 * step))
     assert analytic == pytest.approx(difference, abs=1e-6)
+
+
+def test_eigenpair_gradient_matches_phase_invariant_finite_difference():
+    """Nelson's bordered tangent must differentiate eigenvector observables."""
+
+    n = 16
+    target = 0.5 + 0.2j
+    generator = np.random.default_rng(15)
+    base = nonnormal_operator(interior_spectrum(n, target, 5.0), condition=8.0, seed=12)
+    perturbation = jnp.asarray(
+        0.02
+        * (
+            generator.standard_normal((n, n))
+            + 1j * generator.standard_normal((n, n))
+        )
+    )
+    weight = jnp.asarray(generator.standard_normal((n, n)))
+    weight = 0.5 * (weight + weight.T)
+    v0 = start_vector(n, seed=13)
+
+    def build(parameter):
+        return lambda vector: (base + parameter * perturbation) @ vector
+
+    def objective(parameter):
+        value, vector = eigenpair(
+            parameter,
+            build,
+            v0,
+            sigma=target,
+            m=10,
+            tol=1e-11,
+            max_restarts=100,
+            which="target",
+            sensitivity_rtol=1e-11,
+        )
+        normalized = vector / jnp.linalg.norm(vector)
+        quadratic = jnp.real(jnp.vdot(normalized, weight @ normalized))
+        return jnp.real(value) + 0.1 * quadratic
+
+    analytic = float(jax.grad(objective)(0.0))
+    step = 2e-5
+    difference = float((objective(step) - objective(-step)) / (2 * step))
+    assert analytic == pytest.approx(difference, rel=2e-5, abs=2e-6)
+
+
+def test_eigenpair_rejects_an_exceptional_point_condition():
+    """Near-defective branches must fail rather than emit explosive gradients."""
+
+    matrix = jnp.asarray(
+        [
+            [0.0, 1.0, 0.0, 0.0],
+            [1.0e-8, 0.0, 0.0, 0.0],
+            [0.0, 0.0, -2.0 + 3.0j, 0.0],
+            [0.0, 0.0, 0.0, -3.0 - 4.0j],
+        ],
+        dtype=jnp.complex128,
+    )
+
+    def objective(parameter):
+        value, _vector = eigenpair(
+            parameter,
+            lambda p: (
+                lambda vector: (
+                    matrix + p * jnp.diag(jnp.asarray([1.0, 0.0, 0.0, 0.0]))
+                )
+                @ vector
+            ),
+            jnp.ones(4, dtype=jnp.complex128),
+            sigma=1.0e-4,
+            m=3,
+            tol=1e-10,
+            max_restarts=100,
+            which="target",
+            condition_limit=100.0,
+        )
+        return jnp.real(value)
+
+    with pytest.raises(ValueError, match="ill-conditioned"):
+        jax.grad(objective)(0.0)

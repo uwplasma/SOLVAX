@@ -83,7 +83,13 @@ import jax.numpy as jnp
 import numpy as np
 import scipy.linalg
 
-__all__ = ["EigenSolution", "eigenvalue", "harmonic_krylov_schur"]
+__all__ = [
+    "EigenSolution",
+    "block_harmonic_krylov",
+    "eigenpair",
+    "eigenvalue",
+    "harmonic_krylov_schur",
+]
 
 
 class EigenSolution(NamedTuple):
@@ -536,6 +542,361 @@ def harmonic_krylov_schur(
     )
 
 
+def _orthonormal_block(
+    vectors: jax.Array,
+    *,
+    against: jax.Array | None = None,
+    threshold: float | None = None,
+) -> jax.Array:
+    """Return independent rows of ``vectors`` after two-pass projection.
+
+    Block/recycled iterations routinely receive nearly duplicate continuation
+    vectors. Silently normalizing their roundoff components creates spurious
+    search directions, so rank is decided against a dtype-scaled threshold.
+    """
+
+    vectors = jnp.asarray(vectors)
+    real_dtype = jnp.real(jnp.empty((), dtype=vectors.dtype)).dtype
+    cutoff = float(threshold or np.sqrt(np.finfo(np.dtype(real_dtype)).eps))
+    accepted: list[jax.Array] = []
+    fixed = [] if against is None else [vector for vector in against]
+    for candidate in vectors:
+        vector = candidate
+        for _pass in range(2):
+            for previous in (*fixed, *accepted):
+                vector = vector - jnp.vdot(previous, vector) * previous
+        norm = float(jnp.linalg.norm(vector))
+        if np.isfinite(norm) and norm > cutoff:
+            accepted.append(vector / norm)
+    if not accepted:
+        return jnp.zeros((0, vectors.shape[1]), dtype=vectors.dtype)
+    return jnp.stack(accepted)
+
+
+def _block_harmonic_ritz(
+    basis: jax.Array,
+    images: jax.Array,
+    sigma: complex,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Harmonic Ritz pairs for an arbitrary orthonormal search subspace.
+
+    If ``W = (A - sigma I) V``, harmonic Petrov--Galerkin projection imposes
+    ``W^H (A V y - theta V y) = 0``. This generalized small eigenproblem does
+    not require the search basis to come from one scalar Arnoldi chain, which
+    is what permits several recycled branch candidates to advance together.
+    """
+
+    vectors = np.asarray(basis).T
+    operator_vectors = np.asarray(images).T
+    shifted = operator_vectors - sigma * vectors
+    left = shifted.conj().T @ operator_vectors
+    right = shifted.conj().T @ vectors
+    real_dtype = np.asarray(basis).real.dtype
+    condition_limit = 1.0 / np.sqrt(np.finfo(real_dtype).eps)
+    condition = np.linalg.cond(right)
+    if not np.isfinite(condition) or condition > condition_limit:
+        # If sigma is already represented by the subspace, W=(A-sigma I)V
+        # loses a column and the generalized harmonic pencil sends that exact
+        # mode to infinity. Rayleigh--Ritz is exact on an invariant direction,
+        # so it is the stable extraction in precisely this successful case.
+        quotient = vectors.conj().T @ operator_vectors
+        return scipy.linalg.eig(quotient, check_finite=False)
+    values, coefficients = scipy.linalg.eig(left, right, check_finite=False)
+    finite = np.isfinite(values)
+    if np.any(finite):
+        return values[finite], coefficients[:, finite]
+
+    # An invariant subspace containing sigma can make the harmonic pencil
+    # singular. Standard Rayleigh--Ritz is exact on that subspace and is the
+    # stable fallback.
+    quotient = vectors.conj().T @ operator_vectors
+    return scipy.linalg.eig(quotient, check_finite=False)
+
+
+def _block_refined_vectors(
+    basis: jax.Array,
+    images: jax.Array,
+    values: np.ndarray,
+    wanted: np.ndarray,
+) -> np.ndarray:
+    """Minimum-residual coefficient vectors in a general search subspace."""
+
+    vectors = np.asarray(basis).T
+    operator_vectors = np.asarray(images).T
+    coefficients = np.empty((basis.shape[0], len(wanted)), dtype=np.asarray(basis).dtype)
+    for column, index in enumerate(wanted):
+        residual_operator = operator_vectors - values[index] * vectors
+        _left, _singular_values, vh = scipy.linalg.svd(
+            residual_operator,
+            full_matrices=False,
+            check_finite=False,
+        )
+        coefficients[:, column] = vh.conj().T[:, -1]
+    return coefficients
+
+
+def _seed_block(
+    v0: jax.Array,
+    initial_subspace: jax.Array | None,
+    *,
+    block_size: int,
+    seed: int,
+    dtype: jnp.dtype,
+) -> jax.Array:
+    """Build a deterministic independent starting block."""
+
+    shape = v0.shape
+    seeds = [_flatten(jnp.asarray(v0, dtype=dtype))]
+    if initial_subspace is not None:
+        recycled = jnp.asarray(initial_subspace, dtype=dtype)
+        if recycled.ndim != v0.ndim + 1 or recycled.shape[1:] != shape:
+            raise ValueError(
+                "initial_subspace must have shape (candidates, *v0.shape), got "
+                f"{recycled.shape} for v0 shape {shape}"
+            )
+        seeds.extend(_flatten(vector) for vector in recycled)
+
+    generator = np.random.default_rng(seed)
+    while len(seeds) < block_size:
+        random = generator.standard_normal(v0.size) + 1j * generator.standard_normal(v0.size)
+        seeds.append(jnp.asarray(random, dtype=dtype))
+    return _orthonormal_block(jnp.stack(seeds))
+
+
+def block_harmonic_krylov(
+    apply: Callable[[jax.Array], jax.Array],
+    v0: jax.Array,
+    *,
+    sigma: complex = 0.0,
+    k: int = 1,
+    m: int = 48,
+    block_size: int = 4,
+    tol: float = 1e-10,
+    max_restarts: int = 60,
+    which: str = "target",
+    restart_keep: int | None = None,
+    initial_subspace: jax.Array | None = None,
+    subspace_apply: Callable[[jax.Array], jax.Array] | None = None,
+    lock: bool = True,
+    lock_overlap: float = 1.0 - 1e-8,
+    seed: int = 0,
+) -> EigenSolution:
+    """Compute a cluster of interior eigenpairs from a block/recycled subspace.
+
+    Unlike :func:`harmonic_krylov_schur`, which advances one Arnoldi chain, this
+    method advances several candidate directions together. Harmonic extraction
+    is posed directly over the resulting general subspace, refined vectors
+    minimize the original residual, and a thick restart retains several nearby
+    branches. Converged directions may be locked and deflated from subsequent
+    cycles, preventing duplicate rediscovery when ``k > 1``.
+
+    ``initial_subspace`` accepts right eigenvectors from a neighbouring
+    parameter or resolution point. ``subspace_apply`` optionally replaces
+    ``apply`` only for basis generation; passing an approximate shifted inverse
+    creates a rational Krylov space while residuals and Rayleigh quotients are
+    still evaluated with the original operator.
+    """
+
+    if k < 1:
+        raise ValueError("k must be positive")
+    if block_size < 1:
+        raise ValueError("block_size must be positive")
+    if m <= max(k, block_size):
+        raise ValueError("m must exceed both k and block_size")
+    if which not in {"largest_real", "target"}:
+        raise ValueError(f"which must be 'largest_real' or 'target', got {which!r}")
+    if not 0.0 <= lock_overlap <= 1.0:
+        raise ValueError("lock_overlap must lie in [0, 1]")
+
+    shape = v0.shape
+    n = int(np.prod(shape))
+    if m >= n:
+        raise ValueError(
+            f"m={m} must be smaller than the operator dimension {n}; "
+            "use a dense eigendecomposition for problems this small"
+        )
+    dtype = jnp.result_type(v0, jnp.complex64)
+    seeds = _seed_block(
+        v0,
+        initial_subspace,
+        block_size=max(block_size, k),
+        seed=seed,
+        dtype=dtype,
+    )
+    if seeds.shape[0] == 0:
+        raise ValueError("v0 and initial_subspace contain no finite independent vector")
+
+    def apply_flat(vector: jax.Array) -> jax.Array:
+        return _flatten(apply(jnp.reshape(vector, shape)))
+
+    if subspace_apply is None:
+        generate_flat = apply_flat
+    else:
+
+        def generate_flat(vector: jax.Array) -> jax.Array:
+            return _flatten(subspace_apply(jnp.reshape(vector, shape)))
+
+    locked_vectors = jnp.zeros((0, n), dtype=dtype)
+    locked_values: list[complex] = []
+    locked_residuals: list[float] = []
+    matvecs = 0
+    restarts = 0
+    active_vectors = jnp.zeros((0, n), dtype=dtype)
+    active_values = np.zeros((0,), dtype=complex)
+    active_residuals = np.zeros((0,), dtype=float)
+    final_basis = seeds
+
+    for restart_index in range(1, max_restarts + 1):
+        restarts = restart_index
+        basis = _orthonormal_block(seeds, against=locked_vectors)
+        if basis.shape[0] == 0:
+            break
+
+        vectors = [vector for vector in basis]
+        images: list[jax.Array] = []
+        source = 0
+        while source < len(vectors) and len(vectors) < m:
+            vector = vectors[source]
+            image = apply_flat(vector)
+            images.append(image)
+            matvecs += 1
+            generated = image if subspace_apply is None else generate_flat(vector)
+            if subspace_apply is not None:
+                matvecs += 1
+            candidate = _orthonormal_block(
+                generated[None, :],
+                against=jnp.stack([*locked_vectors, *vectors])
+                if locked_vectors.shape[0]
+                else jnp.stack(vectors),
+            )
+            if candidate.shape[0]:
+                vectors.append(candidate[0])
+            source += 1
+
+        final_basis = jnp.stack(vectors[:m])
+        while len(images) < final_basis.shape[0]:
+            images.append(apply_flat(final_basis[len(images)]))
+            matvecs += 1
+        operator_images = jnp.stack(images[: final_basis.shape[0]])
+
+        ritz_values, ritz_vectors = _block_harmonic_ritz(
+            final_basis,
+            operator_images,
+            sigma,
+        )
+        order = _order(ritz_values, which, sigma)
+        wanted_count = min(max(k - len(locked_values), k), len(order))
+        wanted = order[:wanted_count]
+        refined = _block_refined_vectors(
+            final_basis,
+            operator_images,
+            ritz_values,
+            wanted,
+        )
+        lifted = jnp.asarray(refined.T, dtype=dtype) @ final_basis
+        lifted_images = jnp.asarray(refined.T, dtype=dtype) @ operator_images
+        norms = jnp.linalg.norm(lifted, axis=1, keepdims=True)
+        lifted = lifted / norms
+        lifted_images = lifted_images / norms
+
+        active_values = np.empty(len(wanted), dtype=complex)
+        active_residuals = np.empty(len(wanted), dtype=float)
+        for index in range(len(wanted)):
+            denominator = jnp.vdot(lifted[index], lifted[index])
+            value = jnp.vdot(lifted[index], lifted_images[index]) / denominator
+            active_values[index] = complex(value)
+            active_residuals[index] = float(
+                jnp.linalg.norm(lifted_images[index] - value * lifted[index])
+                / max(abs(complex(value)), 1e-300)
+            )
+        active_vectors = lifted
+
+        if lock:
+            for value, vector, residual in zip(
+                active_values,
+                active_vectors,
+                active_residuals,
+                strict=True,
+            ):
+                if residual >= tol or len(locked_values) >= k:
+                    continue
+                overlaps = (
+                    np.abs(np.asarray(locked_vectors) @ np.asarray(vector).conj())
+                    if locked_vectors.shape[0]
+                    else np.zeros((0,))
+                )
+                if overlaps.size and float(np.max(overlaps)) >= lock_overlap:
+                    continue
+                locked_values.append(value)
+                locked_residuals.append(residual)
+                locked_vectors = jnp.concatenate((locked_vectors, vector[None, :]), axis=0)
+
+        if len(locked_values) >= k or (
+            not lock and len(active_residuals) >= k and np.all(active_residuals[:k] < tol)
+        ):
+            break
+
+        retain = restart_keep or max(block_size, 2 * k)
+        retain = min(max(retain, block_size), final_basis.shape[0] - 1)
+        retained_coefficients = ritz_vectors[:, order[:retain]]
+        retained = jnp.asarray(retained_coefficients.T, dtype=dtype) @ final_basis
+        seeds = _orthonormal_block(retained, against=locked_vectors)
+        if seeds.shape[0] == 0:
+            seeds = _seed_block(
+                v0,
+                None,
+                block_size=max(block_size, k),
+                seed=seed + restart_index,
+                dtype=dtype,
+            )
+
+    combined_values = [*locked_values]
+    combined_vectors = [vector for vector in locked_vectors]
+    combined_residuals = [*locked_residuals]
+    for value, vector, residual in zip(
+        active_values,
+        active_vectors,
+        active_residuals,
+        strict=True,
+    ):
+        if len(combined_values) >= k:
+            break
+        overlaps = (
+            np.abs(np.asarray(jnp.stack(combined_vectors)) @ np.asarray(vector).conj())
+            if combined_vectors
+            else np.zeros((0,))
+        )
+        if overlaps.size and float(np.max(overlaps)) >= lock_overlap:
+            continue
+        combined_values.append(value)
+        combined_vectors.append(vector)
+        combined_residuals.append(residual)
+
+    if len(combined_values) < k:
+        missing = k - len(combined_values)
+        combined_values.extend([complex(np.nan, np.nan)] * missing)
+        combined_vectors.extend([jnp.zeros((n,), dtype=dtype)] * missing)
+        combined_residuals.extend([np.inf] * missing)
+
+    values_array = np.asarray(combined_values[:k])
+    residual_array = np.asarray(combined_residuals[:k])
+    output_order = _order(values_array, which, sigma)
+    output_vectors = jnp.stack(combined_vectors[:k])[output_order]
+    gram = final_basis.conj() @ final_basis.T
+    orthogonality = float(
+        jnp.max(jnp.abs(gram - jnp.eye(final_basis.shape[0], dtype=gram.dtype)))
+    )
+    return EigenSolution(
+        eigenvalues=jnp.asarray(values_array[output_order]),
+        eigenvectors=jnp.reshape(output_vectors, (k, *shape)),
+        residuals=jnp.asarray(residual_array[output_order]),
+        converged=jnp.asarray(residual_array[output_order] < tol),
+        restarts=restarts,
+        matvecs=matvecs,
+        orthogonality=orthogonality,
+    )
+
+
 def _left_eigenvector(
     apply: Callable[[jax.Array], jax.Array],
     v0: jax.Array,
@@ -582,7 +943,7 @@ def eigenvalue(
 
     .. math::
 
-        d\lambda = rac{w^H (dA)\, v}{w^H v},
+        d\lambda = \frac{w^H (dA)\, v}{w^H v},
 
     with ``v`` and ``w`` the right and left eigenvectors. Differentiating
     through a restarted solver would be expensive and fragile — restart
@@ -657,3 +1018,117 @@ def eigenvalue(
         return value, jnp.vdot(left, image) / denominator
 
     return _value(theta)
+
+
+def eigenpair(
+    theta: jax.Array,
+    build: Callable[[jax.Array], Callable[[jax.Array], jax.Array]],
+    v0: jax.Array,
+    *,
+    tangent_solver: Callable[[Callable, jax.Array], jax.Array] | None = None,
+    sensitivity_rtol: float = 1e-9,
+    sensitivity_restart: int = 40,
+    sensitivity_max_restarts: int = 20,
+    condition_limit: float = 1e8,
+    **options,
+) -> tuple[jax.Array, jax.Array]:
+    r"""Differentiable eigenvalue and right eigenvector of a matrix-free operator.
+
+    The primal pair is found by :func:`harmonic_krylov_schur`. Its tangent is
+    obtained from the bordered implicit eigenproblem, not by differentiating
+    restarts. With left/right vectors normalized so ``w^H v = 1``,
+
+    .. math::
+
+        d\lambda &= w^H (dA) v,\\
+        (A-\lambda I + v w^H)\,dv &= -(dA-d\lambda I)v.
+
+    The rank-one border removes the eigenvector nullspace and imposes the gauge
+    ``w^H dv = 0``. This is Nelson's method in matrix-free form. Eigenvector
+    phase is intrinsically arbitrary, so derivatives are intended for
+    phase-invariant observables such as normalized fluxes and quadratic mode
+    weights.
+
+    ``condition_limit`` guards exceptional points and unresolved clusters using
+    the simple-eigenvalue condition number ``||w|| ||v|| / |w^H v|``. Returning
+    an enormous finite gradient there would be less honest than refusing it.
+    A caller with a physics-aware bordered preconditioner may provide
+    ``tangent_solver(matvec, rhs)``; otherwise restarted GMRES is used.
+    """
+
+    if condition_limit <= 1.0:
+        raise ValueError("condition_limit must exceed one")
+    if sensitivity_rtol <= 0.0:
+        raise ValueError("sensitivity_rtol must be positive")
+
+    options = {**options, "k": 1}
+
+    @jax.custom_jvp
+    def _pair(parameters):
+        solution = harmonic_krylov_schur(build(parameters), v0, **options)
+        return solution.eigenvalues[0], solution.eigenvectors[0]
+
+    @_pair.defjvp
+    def _pair_jvp(primals, tangents):
+        (parameters,), (dparameters,) = primals, tangents
+        apply = build(parameters)
+        solution = harmonic_krylov_schur(apply, v0, **options)
+        value = solution.eigenvalues[0]
+        right = solution.eigenvectors[0]
+        left = _left_eigenvector(apply, v0, complex(value), **options)
+
+        overlap = jnp.vdot(left, right)
+        overlap_abs = abs(complex(overlap))
+        condition = float(
+            jnp.linalg.norm(left) * jnp.linalg.norm(right) / max(overlap_abs, 1e-300)
+        )
+        if not np.isfinite(condition) or condition > condition_limit:
+            raise ValueError(
+                "eigenpair sensitivity is ill-conditioned: "
+                f"condition number {condition:.3e} exceeds {condition_limit:.3e}; "
+                "differentiate an invariant subspace or smooth the branch selection"
+            )
+
+        # Normalize the left vector biorthogonally. Dividing by conj(overlap)
+        # makes vdot(left, right) exactly one under JAX's conjugating vdot.
+        left = left / jnp.conj(overlap)
+        _, operator_tangent = jax.jvp(
+            lambda p: build(p)(right),
+            (parameters,),
+            (dparameters,),
+        )
+        value_tangent = jnp.vdot(left, operator_tangent)
+        rhs = value_tangent * right - operator_tangent
+
+        def bordered(vector):
+            return (
+                apply(vector)
+                - value * vector
+                + right * jnp.vdot(left, vector)
+            )
+
+        if tangent_solver is None:
+            from solvax.implicit import linear_solve
+            from solvax.krylov import gmres
+
+            restart = min(max(1, int(np.prod(v0.shape))), sensitivity_restart)
+
+            def solve(matvec, right_hand_side):
+                return gmres(
+                    matvec,
+                    right_hand_side,
+                    restart=restart,
+                    rtol=sensitivity_rtol,
+                    max_restarts=sensitivity_max_restarts,
+                ).x
+
+            # The bordered iteration contains dynamic convergence loops. Treat
+            # it as an implicit linear solve so reverse mode solves the
+            # transposed bordered equation instead of differentiating those
+            # loops, which JAX intentionally does not support.
+            vector_tangent = linear_solve(bordered, rhs, solve)
+        else:
+            vector_tangent = tangent_solver(bordered, rhs)
+        return (value, right), (value_tangent, vector_tangent)
+
+    return _pair(theta)

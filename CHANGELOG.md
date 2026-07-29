@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Interior mode clusters and differentiable mode structure
+
+- `block_harmonic_krylov` adds block candidate subspaces, locking, structured
+  continuation recycling, and an optional rational subspace action while
+  retaining original-operator Rayleigh quotients and residuals.
+- `eigenpair` differentiates both a simple eigenvalue and its right eigenvector
+  through Nelson's bordered system. It reports an explicit conditioning failure
+  near clusters or exceptional points instead of returning a singular gradient.
+- A singular generalized harmonic pencil now falls back to Rayleigh--Ritz when
+  the target is already represented by an invariant subspace; the former path
+  could discard an exact eigenvector as an infinite generalized eigenvalue.
+
 ## 0.11.1 - 2026-07-28
 
 ### A version number that names one tree

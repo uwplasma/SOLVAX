@@ -93,6 +93,28 @@ structured_solution = sx.harmonic_krylov_schur(
 print(f"structured operator: lambda = {complex(structured_solution.eigenvalues[0]):.8f}")
 print(f"   eigenvector shape {structured_solution.eigenvectors.shape} — state shape preserved\n")
 
+# A recycled block keeps competing branches distinct. Supplying a shifted
+# inverse here makes the *search space* rational; the reported residuals remain
+# those of the original diagonal operator.
+cluster = jnp.asarray(
+    [0.50 + 0.20j, 0.46 + 0.18j, *(-1.0 + 1j * np.arange(2, 32))]
+)
+cluster_start = jnp.ones(cluster.shape, dtype=complex)
+cluster_shift = 0.48 + 0.20j
+cluster_solution = sx.block_harmonic_krylov(
+    lambda v: cluster * v,
+    cluster_start,
+    subspace_apply=lambda v: v / (cluster - cluster_shift),
+    sigma=cluster_shift,
+    k=2,
+    m=10,
+    block_size=3,
+    tol=1e-10,
+    max_restarts=5,
+)
+print(f"block candidates: {np.asarray(cluster_solution.eigenvalues)}")
+print(f"   original-operator residuals {np.asarray(cluster_solution.residuals)}\n")
+
 
 # --- 3. Differentiating the growth rate. ------------------------------------
 # The derivative uses  dlambda = (w^H dA v) / (w^H v)  rather than
@@ -125,3 +147,18 @@ difference = float((growth_rate(step) - growth_rate(-step)) / (2 * step))
 print(f"d(growth rate)/dtheta  analytic    {analytic:+.12e}")
 print(f"                       finite diff {difference:+.12e}")
 print(f"                       agreement   {abs(analytic - difference) / abs(difference):.2e}")
+
+# The paired API also returns the differentiable right eigenvector. Its phase is
+# arbitrary, so downstream objectives should use invariant combinations such
+# as normalized quadratic or quartic mode weights.
+pair_value, pair_vector = sx.eigenpair(
+    jnp.asarray(0.0),
+    lambda p: (lambda x: (base + p * perturbation) @ x),
+    start,
+    **options,
+)
+participation = jnp.sum(jnp.abs(pair_vector) ** 4) / jnp.sum(
+    jnp.abs(pair_vector) ** 2
+) ** 2
+print(f"phase-invariant mode participation {float(participation):.8e}")
+print(f"paired eigenvalue {complex(pair_value):+.8f}")

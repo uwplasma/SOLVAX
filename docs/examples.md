@@ -32,6 +32,7 @@ python examples/17_pcg.py
 | Partitioned multiphysics coupling | Aitken and Anderson | `19_fixed_point_acceleration.py` |
 | Batched expensive evaluations | memory-bounded `chunk_map` | `20_chunk_map.py` |
 | Very long structured hierarchy | on-demand truncated blocks | `21_on_demand_block_assembly.py` |
+| Interior stability modes and their sensitivities | harmonic Krylov--Schur | `22_interior_eigenvalues.py` |
 
 The scripts live in the repository's
 [`examples/` directory](https://github.com/uwplasma/SOLVAX/tree/main/examples).
@@ -105,6 +106,7 @@ classes are exercised by the examples for their corresponding solver.
 | Tridiagonal | `tridiagonal_solve` | 14 |
 | Fixed point | `aitken_relaxation`, `aitken_fixed_point`, `anderson_mixing` | 19 |
 | Krylov | `gmres`, `gcrot`, recycle output | 02, 03, 18 |
+| Eigenvalues | `harmonic_krylov_schur`, `block_harmonic_krylov`, `eigenvalue`, `eigenpair` | 22 |
 | PCG | `pcg`, `pcg_linear_solve`, diagnostics, `status_name` | 17 |
 | Implicit solves | `linear_solve`, `root_solve` | 06 |
 | Operators | matrix-free, sum, Kronecker, block-tridiagonal, bordered, Schur | 11, 12 |
