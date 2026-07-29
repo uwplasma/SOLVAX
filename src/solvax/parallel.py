@@ -5,9 +5,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TypeVar
 
-import jax
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
+
+try:
+    from jax import shard_map as _shard_map
+except ImportError:  # JAX 0.4
+    from jax.experimental.shard_map import shard_map as _shard_map
 
 InputT = TypeVar("InputT")
 OutputT = TypeVar("OutputT")
@@ -63,7 +67,7 @@ def shard_batch(
     output_axes: list[str | None] = [None] * output_rank
     output_axes[normalized_output_axis] = axis_name
     output_spec = P(*output_axes)
-    return jax.shard_map(
+    return _shard_map(
         local_function,
         mesh=mesh,
         in_specs=input_spec,
