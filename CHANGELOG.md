@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 0.11.2 - 2026-07-28
+
+### An archivable release
+
+- The library code is **identical to 0.11.1**. There is no behaviour change, no
+  bug fix and no new feature; every number produced under `0.11.1` is
+  reproduced bit-for-bit here.
+- `0.11.1` could not be archived. The Zenodo integration created a record and
+  then failed to fetch the source archive from GitHub -- `Record '21656172' has
+  no file 'uwplasma/SOLVAX-v0.11.1.zip'` -- during a window when Zenodo was
+  rate-limiting this network. Because the record exists, every retry of the
+  release webhook now returns `409 Conflict`, so that version cannot be
+  archived under its own DOI.
+- A citable archive matters here: the release is what a paper's availability
+  statement points at, and pointing at a version with no archive would be a
+  claim that is not true. `0.11.2` exists to be archivable.
+- If you are already on `0.11.1` there is no reason to upgrade beyond citing a
+  DOI that resolves.
+
 ## 0.11.1 - 2026-07-28
 
 ### A version number that names one tree
