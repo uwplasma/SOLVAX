@@ -7,6 +7,12 @@
 - `block_harmonic_krylov` adds block candidate subspaces, locking, structured
   continuation recycling, and an optional rational subspace action while
   retaining original-operator Rayleigh quotients and residuals.
+- `estimate_rk4_timestep` selects a conservative full-operator RK4 step from a
+  small Arnoldi spectral sketch and the complex RK4 stability polynomial.
+- `adaptive_eigenpair` applies original-operator residual stopping across
+  propagator restart chunks and rejects artificial RK4 growth. The caller
+  supplies the propagator restart, so the policy is independent of state
+  layout and operator storage.
 - `eigenpair` differentiates both a simple eigenvalue and its right eigenvector
   through Nelson's bordered system. It reports an explicit conditioning failure
   near clusters or exceptional points instead of returning a singular gradient.
