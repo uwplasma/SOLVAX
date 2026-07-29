@@ -694,7 +694,10 @@ def block_harmonic_krylov(
     parameter or resolution point. ``subspace_apply`` optionally replaces
     ``apply`` only for basis generation; passing an approximate shifted inverse
     creates a rational Krylov space while residuals and Rayleigh quotients are
-    still evaluated with the original operator.
+    still evaluated with the original operator. A transformed
+    ``which="largest_real"`` search uses Rayleigh--Ritz extraction because the
+    transformation has already made the wanted modes extremal; target searches
+    retain harmonic extraction about ``sigma``.
     """
 
     if k < 1:
@@ -779,11 +782,25 @@ def block_harmonic_krylov(
             matvecs += 1
         operator_images = jnp.stack(images[: final_basis.shape[0]])
 
-        ritz_values, ritz_vectors = _block_harmonic_ritz(
-            final_basis,
-            operator_images,
-            sigma,
-        )
+        if subspace_apply is not None and which == "largest_real":
+            # A transformed subspace can make a rightmost eigenvalue extremal
+            # without making it interior to the projected original operator.
+            # Rayleigh--Ritz is the consistent extraction in that case;
+            # harmonic extraction about an unrelated sigma can discard the
+            # very directions the transformation amplified.
+            vectors = np.asarray(final_basis).T
+            operator_vectors = np.asarray(operator_images).T
+            quotient = vectors.conj().T @ operator_vectors
+            ritz_values, ritz_vectors = scipy.linalg.eig(
+                quotient,
+                check_finite=False,
+            )
+        else:
+            ritz_values, ritz_vectors = _block_harmonic_ritz(
+                final_basis,
+                operator_images,
+                sigma,
+            )
         order = _order(ritz_values, which, sigma)
         wanted_count = min(max(k - len(locked_values), k), len(order))
         wanted = order[:wanted_count]

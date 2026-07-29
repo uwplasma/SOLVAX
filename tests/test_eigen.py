@@ -485,6 +485,42 @@ def test_block_harmonic_krylov_supports_a_rational_subspace_operator():
     ) < 1e-8
 
 
+def test_transformed_rightmost_subspace_uses_rayleigh_ritz_extraction():
+    """An amplification filter must not be undone by an unrelated target."""
+
+    eigenvalues = np.concatenate(
+        (
+            np.asarray([0.5 + 0.2j, 0.46 - 0.3j]),
+            interior_spectrum(38, -0.8 + 3.0j, 20.0, seed=15),
+        )
+    )
+    matrix = jnp.diag(jnp.asarray(eigenvalues))
+    amplification = jnp.diag(jnp.exp(20.0 * jnp.asarray(eigenvalues)))
+    solution = block_harmonic_krylov(
+        lambda vector: matrix @ vector,
+        start_vector(40, seed=16),
+        subspace_apply=lambda vector: amplification @ vector,
+        sigma=100.0j,
+        which="largest_real",
+        k=2,
+        m=12,
+        block_size=3,
+        tol=1e-9,
+        max_restarts=3,
+    )
+
+    assert np.all(np.asarray(solution.converged))
+    assert (
+        np.max(
+            [
+                np.min(np.abs(np.asarray(solution.eigenvalues) - target))
+                for target in eigenvalues[:2]
+            ]
+        )
+        < 1e-8
+    )
+
+
 def test_invalid_arguments_are_rejected():
     matrix = operator_with_spectrum(interior_spectrum(40, 0.5 + 0.2j, 2.0))
     v0 = start_vector(40)
