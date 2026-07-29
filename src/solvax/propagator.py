@@ -18,6 +18,7 @@ class RK4Timestep(NamedTuple):
     stability_boundary: float
     spectral_radius: float
     projected_dimension: int
+    probe_count: int
     operator_applications: int
 
 
@@ -88,24 +89,44 @@ def estimate_rk4_timestep(
     v0: jax.Array,
     *,
     dimension: int = 12,
+    probe_count: int = 2,
     safety: float = 0.9,
     max_dt: float = np.inf,
     bisection_iterations: int = 48,
 ) -> RK4Timestep:
     """Choose an RK4 step that does not numerically amplify sketched modes.
 
-    Arnoldi is used only to find the inexpensive peripheral spectral sketch.
-    The boundary is then evaluated against the RK4 polynomial itself, including
-    each Ritz value's complex angle, rather than assuming a purely imaginary
-    spectrum. Positive physical growth is allowed; artificial growth beyond
-    ``exp(dt * max(Re(lambda), 0))`` is not.
+    Arnoldi is used only to find inexpensive peripheral spectral sketches. The
+    caller's seed is supplemented by deterministic broadband probes because a
+    recycled eigenvector can be nearly invariant and blind to stability-limiting
+    modes. The boundary is evaluated against the RK4 polynomial itself,
+    including each Ritz value's complex angle, rather than assuming a purely
+    imaginary spectrum. Positive physical growth is allowed; artificial growth
+    beyond ``exp(dt * max(Re(lambda), 0))`` is not.
     """
 
     if not 0.0 < safety < 1.0:
         raise ValueError("safety must lie in (0, 1)")
+    if probe_count < 1:
+        raise ValueError("probe_count must be positive")
     if max_dt <= 0.0:
         raise ValueError("max_dt must be positive")
-    values = _arnoldi_spectrum(apply, v0, dimension)
+    seeds = [v0]
+    real_dtype = jnp.real(v0).dtype
+    for probe_index in range(1, probe_count):
+        key_real = jax.random.PRNGKey(2 * probe_index - 1)
+        probe = jax.random.normal(key_real, v0.shape, dtype=real_dtype)
+        if jnp.iscomplexobj(v0):
+            key_imag = jax.random.PRNGKey(2 * probe_index)
+            probe = probe + 1j * jax.random.normal(
+                key_imag,
+                v0.shape,
+                dtype=real_dtype,
+            )
+        seeds.append(jnp.asarray(probe, dtype=v0.dtype))
+    values = np.concatenate(
+        [_arnoldi_spectrum(apply, seed, dimension) for seed in seeds]
+    )
     radius = float(np.max(np.abs(values)))
     if not np.isfinite(radius) or radius <= 0.0:
         raise RuntimeError("Arnoldi sketch did not produce a finite spectral radius")
@@ -124,7 +145,8 @@ def estimate_rk4_timestep(
         stability_boundary=lower,
         spectral_radius=radius,
         projected_dimension=dimension,
-        operator_applications=dimension,
+        probe_count=probe_count,
+        operator_applications=dimension * probe_count,
     )
 
 

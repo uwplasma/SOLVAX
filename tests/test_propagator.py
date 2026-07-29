@@ -28,7 +28,28 @@ def test_rk4_timestep_keeps_the_full_known_spectrum_stable() -> None:
     z = estimate.dt * np.asarray(eigenvalues)
     amplification = np.abs(1.0 + z + z**2 / 2 + z**3 / 6 + z**4 / 24)
     assert estimate.dt > 0.0
-    assert estimate.operator_applications == 12
+    assert estimate.probe_count == 2
+    assert estimate.operator_applications == 24
+    assert np.max(amplification) <= 1.0
+
+
+def test_rk4_timestep_broadband_probe_catches_invariant_seed_blindness() -> None:
+    """A recycled eigenmode must not hide a stability-limiting peripheral mode."""
+
+    frequencies = np.linspace(-80.0, 80.0, 18)
+    eigenvalues = jnp.asarray(-0.2 + 1j * frequencies)
+    apply = jax.jit(lambda vector: eigenvalues * vector)
+    invariant_seed = jnp.zeros_like(eigenvalues).at[8].set(1.0)
+    estimate = estimate_rk4_timestep(
+        apply,
+        invariant_seed,
+        dimension=12,
+        safety=0.7,
+    )
+
+    z = estimate.dt * np.asarray(eigenvalues)
+    amplification = np.abs(1.0 + z + z**2 / 2 + z**3 / 6 + z**4 / 24)
+    assert estimate.spectral_radius > 70.0
     assert np.max(amplification) <= 1.0
 
 

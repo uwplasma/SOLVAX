@@ -8,7 +8,10 @@
   continuation recycling, and an optional rational subspace action while
   retaining original-operator Rayleigh quotients and residuals.
 - `estimate_rk4_timestep` selects a conservative full-operator RK4 step from a
-  small Arnoldi spectral sketch and the complex RK4 stability polynomial.
+  small Arnoldi spectral sketch and the complex RK4 stability polynomial. A
+  deterministic broadband probe supplements a caller seed that may be an
+  almost-invariant recycled eigenvector, preventing it from hiding
+  stability-limiting peripheral modes.
 - `adaptive_eigenpair` applies original-operator residual stopping across
   propagator restart chunks and rejects artificial RK4 growth. The caller
   supplies the propagator restart, so the policy is independent of state
