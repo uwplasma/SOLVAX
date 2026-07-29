@@ -54,8 +54,13 @@ References
 ----------
 - G. W. Stewart, "A Krylov-Schur algorithm for large eigenproblems",
   SIAM J. Matrix Anal. Appl. 23(3), 601-614 (2001).
+- G. W. Stewart, "Addendum to A Krylov-Schur algorithm for large
+  eigenproblems", SIAM J. Matrix Anal. Appl. 24(2), 599-601 (2002).
 - R. B. Morgan, "Computing interior eigenvalues of large matrices",
   Linear Algebra Appl. 154-156, 289-309 (1991).
+- Z. Jia, "The refined harmonic Arnoldi method and an implicitly restarted
+  refined algorithm for computing interior eigenpairs of large matrices",
+  Applied Numerical Mathematics 42, 489-512 (2002).
 - C. C. Paige, B. N. Parlett & H. A. van der Vorst, "Approximate solutions and
   eigenvalue bounds from Krylov subspaces", Numer. Linear Algebra Appl. 2(2),
   115-133 (1995).
@@ -69,7 +74,9 @@ References
 
 from __future__ import annotations
 
-from typing import Callable, NamedTuple
+import warnings
+from collections.abc import Callable
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -119,9 +126,7 @@ def _flatten(x: jax.Array) -> jax.Array:
     return jnp.reshape(x, (-1,))
 
 
-def _cgs2(
-    basis: jax.Array, w: jax.Array, count: int
-) -> tuple[jax.Array, jax.Array, jax.Array]:
+def _cgs2(basis: jax.Array, w: jax.Array, count: int) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Orthogonalize ``w`` against ``basis[:count]`` with two CGS passes.
 
     Returns the orthogonalized vector, its norm, and the accumulated
@@ -183,28 +188,85 @@ def _extend(
     return basis, projected, residual_row, matvecs
 
 
-def _harmonic_ritz(
+def _harmonic_projection(
     projected: np.ndarray, residual_row: np.ndarray, sigma: complex, size: int
-) -> tuple[np.ndarray, np.ndarray]:
-    """Harmonic Ritz pairs of the projected problem about ``sigma``.
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return the harmonic Rayleigh quotient and its translation vectors.
 
     With ``A V = V B + v b^H`` and ``g = (B - sigma I)^-H b``, the harmonic Ritz
     values are the eigenvalues of ``B + g b^H`` (Roman et al. 2010, Eq. 21).
+    The vector ``g`` is also required by the recovery step of a harmonic
+    Krylov-Schur restart; computing only the eigenpairs is not enough.
+
     Falls back to standard Rayleigh-Ritz when ``B - sigma I`` is numerically
     singular — which happens exactly when ``sigma`` has landed on a Ritz value,
     and where the harmonic correction is both undefined and unnecessary.
     """
 
-    block = projected[:size, :size]
+    block = np.asarray(projected[:size, :size])
     b = residual_row[:size].conj()
     shifted = block - sigma * np.eye(size)
+    g = np.zeros(size, dtype=np.result_type(block, b, complex))
 
-    if np.linalg.cond(shifted) < 1.0 / np.finfo(float).eps**0.5:
-        g = scipy.linalg.solve(shifted.conj().T, b)
-        block = block + np.outer(g, b.conj())
+    condition = np.linalg.cond(shifted)
+    condition_limit = np.finfo(float).eps ** (-0.5)
+    try:
+        # STR-9 notes that moderate errors in this solve are generally benign,
+        # but once the projected shift loses roughly half the working digits,
+        # the rank-one update becomes dominated by roundoff. At that point the
+        # untranslated quotient is the stable fallback.
+        if condition < condition_limit:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", scipy.linalg.LinAlgWarning)
+                candidate = scipy.linalg.solve(shifted.conj().T, b, check_finite=False)
+            if np.all(np.isfinite(candidate)):
+                g = candidate
+                block = block + np.outer(g, b.conj())
+    except scipy.linalg.LinAlgError:
+        # An exactly singular projected shift leaves no harmonic translation.
+        pass
 
+    return block, g, b
+
+
+def _harmonic_ritz(
+    projected: np.ndarray, residual_row: np.ndarray, sigma: complex, size: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Harmonic Ritz pairs of the projected problem about ``sigma``."""
+
+    block, _g, _b = _harmonic_projection(projected, residual_row, sigma, size)
     values, vectors = scipy.linalg.eig(block)
     return values, vectors
+
+
+def _refined_harmonic_vectors(
+    projected: np.ndarray,
+    residual_row: np.ndarray,
+    values: np.ndarray,
+    wanted: np.ndarray,
+    size: int,
+) -> np.ndarray:
+    """Minimum-residual coefficient vectors for selected harmonic Ritz values.
+
+    For a Krylov decomposition ``A U = U B + u b^H`` with orthonormal
+    ``[U, u]``, the vector in ``span(U)`` minimizing
+    ``||(A - theta I) U y||`` is the right singular vector associated with the
+    smallest singular value of ``[B - theta I; b^H]``.  Harmonic Ritz values
+    identify the desired interior modes; this refinement supplies substantially
+    more accurate vectors for nonnormal and clustered problems.
+    """
+
+    block = np.asarray(projected[:size, :size])
+    row = np.asarray(residual_row[:size])
+    identity = np.eye(size, dtype=block.dtype)
+    vectors = np.empty((size, len(wanted)), dtype=block.dtype)
+    for column, index in enumerate(wanted):
+        augmented = np.vstack((block - values[index] * identity, row[None, :]))
+        _u, _singular_values, vh = scipy.linalg.svd(
+            augmented, full_matrices=False, check_finite=False
+        )
+        vectors[:, column] = vh.conj().T[:, -1]
+    return vectors
 
 
 def _rank_key(values: np.ndarray, which: str, sigma: complex) -> np.ndarray:
@@ -228,6 +290,70 @@ def _order(values: np.ndarray, which: str, sigma: complex) -> np.ndarray:
     return np.argsort(_rank_key(values, which, sigma))
 
 
+def _harmonic_restart(
+    basis: jax.Array,
+    projected: jax.Array,
+    residual_row: jax.Array,
+    *,
+    sigma: complex,
+    which: str,
+    keep: int,
+    size: int,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Truncate and recover an orthonormal harmonic Krylov decomposition.
+
+    This is Algorithm 3 of SLEPc Technical Report STR-9.  The Schur vectors
+    must come from the harmonic Rayleigh quotient ``B + g b^H``.  Truncating
+    Schur vectors of the unmodified ``B`` instead silently reverts the restart
+    to standard Krylov-Schur and discards the interior spectral filter.
+
+    After truncating the translated decomposition, the recovery translation
+    restores a decomposition of the original operator and constructs a new
+    residual vector orthogonal to the retained basis.  Both translations are
+    essential: retaining harmonic Schur vectors without recovery does not
+    leave a decomposition that Arnoldi can validly extend.
+    """
+
+    block = np.asarray(projected[:size, :size])
+    row = np.asarray(residual_row[:size])
+    harmonic, g, b = _harmonic_projection(block, row, sigma, size)
+
+    spectrum = scipy.linalg.eigvals(harmonic)
+    cut = np.sort(_rank_key(spectrum, which, sigma))[keep - 1]
+    schur_values, schur_vectors, _selected = scipy.linalg.schur(
+        harmonic,
+        output="complex",
+        sort=lambda value: bool(_rank_key(np.array([value]), which, sigma)[0] <= cut),
+    )
+
+    q_host = schur_vectors[:, :keep]
+    b_hat = q_host.conj().T @ b
+    g_hat = -(q_host.conj().T @ g)
+    recovered = schur_values[:keep, :keep] + np.outer(g_hat, b_hat.conj())
+
+    # g_tilde = (I - Q Q^H) g is the discarded component of the translation.
+    # Since the old residual vector is normalized and orthogonal to U,
+    # ||u - U g_tilde|| = sqrt(1 + ||g_tilde||^2).
+    g_tilde = g - q_host @ (q_host.conj().T @ g)
+    gamma = float(np.sqrt(1.0 + np.vdot(g_tilde, g_tilde).real))
+
+    dtype = basis.dtype
+    q = jnp.asarray(q_host, dtype=dtype)
+    discarded_translation = jnp.asarray(g_tilde, dtype=dtype) @ basis[:size]
+    new_residual_vector = (basis[size] - discarded_translation) / gamma
+
+    restarted_basis = (
+        jnp.zeros_like(basis).at[:keep].set(q.T @ basis[:size]).at[keep].set(new_residual_vector)
+    )
+    restarted_projected = (
+        jnp.zeros_like(projected).at[:keep, :keep].set(jnp.asarray(recovered, dtype=dtype))
+    )
+    restarted_row = (
+        jnp.zeros_like(residual_row).at[:keep].set(jnp.asarray(gamma * b_hat.conj(), dtype=dtype))
+    )
+    return restarted_basis, restarted_projected, restarted_row
+
+
 def harmonic_krylov_schur(
     apply: Callable[[jax.Array], jax.Array],
     v0: jax.Array,
@@ -239,6 +365,7 @@ def harmonic_krylov_schur(
     max_restarts: int = 60,
     which: str = "largest_real",
     restart_keep: int | None = None,
+    refined: bool = True,
 ) -> EigenSolution:
     """Compute ``k`` eigenpairs of a matrix-free operator near ``sigma``.
 
@@ -271,6 +398,11 @@ def harmonic_krylov_schur(
         Subspace dimension retained across a restart. Defaults to ``m // 2``,
         which is what makes hard interior problems converge; smaller values
         discard the filtering the previous cycles produced.
+    refined:
+        If true (the default), replace each selected harmonic Ritz vector by
+        the minimum-residual vector in the same subspace. This costs a small
+        ``(m + 1) x m`` singular-value decomposition per requested eigenpair and
+        improves eigenvectors for nonnormal and clustered operators.
     which:
         ``"largest_real"`` orders by decreasing real part — the rightmost
         eigenvalues, i.e. the most unstable modes of a physical operator.
@@ -286,10 +418,10 @@ def harmonic_krylov_schur(
 
     Notes
     -----
-    The restart keeps ``k`` Schur directions and rebuilds to ``m`` each cycle,
-    so peak memory is ``(m + 1)`` vectors — independent of how many restarts
-    are needed. That is the property that makes this affordable where a dense
-    eigendecomposition, needing ``O(n^2)``, is not.
+    The restart keeps ``restart_keep`` Schur directions and rebuilds to ``m``
+    each cycle, so peak memory is ``(m + 1)`` vectors — independent of how many
+    restarts are needed. That is the property that makes this affordable where
+    a dense eigendecomposition, needing ``O(n^2)``, is not.
     """
 
     if k < 1:
@@ -321,14 +453,17 @@ def harmonic_krylov_schur(
     matvecs = 0
     keep = 0
     restarts = 0
+    active_basis_size = 1
     values = np.zeros(k, dtype=complex)
     vectors = jnp.zeros((k, n), dtype=dtype)
     residuals = np.full(k, np.inf)
 
-    for restarts in range(1, max_restarts + 1):
+    for restart_index in range(1, max_restarts + 1):
+        restarts = restart_index
         basis, projected, residual_row, used = _extend(
             apply_flat, basis, projected, residual_row, keep, m
         )
+        active_basis_size = m + 1
         matvecs += used
 
         block = np.asarray(projected[:m, :m])
@@ -339,26 +474,34 @@ def harmonic_krylov_schur(
         # Ritz vectors lift to the full space through the basis; residuals are
         # measured on the original problem, never on the projected one.
         wanted = order[:k]
-        lifted = jnp.asarray(ritz_vectors[:, wanted].T, dtype=dtype) @ basis[:m]
+        coefficient_vectors = (
+            _refined_harmonic_vectors(block, row, ritz_values, wanted, m)
+            if refined
+            else ritz_vectors[:, wanted]
+        )
+        lifted = jnp.asarray(coefficient_vectors.T, dtype=dtype) @ basis[:m]
         lifted = lifted / jnp.linalg.norm(lifted, axis=1, keepdims=True)
 
-        values = ritz_values[wanted]
+        values = np.empty(k, dtype=complex)
         residuals = np.empty(k)
         for i in range(k):
             image = apply_flat(lifted[i])
             matvecs += 1
+            # Harmonic projection is primarily a vector extraction method.
+            # Its eigenvalue can be less accurate than the vector it identifies,
+            # so evaluate the original-operator Rayleigh quotient before
+            # measuring the residual (STR-9, section 2.2).
+            values[i] = complex(jnp.vdot(lifted[i], image))
             residuals[i] = float(
-                jnp.linalg.norm(image - values[i] * lifted[i])
-                / max(abs(values[i]), 1e-300)
+                jnp.linalg.norm(image - values[i] * lifted[i]) / max(abs(values[i]), 1e-300)
             )
         vectors = lifted
 
         if np.all(residuals < tol):
             break
 
-        # Restart: keep the leading Schur block spanning the wanted Ritz
-        # directions, so the next cycle extends a subspace already enriched
-        # toward sigma rather than starting over.
+        # Restart: keep the leading harmonic Schur block, then recover an
+        # orthonormal Krylov decomposition of the original operator.
         #
         # How much to retain is the one real tuning decision. Keeping only k+1
         # discards almost the whole subspace each cycle and stalls on hard
@@ -368,51 +511,19 @@ def harmonic_krylov_schur(
         # sizes its restart similarly): enough history to keep converging,
         # while still discarding the directions that pull toward the periphery.
         keep = max(k + 1, min(restart_keep or m // 2, m - 1))
-        # Sort the wanted Ritz values into the leading Schur block. scipy sorts
-        # during the decomposition via a predicate (there is no ordschur), so
-        # the cut is expressed as a threshold on the ranking key. Selection is
-        # all that matters here -- the ordering *within* the retained block does
-        # not change the subspace it spans.
-        # Rank the *standard* Ritz values here, not the harmonic ones. The
-        # restart has to retain a B-invariant subspace or the Krylov relation
-        # does not survive truncation, and only the Schur vectors of B span one.
-        # Harmonic values are the right estimate of the eigenvalue but they are
-        # eigenvalues of B + g b^H, a different matrix; thresholding one set and
-        # ranking the other makes the number of retained directions arbitrary.
-        schur_spectrum = scipy.linalg.eigvals(block)
-        cut = np.sort(_rank_key(schur_spectrum, which, sigma))[keep - 1]
-        schur_values, schur_vectors, _kept = scipy.linalg.schur(
-            block,
-            output="complex",
-            sort=lambda value: bool(_rank_key(np.array([value]), which, sigma)[0] <= cut),
+        basis, projected, residual_row = _harmonic_restart(
+            basis,
+            projected,
+            residual_row,
+            sigma=sigma,
+            which=which,
+            keep=keep,
+            size=m,
         )
+        active_basis_size = keep + 1
 
-        q = jnp.asarray(schur_vectors[:, :keep], dtype=dtype)
-        basis = (
-            jnp.zeros_like(basis)
-            .at[:keep]
-            .set(q.T @ basis[:m])
-            .at[keep]
-            .set(basis[m])
-        )
-        projected = (
-            jnp.zeros_like(projected)
-            .at[:keep, :keep]
-            .set(jnp.asarray(schur_values[:keep, :keep], dtype=dtype))
-        )
-        # b^H Q, not Q^H b: residual_row already stores the ROW b^H, so the
-        # transform is a plain right-multiplication by Q with no conjugation.
-        # Conjugating here breaks the Krylov relation (measured: 2.9e-14 before
-        # the restart, 6.7 after) while leaving the basis perfectly orthonormal,
-        # so it is invisible to every check except the relation itself.
-        residual_row = jnp.zeros_like(residual_row).at[:keep].set(
-            residual_row[m - 1] * q[m - 1, :keep]
-        )
-
-    gram = basis[: m + 1].conj() @ basis[: m + 1].T
-    orthogonality = float(
-        jnp.max(jnp.abs(gram - jnp.eye(m + 1, dtype=gram.dtype)))
-    )
+    gram = basis[:active_basis_size].conj() @ basis[:active_basis_size].T
+    orthogonality = float(jnp.max(jnp.abs(gram - jnp.eye(active_basis_size, dtype=gram.dtype))))
 
     return EigenSolution(
         eigenvalues=jnp.asarray(values),
@@ -423,6 +534,7 @@ def harmonic_krylov_schur(
         matvecs=matvecs,
         orthogonality=orthogonality,
     )
+
 
 def _left_eigenvector(
     apply: Callable[[jax.Array], jax.Array],
@@ -541,9 +653,7 @@ def eigenvalue(
                 "left/right eigenvector overlap is ~0: the eigenvalue is "
                 "degenerate and its first-order derivative does not exist"
             )
-        _, image = jax.jvp(
-            lambda p: build(p)(right), (parameters,), (dparameters,)
-        )
+        _, image = jax.jvp(lambda p: build(p)(right), (parameters,), (dparameters,))
         return value, jnp.vdot(left, image) / denominator
 
     return _value(theta)

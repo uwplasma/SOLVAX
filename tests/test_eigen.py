@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 from solvax import EigenSolution, eigenvalue, harmonic_krylov_schur
+from solvax.eigen import _extend, _harmonic_restart
 
 jax.config.update("jax_enable_x64", True)
 
@@ -31,9 +32,7 @@ def operator_with_spectrum(eigenvalues, seed=0):
 
 def start_vector(n, seed=1):
     generator = np.random.default_rng(seed)
-    return jnp.asarray(
-        generator.standard_normal(n) + 1j * generator.standard_normal(n)
-    )
+    return jnp.asarray(generator.standard_normal(n) + 1j * generator.standard_normal(n))
 
 
 def interior_spectrum(n, target, imaginary_extent, seed=0):
@@ -55,13 +54,16 @@ def test_peripheral_rightmost_is_exact():
     """
 
     generator = np.random.default_rng(0)
-    eigenvalues = np.concatenate(
-        [[2.0 + 0j], generator.standard_normal(199) * 0.3 - 1.0 + 0j]
-    )
+    eigenvalues = np.concatenate([[2.0 + 0j], generator.standard_normal(199) * 0.3 - 1.0 + 0j])
     matrix = operator_with_spectrum(eigenvalues)
     solution = harmonic_krylov_schur(
-        lambda v: matrix @ v, start_vector(200), sigma=2.0 + 0j, k=1, m=32,
-        tol=1e-9, which="largest_real",
+        lambda v: matrix @ v,
+        start_vector(200),
+        sigma=2.0 + 0j,
+        k=1,
+        m=32,
+        tol=1e-9,
+        which="largest_real",
     )
 
     assert bool(solution.converged[0])
@@ -82,8 +84,14 @@ def test_interior_target_converges(imaginary_extent):
     eigenvalues = interior_spectrum(200, target, imaginary_extent)
     matrix = operator_with_spectrum(eigenvalues)
     solution = harmonic_krylov_schur(
-        lambda v: matrix @ v, start_vector(200), sigma=target, k=1, m=32,
-        tol=1e-9, max_restarts=100, which="target",
+        lambda v: matrix @ v,
+        start_vector(200),
+        sigma=target,
+        k=1,
+        m=32,
+        tol=1e-9,
+        max_restarts=100,
+        which="target",
     )
 
     assert bool(solution.converged[0])
@@ -102,15 +110,19 @@ def test_residual_is_measured_on_the_original_problem():
     target = 0.5 + 0.2j
     matrix = operator_with_spectrum(interior_spectrum(160, target, 5.0))
     solution = harmonic_krylov_schur(
-        lambda v: matrix @ v, start_vector(160), sigma=target, k=1, m=24,
-        tol=1e-9, max_restarts=100, which="target",
+        lambda v: matrix @ v,
+        start_vector(160),
+        sigma=target,
+        k=1,
+        m=24,
+        tol=1e-9,
+        max_restarts=100,
+        which="target",
     )
 
     value = complex(solution.eigenvalues[0])
     vector = solution.eigenvectors[0]
-    independent = float(
-        jnp.linalg.norm(matrix @ vector - value * vector) / abs(value)
-    )
+    independent = float(jnp.linalg.norm(matrix @ vector - value * vector) / abs(value))
     assert independent == pytest.approx(float(solution.residuals[0]), rel=1e-6)
 
 
@@ -121,17 +133,21 @@ def test_eigenvector_matches_dense():
     eigenvalues = interior_spectrum(160, target, 5.0)
     matrix = operator_with_spectrum(eigenvalues)
     solution = harmonic_krylov_schur(
-        lambda v: matrix @ v, start_vector(160), sigma=target, k=1, m=24,
-        tol=1e-9, max_restarts=100, which="target",
+        lambda v: matrix @ v,
+        start_vector(160),
+        sigma=target,
+        k=1,
+        m=24,
+        tol=1e-9,
+        max_restarts=100,
+        which="target",
     )
 
     reference_values, reference_vectors = np.linalg.eig(np.asarray(matrix))
     index = int(np.argmin(np.abs(reference_values - target)))
     reference = reference_vectors[:, index]
     overlap = abs(np.vdot(reference, np.asarray(solution.eigenvectors[0])))
-    overlap /= np.linalg.norm(reference) * float(
-        jnp.linalg.norm(solution.eigenvectors[0])
-    )
+    overlap /= np.linalg.norm(reference) * float(jnp.linalg.norm(solution.eigenvectors[0]))
     assert overlap > 1.0 - 1e-8
 
 
@@ -152,8 +168,14 @@ def test_structured_state_shape_is_preserved():
         return jnp.reshape(matrix @ jnp.reshape(state, (-1,)), shape)
 
     solution = harmonic_krylov_schur(
-        apply, jnp.reshape(flat, shape), sigma=target, k=1, m=20,
-        tol=1e-9, max_restarts=100, which="target",
+        apply,
+        jnp.reshape(flat, shape),
+        sigma=target,
+        k=1,
+        m=20,
+        tol=1e-9,
+        max_restarts=100,
+        which="target",
     )
     assert solution.eigenvectors.shape == (1, *shape)
     assert bool(solution.converged[0])
@@ -165,8 +187,14 @@ def test_basis_stays_orthonormal():
     target = 0.5 + 0.2j
     matrix = operator_with_spectrum(interior_spectrum(160, target, 5.0))
     solution = harmonic_krylov_schur(
-        lambda v: matrix @ v, start_vector(160), sigma=target, k=1, m=24,
-        tol=1e-9, max_restarts=100, which="target",
+        lambda v: matrix @ v,
+        start_vector(160),
+        sigma=target,
+        k=1,
+        m=24,
+        tol=1e-9,
+        max_restarts=100,
+        which="target",
     )
     assert solution.orthogonality < 1e-8
 
@@ -181,14 +209,124 @@ def test_nonconvergence_is_reported_not_raised():
     target = 0.5 + 0.2j
     matrix = operator_with_spectrum(interior_spectrum(200, target, 60.0))
     solution = harmonic_krylov_schur(
-        lambda v: matrix @ v, start_vector(200), sigma=target, k=1, m=32,
-        tol=1e-12, max_restarts=3, which="target",
+        lambda v: matrix @ v,
+        start_vector(200),
+        sigma=target,
+        k=1,
+        m=32,
+        tol=1e-12,
+        max_restarts=3,
+        which="target",
     )
 
     assert isinstance(solution, EigenSolution)
     assert not bool(solution.converged[0])
     assert solution.restarts == 3
     assert np.isfinite(float(solution.residuals[0]))
+    assert solution.orthogonality < 1e-8
+
+
+def test_harmonic_restart_preserves_the_krylov_decomposition():
+    """Translation, truncation, and recovery must preserve the original relation.
+
+    An orthonormal retained basis is not sufficient: Schur-sorting the wrong
+    projected matrix leaves an apparently healthy basis while destroying
+    ``A U = U B + u b^H``. This assertion directly guards the STR-9 invariant.
+    """
+
+    generator = np.random.default_rng(11)
+    n, m, keep = 72, 20, 9
+    matrix = jnp.asarray(generator.standard_normal((n, n)) + 1j * generator.standard_normal((n, n)))
+    initial = start_vector(n, seed=12)
+    initial /= jnp.linalg.norm(initial)
+    basis = jnp.zeros((m + 1, n), dtype=initial.dtype).at[0].set(initial)
+    projected = jnp.zeros((m + 1, m), dtype=initial.dtype)
+    residual_row = jnp.zeros(m, dtype=initial.dtype)
+    basis, projected, residual_row, _matvecs = _extend(
+        lambda vector: matrix @ vector,
+        basis,
+        projected,
+        residual_row,
+        0,
+        m,
+    )
+
+    basis, projected, residual_row = _harmonic_restart(
+        basis,
+        projected,
+        residual_row,
+        sigma=0.3 - 0.2j,
+        which="target",
+        keep=keep,
+        size=m,
+    )
+    retained = np.asarray(basis[:keep]).T
+    residual_vector = np.asarray(basis[keep])
+    quotient = np.asarray(projected[:keep, :keep])
+    row = np.asarray(residual_row[:keep])
+    defect = np.asarray(matrix) @ retained - retained @ quotient - np.outer(residual_vector, row)
+    relative_defect = np.linalg.norm(defect) / np.linalg.norm(np.asarray(matrix) @ retained)
+
+    assert relative_defect < 1e-12
+    assert np.linalg.norm(retained.conj().T @ residual_vector) < 1e-12
+    assert np.linalg.norm(residual_vector) == pytest.approx(1.0, abs=1e-12)
+
+
+def test_refined_extraction_reduces_fixed_subspace_residual():
+    """Refinement must improve the vector, not merely rename the extraction."""
+
+    n = 120
+    target = 0.5 + 0.2j
+    eigenvalues = interior_spectrum(n, target, 20.0, seed=5)
+    matrix = jnp.asarray(
+        np.diag(eigenvalues) + np.diag(np.ones(n - 1), 1) + 0.2 * np.diag(np.ones(n - 2), 2)
+    )
+    options = dict(
+        sigma=target,
+        k=1,
+        m=28,
+        tol=1e-12,
+        max_restarts=5,
+        which="target",
+    )
+    unrefined = harmonic_krylov_schur(
+        lambda vector: matrix @ vector,
+        start_vector(n, seed=3),
+        refined=False,
+        **options,
+    )
+    refined = harmonic_krylov_schur(
+        lambda vector: matrix @ vector,
+        start_vector(n, seed=3),
+        refined=True,
+        **options,
+    )
+
+    assert float(refined.residuals[0]) < float(unrefined.residuals[0])
+
+
+def test_nonnormal_interior_spectrum_converges():
+    """A triangular nonnormal operator must not be mistaken for a normal case."""
+
+    n = 120
+    target = 0.5 + 0.2j
+    eigenvalues = interior_spectrum(n, target, 20.0, seed=5)
+    matrix = jnp.asarray(
+        np.diag(eigenvalues) + np.diag(np.ones(n - 1), 1) + 0.2 * np.diag(np.ones(n - 2), 2)
+    )
+    solution = harmonic_krylov_schur(
+        lambda vector: matrix @ vector,
+        start_vector(n, seed=3),
+        sigma=target,
+        k=1,
+        m=28,
+        tol=1e-9,
+        max_restarts=100,
+        which="target",
+    )
+
+    assert bool(solution.converged[0])
+    assert abs(complex(solution.eigenvalues[0]) - target) < 1e-10
 
 
 def test_invalid_arguments_are_rejected():
@@ -219,8 +357,14 @@ def test_matvec_count_is_reported():
         return matrix @ v
 
     solution = harmonic_krylov_schur(
-        apply, start_vector(120), sigma=target, k=1, m=24,
-        tol=1e-9, max_restarts=100, which="target",
+        apply,
+        start_vector(120),
+        sigma=target,
+        k=1,
+        m=24,
+        tol=1e-9,
+        max_restarts=100,
+        which="target",
     )
     assert solution.matvecs == calls["n"]
 
@@ -238,8 +382,14 @@ def test_hard_interior_spectra_converge(imaginary_extent):
     target = 0.5 + 0.2j
     matrix = operator_with_spectrum(interior_spectrum(200, target, imaginary_extent))
     solution = harmonic_krylov_schur(
-        lambda v: matrix @ v, start_vector(200), sigma=target, k=1, m=32,
-        tol=1e-9, max_restarts=250, which="target",
+        lambda v: matrix @ v,
+        start_vector(200),
+        sigma=target,
+        k=1,
+        m=32,
+        tol=1e-9,
+        max_restarts=250,
+        which="target",
     )
 
     assert bool(solution.converged[0]), f"residual {float(solution.residuals[0]):.2e}"
@@ -258,10 +408,12 @@ def test_eigenvalue_gradient_matches_finite_differences():
     target = 0.5 + 0.2j
     generator = np.random.default_rng(3)
     base = operator_with_spectrum(interior_spectrum(120, target, 5.0))
-    perturbation = jnp.asarray(
-        generator.standard_normal((120, 120))
-        + 1j * generator.standard_normal((120, 120))
-    ) * 0.01
+    perturbation = (
+        jnp.asarray(
+            generator.standard_normal((120, 120)) + 1j * generator.standard_normal((120, 120))
+        )
+        * 0.01
+    )
     v0 = start_vector(120)
     options = dict(sigma=target, m=24, tol=1e-11, max_restarts=200, which="target")
 
