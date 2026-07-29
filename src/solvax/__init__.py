@@ -22,6 +22,7 @@ from solvax.banded import (
     lu_solve_banded,
     lu_solve_banded_periodic,
 )
+from solvax.eigen import EigenSolution, eigenvalue, harmonic_krylov_schur
 from solvax.direct import (
     BlockTridiagFactors,
     LocalizationWindow,
@@ -135,6 +136,9 @@ __all__ = [
     "BlockTridiagFactors",
     "block_tridiag_matvec",
     "block_tridiag_relative_residual",
+    "EigenSolution",
+    "eigenvalue",
+    "harmonic_krylov_schur",
     "block_thomas",
     "block_thomas_checkpointed_fn",
     "block_thomas_factor",

@@ -1,5 +1,9 @@
 # Getting started
 
+If you want to run code before reading the conventions, copy one of the four
+small recipes in {doc}`examples`. This page then explains the contracts shared
+by every solver.
+
 ## Installation
 
 Install the JAX-native core from PyPI:
@@ -170,3 +174,10 @@ relative = absolute / jnp.maximum(jnp.linalg.norm(b), jnp.finfo(b.dtype).tiny)
 For a structured direct solver, also compare a small instance against
 `jnp.linalg.solve`. A small dense reference is a test oracle, not a production
 strategy.
+
+## Next step
+
+- Start from an application: {doc}`examples`.
+- Select a solver from its assumptions: {doc}`choosing`.
+- Build a complete workflow: {doc}`tutorials/index`.
+- Look up an exact signature: {doc}`api`.

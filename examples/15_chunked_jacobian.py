@@ -42,3 +42,17 @@ print("auto chunk width for", n_res, "rows:", sx.auto_chunk_size(n_res))
 # chunked_jacobian(mode="auto") picks forward/reverse by shape; all agree.
 J_auto = sx.chunked_jacobian(residual, mode="auto", chunk_size="auto")(theta)
 print("mode='auto' matches jax:", bool(jnp.allclose(J_auto, J_ref, atol=1e-10)))
+
+# Tall Jacobian -> forward mode. This also demonstrates the explicit forward
+# builder rather than relying only on automatic mode selection.
+def tall_model(parameters):
+    grid = jnp.linspace(0.0, 1.0, 30)
+    return parameters[0] * jnp.sin(grid) + parameters[1] * jnp.cos(grid)
+
+
+p = jnp.array([2.0, -0.5])
+J_fwd = sx.chunked_jacfwd(tall_model, chunk_size=1)(p)
+print(
+    "chunked_jacfwd matches jax:",
+    bool(jnp.allclose(J_fwd, jax.jacfwd(tall_model)(p), atol=1e-10)),
+)

@@ -11,11 +11,13 @@ implicit differentiation. With the exception of the explicitly host-side
 SuperLU bridge, the library is designed to compose with `jax.jit`, `jax.vmap`,
 and `jax.grad`.
 
-This documentation is organized around decisions rather than modules:
+Start with a problem, not a module name:
 
 - {doc}`getting_started` establishes the operator, tolerance, shape, and result
   conventions used everywhere.
 - {doc}`choosing` maps mathematical structure to a solver and preconditioner.
+- {doc}`examples` maps applications to short scripts and checks that every
+  public capability has a runnable demonstration.
 - The solver guides derive each algorithm, document every input and output,
   describe failure modes, and compare the method with common alternatives.
 - The tutorials build complete structured, matrix-free, and differentiable
@@ -60,6 +62,7 @@ x = sx.block_thomas_solve(factors, rhs)
 
 getting_started
 choosing
+examples
 methods
 ```
 
