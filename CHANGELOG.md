@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add `shard_batch`, an explicit `jax.shard_map` wrapper for independent
+  numerical batches. It fixes the input batch axis and one output batch axis
+  to a named mesh axis, with validation for ranks and mesh names.
+- Add an eight-device test that checks the per-device batch size, output
+  sharding, numerical result, and zero-collective HLO.
+
 ## 0.11.2 - 2026-07-28
 
 ### An archivable release
