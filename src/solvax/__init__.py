@@ -22,7 +22,6 @@ from solvax.banded import (
     lu_solve_banded,
     lu_solve_banded_periodic,
 )
-from solvax.eigen import EigenSolution, eigenvalue, harmonic_krylov_schur
 from solvax.direct import (
     BlockTridiagFactors,
     LocalizationWindow,
@@ -42,6 +41,7 @@ from solvax.direct import (
     mixed_precision_block_thomas,
     suggest_adjoint_window,
 )
+from solvax.eigen import EigenSolution, eigenvalue, harmonic_krylov_schur
 from solvax.elliptic import (
     FourierHelmholtzOperator,
     build_fourier_helmholtz_operator,

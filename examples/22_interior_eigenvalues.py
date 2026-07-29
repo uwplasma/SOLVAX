@@ -71,7 +71,13 @@ print("   — the periphery, which is why the target matters\n")
 # matrix-vector product is required.
 shape = (8, 4)
 diagonal = jnp.asarray(
-    np.concatenate([[0.4 + 0.1j], (rng.standard_normal(31) - 2.0) + 1j * rng.standard_normal(31) * 20])
+    np.concatenate(
+        [
+            [0.4 + 0.1j],
+            (rng.standard_normal(31) - 2.0)
+            + 1j * rng.standard_normal(31) * 20,
+        ]
+    )
 ).reshape(shape)
 
 
