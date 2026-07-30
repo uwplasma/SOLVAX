@@ -2,39 +2,14 @@
 
 ## Unreleased
 
-### Interior mode clusters and differentiable mode structure
+### Differentiable externally solved eigenpairs
 
-- `block_harmonic_krylov` adds block candidate subspaces, locking, structured
-  continuation recycling, and an optional rational subspace action while
-  retaining original-operator Rayleigh quotients and residuals.
-- `estimate_rk4_timestep` selects a conservative full-operator RK4 step from a
-  small Arnoldi spectral sketch and the complex RK4 stability polynomial. A
-  deterministic broadband probe supplements a caller seed that may be an
-  almost-invariant recycled eigenvector, preventing it from hiding
-  stability-limiting peripheral modes.
-- `adaptive_eigenpair` applies original-operator residual stopping across
-  propagator restart chunks and rejects artificial RK4 growth. The caller
-  supplies the propagator restart, so the policy is independent of state
-  layout and operator storage.
-- `eigenpair` differentiates both a simple eigenvalue and its right eigenvector
-  through Nelson's bordered system. It reports an explicit conditioning failure
-  near clusters or exceptional points instead of returning a singular gradient.
-- `eigenpair` accepts application-supplied primal and left solvers while
-  retaining the same bordered implicit tangent. Both built-in primal and
-  adjoint solves now fail closed on a non-converged residual instead of
-  differentiating an uncertified pair.
-- `eigenpair_reverse` is the reverse-efficient counterpart for scalar
-  optimization. It avoids an unused forward eigenvector tangent, accepts an
-  application-supplied transposed reduced-resolvent solve, and poisons a
-  non-converged built-in bordered solve instead of emitting an approximate
-  finite gradient.
-- `propagator_eigenpairs` extracts and continuous-residual-certifies several
-  leading-growth candidates from one compiled full-operator RK4 Arnoldi pass.
-  Applications can use the same generic primitive for primal and adjoint
-  branches without materializing a matrix.
-- A singular generalized harmonic pencil now falls back to Rayleigh--Ritz when
-  the target is already represented by an invariant subspace; the former path
-  could discard an exact eigenvector as an infinite generalized eigenvalue.
+- `eigenpair_reverse` differentiates a caller-certified right/left eigenpair
+  implicitly, including eigenvector observables, an application-supplied
+  transposed reduced-resolvent solve, and an exceptional-point condition guard.
+- Propagator helpers provide RK4 stability estimation, continuous-operator
+  residual stopping, and multi-candidate extraction without prescribing an
+  application eigensolver.
 
 ## 0.11.2 - 2026-07-28
 

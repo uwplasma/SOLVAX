@@ -8,7 +8,6 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 import numpy as np
-import scipy.linalg
 
 
 class RK4Timestep(NamedTuple):
@@ -84,7 +83,7 @@ def _arnoldi_spectrum(
         basis = basis.at[column + 1].set(
             jnp.where(norm > 0.0, work / jnp.where(norm > 0.0, norm, 1.0), 0.0)
         )
-    return scipy.linalg.eigvals(np.asarray(projected[:dimension, :dimension]))
+    return np.linalg.eigvals(np.asarray(projected[:dimension, :dimension]))
 
 
 def _rk4_amplification(z: np.ndarray | complex) -> np.ndarray:

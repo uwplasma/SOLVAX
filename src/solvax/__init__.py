@@ -41,14 +41,7 @@ from solvax.direct import (
     mixed_precision_block_thomas,
     suggest_adjoint_window,
 )
-from solvax.eigen import (
-    EigenSolution,
-    block_harmonic_krylov,
-    eigenpair,
-    eigenpair_reverse,
-    eigenvalue,
-    harmonic_krylov_schur,
-)
+from solvax.eigen import eigenpair_reverse
 from solvax.elliptic import (
     FourierHelmholtzOperator,
     build_fourier_helmholtz_operator,
@@ -156,12 +149,7 @@ __all__ = [
     "BlockTridiagFactors",
     "block_tridiag_matvec",
     "block_tridiag_relative_residual",
-    "EigenSolution",
-    "block_harmonic_krylov",
-    "eigenpair",
     "eigenpair_reverse",
-    "eigenvalue",
-    "harmonic_krylov_schur",
     "estimate_rk4_timestep",
     "block_thomas",
     "block_thomas_checkpointed_fn",

@@ -1,16 +1,16 @@
-# Eigenvalue API
+# Eigenpair differentiation API
 
-`harmonic_krylov_schur` finds individual interior modes without forming the
-operator matrix. `block_harmonic_krylov` retains several competing branches,
-accepts a recycled structured candidate subspace, and can generate a rational
-subspace with an independently supplied shifted-inverse action. Both certify
-convergence with residuals from the original operator.
+`eigenpair_reverse` accepts application-supplied primal and left eigensolvers,
+then differentiates their certified simple eigenpair implicitly. Eigenvalue
+cotangents use the left/right perturbation identity. Eigenvector cotangents use
+Nelson's bordered system, with optional application-supplied preconditioning
+and a transposed reduced-resolvent solve.
 
-`eigenvalue` differentiates a simple eigenvalue with the left/right
-perturbation identity. `eigenpair` additionally differentiates the right
-eigenvector through Nelson's bordered system, which supports phase-invariant
-observables built from the mode structure. Both reject an ill-conditioned
-simple-mode sensitivity near a cluster or exceptional point.
+The eigensolver iteration is deliberately outside SOLVAX and outside the
+autodiff tape. This keeps the interface useful for propagator, rational,
+Jacobi--Davidson, or external eigensolvers without duplicating them here. A
+condition-number guard rejects clusters and exceptional points where a
+single-mode derivative is not well defined.
 
 ```{eval-rst}
 .. automodule:: solvax.eigen
