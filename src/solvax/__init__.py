@@ -45,6 +45,7 @@ from solvax.eigen import (
     EigenSolution,
     block_harmonic_krylov,
     eigenpair,
+    eigenpair_reverse,
     eigenvalue,
     harmonic_krylov_schur,
 )
@@ -100,9 +101,11 @@ from solvax.precond import (
 )
 from solvax.propagator import (
     AdaptiveEigenSolution,
+    PropagatorEigenSolution,
     RK4Timestep,
     adaptive_eigenpair,
     estimate_rk4_timestep,
+    propagator_eigenpairs,
 )
 from solvax.randomized import nystrom_preconditioner
 from solvax.refine import as_low_precision, iterative_refinement
@@ -140,9 +143,11 @@ __version__ = "0.11.2"
 __all__ = [
     "BandedLUFactors",
     "AdaptiveEigenSolution",
+    "PropagatorEigenSolution",
     "PeriodicBandedLUFactors",
     "RK4Timestep",
     "adaptive_eigenpair",
+    "propagator_eigenpairs",
     "banded_matvec",
     "lu_factor_banded",
     "lu_factor_banded_periodic",
@@ -154,6 +159,7 @@ __all__ = [
     "EigenSolution",
     "block_harmonic_krylov",
     "eigenpair",
+    "eigenpair_reverse",
     "eigenvalue",
     "harmonic_krylov_schur",
     "estimate_rk4_timestep",

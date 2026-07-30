@@ -76,7 +76,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Callable
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -87,6 +87,7 @@ __all__ = [
     "EigenSolution",
     "block_harmonic_krylov",
     "eigenpair",
+    "eigenpair_reverse",
     "eigenvalue",
     "harmonic_krylov_schur",
 ]
@@ -900,9 +901,7 @@ def block_harmonic_krylov(
     output_order = _order(values_array, which, sigma)
     output_vectors = jnp.stack(combined_vectors[:k])[output_order]
     gram = final_basis.conj() @ final_basis.T
-    orthogonality = float(
-        jnp.max(jnp.abs(gram - jnp.eye(final_basis.shape[0], dtype=gram.dtype)))
-    )
+    orthogonality = float(jnp.max(jnp.abs(gram - jnp.eye(final_basis.shape[0], dtype=gram.dtype))))
     return EigenSolution(
         eigenvalues=jnp.asarray(values_array[output_order]),
         eigenvectors=jnp.reshape(output_vectors, (k, *shape)),
@@ -933,13 +932,26 @@ def _left_eigenvector(
     # A^T for a linear callable, and A^H x = conj(A^T conj(x)).
     transpose = jax.linear_transpose(apply, v0)
 
-    def adjoint(vector: jax.Array) -> jax.Array:
+    def adjoint_uncompiled(vector: jax.Array) -> jax.Array:
         return jnp.conj(transpose(jnp.conj(vector))[0])
+
+    # A matrix-free eigensolver calls the adjoint many times from Python.
+    # Compile the transposed action once; otherwise a large application can
+    # repeatedly stage the full reverse graph while extending its Krylov basis.
+    adjoint = jax.jit(adjoint_uncompiled)
+    adjoint(v0).block_until_ready()
 
     # The adjoint's spectrum is conjugated, so the target must be too; the
     # caller's sigma is replaced rather than passed through.
     adjoint_options = {**options, "sigma": np.conj(value)}
-    return harmonic_krylov_schur(adjoint, v0, **adjoint_options).eigenvectors[0]
+    solution = harmonic_krylov_schur(adjoint, v0, **adjoint_options)
+    if not bool(np.asarray(solution.converged[0])):
+        raise RuntimeError(
+            "left eigenvector did not converge to the primal branch: "
+            f"residual={float(np.asarray(solution.residuals[0])):.3e}, "
+            f"restarts={solution.restarts}"
+        )
+    return solution.eigenvectors[0]
 
 
 def eigenvalue(
@@ -1038,10 +1050,31 @@ def eigenvalue(
 
 
 def eigenpair(
-    theta: jax.Array,
-    build: Callable[[jax.Array], Callable[[jax.Array], jax.Array]],
+    theta: Any,
+    build: Callable[[Any], Callable[[jax.Array], jax.Array]],
     v0: jax.Array,
     *,
+    primal_solver: (
+        Callable[
+            [Any, Callable[[jax.Array], jax.Array], jax.Array],
+            tuple[jax.Array, jax.Array],
+        ]
+        | None
+    ) = None,
+    left_solver: (
+        Callable[
+            [Any, Callable[[jax.Array], jax.Array], jax.Array, complex],
+            jax.Array,
+        ]
+        | None
+    ) = None,
+    tangent_preconditioner: (
+        Callable[
+            [Any, complex, jax.Array, jax.Array],
+            Callable[[jax.Array], jax.Array],
+        ]
+        | None
+    ) = None,
     tangent_solver: Callable[[Callable, jax.Array], jax.Array] | None = None,
     sensitivity_rtol: float = 1e-9,
     sensitivity_restart: int = 40,
@@ -1051,9 +1084,17 @@ def eigenpair(
 ) -> tuple[jax.Array, jax.Array]:
     r"""Differentiable eigenvalue and right eigenvector of a matrix-free operator.
 
-    The primal pair is found by :func:`harmonic_krylov_schur`. Its tangent is
-    obtained from the bordered implicit eigenproblem, not by differentiating
-    restarts. With left/right vectors normalized so ``w^H v = 1``,
+    By default, the primal and left pairs are found by
+    :func:`harmonic_krylov_schur`. Performance-sensitive callers may inject
+    ``primal_solver(parameters, apply, v0) -> (value, right)`` and
+    ``left_solver(parameters, apply, v0, value) -> left`` while retaining the
+    same implicit derivative. This lets an application use a propagator,
+    continuation, or a physics-aware adjoint solve without teaching SOLVAX
+    about that physics.
+
+    The tangent is obtained from the bordered implicit eigenproblem, not by
+    differentiating either solver. With left/right vectors normalized so
+    ``w^H v = 1``,
 
     .. math::
 
@@ -1070,7 +1111,12 @@ def eigenpair(
     the simple-eigenvalue condition number ``||w|| ||v|| / |w^H v|``. Returning
     an enormous finite gradient there would be less honest than refusing it.
     A caller with a physics-aware bordered preconditioner may provide
-    ``tangent_solver(matvec, rhs)``; otherwise restarted GMRES is used.
+    ``tangent_preconditioner(parameters, value, right, left)``; its linear
+    transpose is used for the reverse bordered solve. A fully custom
+    ``tangent_solver(matvec, rhs)`` remains available; otherwise restarted
+    GMRES is used.
+    Injected primal and left solvers must return a residual-certified pair on
+    the same simple branch; convergence policy remains the caller's concern.
     """
 
     if condition_limit <= 1.0:
@@ -1080,25 +1126,39 @@ def eigenpair(
 
     options = {**options, "k": 1}
 
+    def solve_primal(parameters):
+        apply = build(parameters)
+        if primal_solver is None:
+            solution = harmonic_krylov_schur(apply, v0, **options)
+            if not bool(np.asarray(solution.converged[0])):
+                raise RuntimeError(
+                    "primal eigenpair did not converge: "
+                    f"residual={float(np.asarray(solution.residuals[0])):.3e}, "
+                    f"restarts={solution.restarts}"
+                )
+            return apply, solution.eigenvalues[0], solution.eigenvectors[0]
+        value, right = primal_solver(parameters, apply, v0)
+        return apply, jnp.asarray(value), jnp.asarray(right)
+
     @jax.custom_jvp
     def _pair(parameters):
-        solution = harmonic_krylov_schur(build(parameters), v0, **options)
-        return solution.eigenvalues[0], solution.eigenvectors[0]
+        _apply, value, right = solve_primal(parameters)
+        return value, right
 
     @_pair.defjvp
     def _pair_jvp(primals, tangents):
         (parameters,), (dparameters,) = primals, tangents
-        apply = build(parameters)
-        solution = harmonic_krylov_schur(apply, v0, **options)
-        value = solution.eigenvalues[0]
-        right = solution.eigenvectors[0]
-        left = _left_eigenvector(apply, v0, complex(value), **options)
+        apply, value, right = solve_primal(parameters)
+        if left_solver is None:
+            left = _left_eigenvector(apply, v0, complex(value), **options)
+        else:
+            left = jnp.asarray(
+                left_solver(parameters, apply, v0, complex(value)),
+            )
 
         overlap = jnp.vdot(left, right)
         overlap_abs = abs(complex(overlap))
-        condition = float(
-            jnp.linalg.norm(left) * jnp.linalg.norm(right) / max(overlap_abs, 1e-300)
-        )
+        condition = float(jnp.linalg.norm(left) * jnp.linalg.norm(right) / max(overlap_abs, 1e-300))
         if not np.isfinite(condition) or condition > condition_limit:
             raise ValueError(
                 "eigenpair sensitivity is ill-conditioned: "
@@ -1118,34 +1178,294 @@ def eigenpair(
         rhs = value_tangent * right - operator_tangent
 
         def bordered(vector):
-            return (
-                apply(vector)
-                - value * vector
-                + right * jnp.vdot(left, vector)
-            )
+            return apply(vector) - value * vector + right * jnp.vdot(left, vector)
 
         if tangent_solver is None:
             from solvax.implicit import linear_solve
             from solvax.krylov import gmres
 
             restart = min(max(1, int(np.prod(v0.shape))), sensitivity_restart)
+            preconditioner = (
+                None
+                if tangent_preconditioner is None
+                else tangent_preconditioner(parameters, complex(value), right, left)
+            )
+            if preconditioner is None:
+                transpose_preconditioner = None
+            else:
+                transpose_preconditioner_action = jax.linear_transpose(
+                    preconditioner,
+                    jnp.zeros_like(v0),
+                )
 
-            def solve(matvec, right_hand_side):
-                return gmres(
+                def transpose_preconditioner(vector):
+                    return transpose_preconditioner_action(vector)[0]
+
+            def solve_with(
+                matvec,
+                right_hand_side,
+                *,
+                precond,
+            ):
+                solution = gmres(
                     matvec,
                     right_hand_side,
+                    precond=precond,
                     restart=restart,
                     rtol=sensitivity_rtol,
                     max_restarts=sensitivity_max_restarts,
-                ).x
+                )
+                # This function is traced by custom_linear_solve, so a Python
+                # exception cannot inspect ``converged``. Poison the tangent
+                # instead of silently returning a finite unconverged gradient;
+                # downstream finite-value admission gates then fail closed.
+                return jax.tree.map(
+                    lambda leaf: jnp.where(
+                        solution.converged,
+                        leaf,
+                        jnp.full_like(leaf, jnp.nan),
+                    ),
+                    solution.x,
+                )
+
+            def solve(matvec, right_hand_side):
+                return solve_with(
+                    matvec,
+                    right_hand_side,
+                    precond=preconditioner,
+                )
+
+            def transpose_solve(matvec, right_hand_side):
+                return solve_with(
+                    matvec,
+                    right_hand_side,
+                    precond=transpose_preconditioner,
+                )
 
             # The bordered iteration contains dynamic convergence loops. Treat
             # it as an implicit linear solve so reverse mode solves the
             # transposed bordered equation instead of differentiating those
             # loops, which JAX intentionally does not support.
-            vector_tangent = linear_solve(bordered, rhs, solve)
+            vector_tangent = linear_solve(
+                bordered,
+                rhs,
+                solve,
+                transpose_solver=transpose_solve,
+            )
         else:
             vector_tangent = tangent_solver(bordered, rhs)
         return (value, right), (value_tangent, vector_tangent)
 
+    return _pair(theta)
+
+
+def eigenpair_reverse(
+    theta: Any,
+    build: Callable[[Any], Callable[[jax.Array], jax.Array]],
+    v0: jax.Array,
+    *,
+    primal_solver: (
+        Callable[
+            [Any, Callable[[jax.Array], jax.Array], jax.Array],
+            tuple[jax.Array, jax.Array],
+        ]
+        | None
+    ) = None,
+    left_solver: (
+        Callable[
+            [Any, Callable[[jax.Array], jax.Array], jax.Array, complex],
+            jax.Array,
+        ]
+        | None
+    ) = None,
+    tangent_preconditioner: (
+        Callable[
+            [Any, complex, jax.Array, jax.Array],
+            Callable[[jax.Array], jax.Array],
+        ]
+        | None
+    ) = None,
+    transpose_tangent_solver: (
+        Callable[
+            [
+                Any,
+                complex,
+                jax.Array,
+                jax.Array,
+                Callable[[jax.Array], jax.Array],
+                jax.Array,
+            ],
+            jax.Array,
+        ]
+        | None
+    ) = None,
+    sensitivity_rtol: float = 1e-9,
+    sensitivity_restart: int = 40,
+    sensitivity_max_restarts: int = 20,
+    condition_limit: float = 1e8,
+    **options,
+) -> tuple[jax.Array, jax.Array]:
+    """Reverse-efficient differentiable eigenpair for scalar optimization.
+
+    This is the reverse-mode companion to :func:`eigenpair`. It uses the same
+    Nelson bordered equation but does not evaluate a forward eigenvector
+    tangent while constructing a VJP. The forward bordered right-hand side is
+    zero in the pullback trace; only the transposed bordered solve required by
+    the objective cotangent does work. This distinction is material for large
+    operators where an approximate forward solve must not contaminate a
+    reverse gradient.
+
+    The API intentionally mirrors :func:`eigenpair`, including injected primal,
+    left, and bordered-preconditioner policies. A caller may additionally
+    provide ``transpose_tangent_solver(parameters, value, right, left,
+    matvec, rhs)`` for the one transposed bordered solve required by the
+    pullback. The supplied ``matvec`` is already the transposed bordered
+    operator and ``left`` is biorthogonally normalized. This hook supports
+    application-specific reduced-resolvent methods without differentiating
+    their iterations. Use :func:`eigenpair` when forward-mode JVPs are
+    required; use this function for reverse-mode optimization over many
+    parameters.
+    """
+
+    if condition_limit <= 1.0:
+        raise ValueError("condition_limit must exceed one")
+    if sensitivity_rtol <= 0.0:
+        raise ValueError("sensitivity_rtol must be positive")
+    options = {**options, "k": 1}
+    restart = min(max(1, int(np.prod(v0.shape))), sensitivity_restart)
+
+    def solve_pair(parameters):
+        apply = build(parameters)
+        if primal_solver is None:
+            solution = harmonic_krylov_schur(apply, v0, **options)
+            if not bool(np.asarray(solution.converged[0])):
+                raise RuntimeError(
+                    "primal eigenpair did not converge: "
+                    f"residual={float(np.asarray(solution.residuals[0])):.3e}, "
+                    f"restarts={solution.restarts}"
+                )
+            value = solution.eigenvalues[0]
+            right = solution.eigenvectors[0]
+        else:
+            value, right = primal_solver(parameters, apply, v0)
+            value = jnp.asarray(value)
+            right = jnp.asarray(right)
+        if left_solver is None:
+            left = _left_eigenvector(apply, v0, complex(value), **options)
+        else:
+            left = jnp.asarray(
+                left_solver(parameters, apply, v0, complex(value)),
+            )
+        overlap = jnp.vdot(left, right)
+        overlap_abs = abs(complex(overlap))
+        condition = float(jnp.linalg.norm(left) * jnp.linalg.norm(right) / max(overlap_abs, 1e-300))
+        if not np.isfinite(condition) or condition > condition_limit:
+            raise ValueError(
+                "eigenpair sensitivity is ill-conditioned: "
+                f"condition number {condition:.3e} exceeds {condition_limit:.3e}; "
+                "differentiate an invariant subspace or smooth the branch selection"
+            )
+        left = left / jnp.conj(overlap)
+        return value, right, left
+
+    @jax.custom_vjp
+    def _pair(parameters):
+        value, right, _left = solve_pair(parameters)
+        return value, right
+
+    def _pair_fwd(parameters):
+        value, right, left = solve_pair(parameters)
+        return (value, right), (parameters, value, right, left)
+
+    def _pair_bwd(residual, cotangents):
+        parameters, value, right, left = residual
+        value_cotangent, vector_cotangent = cotangents
+        apply = build(parameters)
+
+        def bordered(vector):
+            return apply(vector) - value * vector + right * jnp.vdot(left, vector)
+
+        preconditioner = (
+            None
+            if tangent_preconditioner is None
+            else tangent_preconditioner(parameters, complex(value), right, left)
+        )
+        if preconditioner is None:
+            transpose_preconditioner = None
+        else:
+            transpose_preconditioner_action = jax.linear_transpose(
+                preconditioner,
+                jnp.zeros_like(v0),
+            )
+
+            def transpose_preconditioner(vector):
+                return transpose_preconditioner_action(vector)[0]
+
+        from solvax.implicit import linear_solve
+        from solvax.krylov import gmres
+
+        def solve_with(matvec, right_hand_side, *, precond):
+            solution = gmres(
+                matvec,
+                right_hand_side,
+                precond=precond,
+                restart=restart,
+                rtol=sensitivity_rtol,
+                max_restarts=sensitivity_max_restarts,
+            )
+            return jax.tree.map(
+                lambda leaf: jnp.where(
+                    solution.converged,
+                    leaf,
+                    jnp.full_like(leaf, jnp.nan),
+                ),
+                solution.x,
+            )
+
+        def solve(matvec, right_hand_side):
+            return solve_with(
+                matvec,
+                right_hand_side,
+                precond=preconditioner,
+            )
+
+        def transpose_solve(matvec, right_hand_side):
+            if transpose_tangent_solver is not None:
+                return transpose_tangent_solver(
+                    parameters,
+                    complex(value),
+                    right,
+                    left,
+                    matvec,
+                    right_hand_side,
+                )
+            return solve_with(
+                matvec,
+                right_hand_side,
+                precond=transpose_preconditioner,
+            )
+
+        def tangent_from_operator_image(image):
+            value_tangent = jnp.vdot(left, image)
+            vector_tangent = linear_solve(
+                bordered,
+                value_tangent * right - image,
+                solve,
+                transpose_solver=transpose_solve,
+            )
+            return value_tangent, vector_tangent
+
+        _zero_output, image_pullback = jax.vjp(
+            tangent_from_operator_image,
+            jnp.zeros_like(right),
+        )
+        (image_cotangent,) = image_pullback((value_cotangent, vector_cotangent))
+        _image, parameter_pullback = jax.vjp(
+            lambda p: build(p)(right),
+            parameters,
+        )
+        (parameter_cotangent,) = parameter_pullback(image_cotangent)
+        return (parameter_cotangent,)
+
+    _pair.defvjp(_pair_fwd, _pair_bwd)
     return _pair(theta)

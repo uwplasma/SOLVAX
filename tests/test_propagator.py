@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from solvax import adaptive_eigenpair, estimate_rk4_timestep
+from solvax import adaptive_eigenpair, estimate_rk4_timestep, propagator_eigenpairs
 
 jax.config.update("jax_enable_x64", True)
 
@@ -109,3 +109,42 @@ def test_adaptive_eigenpair_rejects_numerical_rk4_growth() -> None:
     assert not solution.converged
     assert not solution.stable
     assert solution.restarts == 1
+
+
+def test_propagator_eigenpairs_certifies_a_leading_cluster() -> None:
+    """One compiled filtered subspace must expose tied rightmost candidates."""
+
+    eigenvalues = jnp.asarray(
+        [
+            0.30 + 0.2j,
+            0.29 - 0.4j,
+            -0.2 + 2.0j,
+            -0.3 - 3.0j,
+            -0.4 + 4.0j,
+            -0.5 - 5.0j,
+            -0.6 + 6.0j,
+            -0.7 - 7.0j,
+            -0.8 + 8.0j,
+            -0.9 - 9.0j,
+        ],
+        dtype=jnp.complex128,
+    )
+    apply = jax.jit(lambda vector: eigenvalues * vector)
+    solution = propagator_eigenpairs(
+        apply,
+        jnp.ones_like(eigenvalues),
+        dt=0.02,
+        steps=500,
+        krylov_dim=8,
+        candidates=2,
+        tol=1.0e-9,
+    )
+
+    assert np.all(np.asarray(solution.converged))
+    assert float(np.max(np.asarray(solution.residuals))) < 1.0e-9
+    np.testing.assert_allclose(
+        np.sort_complex(np.asarray(solution.eigenvalues)),
+        np.sort_complex(np.asarray(eigenvalues[:2])),
+        rtol=1.0e-9,
+        atol=1.0e-10,
+    )

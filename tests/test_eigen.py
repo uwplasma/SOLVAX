@@ -17,6 +17,7 @@ from solvax import (
     EigenSolution,
     block_harmonic_krylov,
     eigenpair,
+    eigenpair_reverse,
     eigenvalue,
     harmonic_krylov_schur,
 )
@@ -382,13 +383,8 @@ def test_block_harmonic_krylov_resolves_a_cluster_without_duplicates():
     )
 
     observed = np.asarray(solution.eigenvalues)
-    matching = [
-        np.min(np.abs(observed - target))
-        for target in targets
-    ]
-    pair_separation = np.min(
-        np.abs(observed[:, None] - observed[None, :] + np.eye(3))
-    )
+    matching = [np.min(np.abs(observed - target)) for target in targets]
+    pair_separation = np.min(np.abs(observed[:, None] - observed[None, :] + np.eye(3)))
     assert np.max(matching) < 2e-7
     assert pair_separation > 1e-3
     assert np.all(np.asarray(solution.converged))
@@ -427,9 +423,10 @@ def test_block_harmonic_krylov_accepts_recycled_structured_candidates():
 
     assert solution.eigenvectors.shape == (2, *shape)
     assert np.all(np.asarray(solution.converged))
-    assert np.max(
-        [np.min(np.abs(np.asarray(solution.eigenvalues) - target)) for target in targets]
-    ) < 1e-9
+    assert (
+        np.max([np.min(np.abs(np.asarray(solution.eigenvalues) - target)) for target in targets])
+        < 1e-9
+    )
 
 
 def test_block_harmonic_krylov_handles_an_exact_target_in_the_seed_subspace():
@@ -453,9 +450,10 @@ def test_block_harmonic_krylov_handles_an_exact_target_in_the_seed_subspace():
     )
 
     assert np.all(np.asarray(solution.converged))
-    assert np.max(
-        [np.min(np.abs(np.asarray(solution.eigenvalues) - target)) for target in targets]
-    ) < 1e-12
+    assert (
+        np.max([np.min(np.abs(np.asarray(solution.eigenvalues) - target)) for target in targets])
+        < 1e-12
+    )
 
 
 def test_block_harmonic_krylov_supports_a_rational_subspace_operator():
@@ -480,9 +478,10 @@ def test_block_harmonic_krylov_supports_a_rational_subspace_operator():
     )
 
     assert np.all(np.asarray(solution.converged))
-    assert np.max(
-        [np.min(np.abs(np.asarray(solution.eigenvalues) - target)) for target in targets]
-    ) < 1e-8
+    assert (
+        np.max([np.min(np.abs(np.asarray(solution.eigenvalues) - target)) for target in targets])
+        < 1e-8
+    )
 
 
 def test_transformed_rightmost_subspace_uses_rayleigh_ritz_extraction():
@@ -644,7 +643,8 @@ def test_eigenvalue_is_differentiable_through_a_structured_operator():
     assert analytic == pytest.approx(difference, abs=1e-6)
 
 
-def test_eigenpair_gradient_matches_phase_invariant_finite_difference():
+@pytest.mark.parametrize("pair_solver", [eigenpair, eigenpair_reverse])
+def test_eigenpair_gradient_matches_phase_invariant_finite_difference(pair_solver):
     """Nelson's bordered tangent must differentiate eigenvector observables."""
 
     n = 16
@@ -652,11 +652,7 @@ def test_eigenpair_gradient_matches_phase_invariant_finite_difference():
     generator = np.random.default_rng(15)
     base = nonnormal_operator(interior_spectrum(n, target, 5.0), condition=8.0, seed=12)
     perturbation = jnp.asarray(
-        0.02
-        * (
-            generator.standard_normal((n, n))
-            + 1j * generator.standard_normal((n, n))
-        )
+        0.02 * (generator.standard_normal((n, n)) + 1j * generator.standard_normal((n, n)))
     )
     weight = jnp.asarray(generator.standard_normal((n, n)))
     weight = 0.5 * (weight + weight.T)
@@ -666,7 +662,7 @@ def test_eigenpair_gradient_matches_phase_invariant_finite_difference():
         return lambda vector: (base + parameter * perturbation) @ vector
 
     def objective(parameter):
-        value, vector = eigenpair(
+        value, vector = pair_solver(
             parameter,
             build,
             v0,
@@ -687,6 +683,107 @@ def test_eigenpair_gradient_matches_phase_invariant_finite_difference():
     assert analytic == pytest.approx(difference, rel=2e-5, abs=2e-6)
 
 
+def test_eigenpair_accepts_application_specific_primal_and_left_solvers():
+    """A fast external primal may reuse SOLVAX's bordered implicit tangent."""
+
+    diagonal = jnp.asarray([0.5 + 0.2j, -1.0 + 3.0j, -2.0 - 4.0j])
+    direction = jnp.asarray([1.0 + 0.0j, 0.0, 0.0])
+    v0 = jnp.ones(3, dtype=jnp.complex128)
+    calls = {"primal": 0, "left": 0}
+
+    def build(parameter):
+        return lambda vector: (diagonal + parameter * direction) * vector
+
+    def primal_solver(parameter, _apply, _start):
+        calls["primal"] += 1
+        right = jnp.asarray([1.0, 0.0, 0.0], dtype=jnp.complex128)
+        return diagonal[0] + parameter, right
+
+    def left_solver(_parameter, _apply, _start, _value):
+        calls["left"] += 1
+        return jnp.asarray([1.0, 0.0, 0.0], dtype=jnp.complex128)
+
+    def objective(parameter):
+        value, vector = eigenpair(
+            parameter,
+            build,
+            v0,
+            primal_solver=primal_solver,
+            left_solver=left_solver,
+            sensitivity_rtol=1.0e-12,
+        )
+        return jnp.real(value) + 0.1 * jnp.real(jnp.vdot(vector, vector))
+
+    assert float(objective(0.0)) == pytest.approx(0.6)
+    assert float(jax.grad(objective)(0.0)) == pytest.approx(1.0)
+    assert calls["primal"] >= 2
+    assert calls["left"] == 1
+
+
+def test_eigenpair_reverse_accepts_transpose_tangent_solver():
+    """A reverse-only reduced-resolvent policy may replace generic GMRES."""
+
+    eigenvalue = jnp.asarray(0.5 + 0.2j, dtype=jnp.complex128)
+    diagonal = jnp.asarray(
+        [eigenvalue, -1.0 + 3.0j, -2.0 - 4.0j],
+        dtype=jnp.complex128,
+    )
+    v0 = jnp.ones(3, dtype=jnp.complex128)
+    weight = jnp.asarray(
+        [[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+        dtype=jnp.complex128,
+    )
+    calls = {"transpose": 0}
+
+    def build(parameter):
+        matrix = jnp.diag(diagonal).at[1, 0].set(parameter)
+        return lambda vector: matrix @ vector
+
+    def primal_solver(parameter, _apply, _start):
+        right = jnp.asarray(
+            [1.0, parameter / (eigenvalue - diagonal[1]), 0.0],
+            dtype=jnp.complex128,
+        )
+        return eigenvalue, right
+
+    def left_solver(_parameter, _apply, _start, _value):
+        return jnp.asarray([1.0, 0.0, 0.0], dtype=jnp.complex128)
+
+    def transpose_solver(
+        _parameter,
+        _value,
+        _right,
+        _left,
+        matvec,
+        rhs,
+    ):
+        calls["transpose"] += 1
+        identity = jnp.eye(rhs.size, dtype=rhs.dtype)
+        matrix = jnp.stack(
+            tuple(matvec(identity[:, index]) for index in range(rhs.size)),
+            axis=1,
+        )
+        return jnp.linalg.solve(matrix, rhs)
+
+    def objective(parameter):
+        value, vector = eigenpair_reverse(
+            parameter,
+            build,
+            v0,
+            primal_solver=primal_solver,
+            left_solver=left_solver,
+            transpose_tangent_solver=transpose_solver,
+        )
+        normalized = vector / jnp.linalg.norm(vector)
+        return jnp.real(value) + 0.1 * jnp.real(jnp.vdot(normalized, weight @ normalized))
+
+    analytic = float(jax.grad(objective)(0.0))
+    step = 1.0e-5
+    finite_difference = float((objective(step) - objective(-step)) / (2.0 * step))
+    assert analytic == pytest.approx(finite_difference, rel=1.0e-9, abs=1.0e-10)
+    assert calls["transpose"] == 1
+
+
 def test_eigenpair_rejects_an_exceptional_point_condition():
     """Near-defective branches must fail rather than emit explosive gradients."""
 
@@ -704,10 +801,7 @@ def test_eigenpair_rejects_an_exceptional_point_condition():
         value, _vector = eigenpair(
             parameter,
             lambda p: (
-                lambda vector: (
-                    matrix + p * jnp.diag(jnp.asarray([1.0, 0.0, 0.0, 0.0]))
-                )
-                @ vector
+                lambda vector: (matrix + p * jnp.diag(jnp.asarray([1.0, 0.0, 0.0, 0.0]))) @ vector
             ),
             jnp.ones(4, dtype=jnp.complex128),
             sigma=1.0e-4,

@@ -38,6 +38,16 @@ class AdaptiveEigenSolution(NamedTuple):
     filter_growth_defect: float
 
 
+class PropagatorEigenSolution(NamedTuple):
+    """Continuous eigenpairs extracted from one full-operator RK4 subspace."""
+
+    eigenvalues: jax.Array
+    eigenvectors: jax.Array
+    residuals: jax.Array
+    converged: jax.Array
+    operator_applications: int
+
+
 def _flatten(vector: jax.Array) -> jax.Array:
     return jnp.reshape(vector, (-1,))
 
@@ -52,9 +62,7 @@ def _arnoldi_spectrum(
     shape = v0.shape
     size = v0.size
     if not 1 < dimension < size:
-        raise ValueError(
-            f"dimension must lie between one and the operator size, got {dimension}"
-        )
+        raise ValueError(f"dimension must lie between one and the operator size, got {dimension}")
     dtype = jnp.result_type(v0, jnp.complex64)
     vector = _flatten(jnp.asarray(v0, dtype=dtype))
     norm = float(jnp.linalg.norm(vector))
@@ -82,6 +90,141 @@ def _arnoldi_spectrum(
 def _rk4_amplification(z: np.ndarray | complex) -> np.ndarray:
     z = np.asarray(z)
     return 1.0 + z + z**2 / 2.0 + z**3 / 6.0 + z**4 / 24.0
+
+
+def propagator_eigenpairs(
+    apply: Callable[[jax.Array], jax.Array],
+    v0: jax.Array,
+    *,
+    dt: float,
+    steps: int,
+    krylov_dim: int = 24,
+    candidates: int = 2,
+    tol: float = 1.0e-9,
+) -> PropagatorEigenSolution:
+    """Return leading-growth continuous pairs from one compiled RK4 subspace.
+
+    The full Arnoldi construction is compiled as one operation, including the
+    RK4 loops, so this is suitable for an application-supplied adjoint action.
+    Candidate ordering uses propagator magnitude, but values and convergence
+    always come from the continuous operator.
+    """
+
+    size = int(v0.size)
+    if not 1 <= candidates <= krylov_dim < size:
+        raise ValueError("require 1 <= candidates <= krylov_dim < operator size")
+    if dt <= 0.0 or steps < 1 or tol <= 0.0:
+        raise ValueError("dt, steps, and tol must be positive")
+    shape = v0.shape
+    dtype = jnp.result_type(v0, jnp.complex64)
+    initial = jnp.asarray(v0, dtype=dtype)
+    dt_value = jnp.asarray(dt, dtype=jnp.real(initial).dtype)
+
+    def rk4_step(state):
+        first = apply(state)
+        second = apply(state + 0.5 * dt_value * first)
+        third = apply(state + 0.5 * dt_value * second)
+        fourth = apply(state + dt_value * third)
+        return state + (dt_value / 6.0) * (first + 2.0 * second + 2.0 * third + fourth)
+
+    def filtered(state):
+        return jax.lax.fori_loop(
+            0,
+            steps,
+            lambda _index, current: rk4_step(current),
+            state,
+        )
+
+    @jax.jit
+    def arnoldi(start):
+        norm = jnp.linalg.norm(start)
+        basis = jnp.zeros((krylov_dim + 1, *shape), dtype=dtype)
+        basis = basis.at[0].set(start / jnp.where(norm > 0.0, norm, 1.0))
+        projected = jnp.zeros((krylov_dim + 1, krylov_dim), dtype=dtype)
+
+        def extend(column, carry):
+            vectors, quotient = carry
+            work = filtered(vectors[column])
+            operator_scale = jnp.linalg.norm(work)
+
+            def orthogonalize(index, inner):
+                candidate, matrix = inner
+                coefficient = jnp.vdot(vectors[index], candidate)
+                candidate = candidate - coefficient * vectors[index]
+                matrix = matrix.at[index, column].add(coefficient)
+                return candidate, matrix
+
+            work, quotient = jax.lax.fori_loop(
+                0,
+                column + 1,
+                orthogonalize,
+                (work, quotient),
+            )
+            work, quotient = jax.lax.fori_loop(
+                0,
+                column + 1,
+                orthogonalize,
+                (work, quotient),
+            )
+            next_norm = jnp.linalg.norm(work)
+            real_dtype = jnp.real(jnp.empty((), dtype=dtype)).dtype
+            resolved = next_norm > 10.0 * jnp.finfo(real_dtype).eps * jnp.maximum(
+                operator_scale, 1.0
+            )
+            quotient = quotient.at[column + 1, column].set(jnp.where(resolved, next_norm, 0.0))
+            next_vector = jnp.where(
+                resolved,
+                work / jnp.where(resolved, next_norm, 1.0),
+                jnp.zeros_like(work),
+            )
+            vectors = vectors.at[column + 1].set(next_vector)
+            return vectors, quotient
+
+        return jax.lax.fori_loop(
+            0,
+            krylov_dim,
+            extend,
+            (basis, projected),
+        )
+
+    basis, projected = arnoldi(initial)
+    propagator_values, coefficients = jnp.linalg.eig(projected[:krylov_dim, :krylov_dim])
+    indices = jnp.argsort(jnp.abs(propagator_values))[-candidates:][::-1]
+    lifted = jnp.tensordot(
+        coefficients[:, indices].T,
+        basis[:krylov_dim],
+        axes=1,
+    )
+    flattened = lifted.reshape((candidates, -1))
+    vector_norms = jnp.linalg.norm(flattened, axis=1)
+    vectors = (flattened / jnp.where(vector_norms > 0.0, vector_norms, 1.0)[:, None]).reshape(
+        (candidates, *shape)
+    )
+
+    @jax.jit
+    def certify(vector):
+        image = apply(vector)
+        denominator = jnp.vdot(vector, vector)
+        value = jnp.vdot(vector, image) / jnp.where(
+            denominator != 0.0,
+            denominator,
+            1.0 + 0.0j,
+        )
+        residual = jnp.linalg.norm(image - value * vector)
+        residual = residual / jnp.maximum(
+            jnp.abs(value) * jnp.linalg.norm(vector),
+            jnp.finfo(jnp.real(vector).dtype).tiny,
+        )
+        return value, residual
+
+    values, residuals = jax.vmap(certify)(vectors)
+    return PropagatorEigenSolution(
+        eigenvalues=values,
+        eigenvectors=vectors,
+        residuals=residuals,
+        converged=residuals < tol,
+        operator_applications=4 * steps * krylov_dim + candidates,
+    )
 
 
 def estimate_rk4_timestep(
@@ -124,9 +267,7 @@ def estimate_rk4_timestep(
                 dtype=real_dtype,
             )
         seeds.append(jnp.asarray(probe, dtype=v0.dtype))
-    values = np.concatenate(
-        [_arnoldi_spectrum(apply, seed, dimension) for seed in seeds]
-    )
+    values = np.concatenate([_arnoldi_spectrum(apply, seed, dimension) for seed in seeds])
     radius = float(np.max(np.abs(values)))
     if not np.isfinite(radius) or radius <= 0.0:
         raise RuntimeError("Arnoldi sketch did not produce a finite spectral radius")
@@ -196,9 +337,8 @@ def adaptive_eigenpair(
         if not stable or float(np.asarray(residual)) < tol:
             break
     converged = stable and float(np.asarray(residual)) < tol
-    operator_applications = (
-        base_operator_applications
-        + restarts * (4 * applications_per_restart * filter_steps + 2)
+    operator_applications = base_operator_applications + restarts * (
+        4 * applications_per_restart * filter_steps + 2
     )
     return AdaptiveEigenSolution(
         eigenvalue=value,
@@ -217,7 +357,9 @@ def adaptive_eigenpair(
 
 __all__ = [
     "AdaptiveEigenSolution",
+    "PropagatorEigenSolution",
     "RK4Timestep",
     "adaptive_eigenpair",
     "estimate_rk4_timestep",
+    "propagator_eigenpairs",
 ]
