@@ -7,7 +7,12 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from solvax import adaptive_eigenpair, estimate_rk4_timestep, propagator_eigenpairs
+from solvax import (
+    adaptive_eigenpair,
+    estimate_rk4_timestep,
+    exponential_eigenpairs,
+    propagator_eigenpairs,
+)
 
 jax.config.update("jax_enable_x64", True)
 
@@ -147,4 +152,45 @@ def test_propagator_eigenpairs_certifies_a_leading_cluster() -> None:
         np.sort_complex(np.asarray(eigenvalues[:2])),
         rtol=1.0e-9,
         atol=1.0e-10,
+    )
+
+
+def test_exponential_eigenpairs_bypasses_the_explicit_stability_limit() -> None:
+    """Nested Krylov exponentials must certify stiff leading modes."""
+
+    eigenvalues = jnp.asarray(
+        [
+            0.30 + 0.2j,
+            0.29 - 0.4j,
+            -0.2 + 20.0j,
+            -0.3 - 30.0j,
+            -0.4 + 40.0j,
+            -0.5 - 50.0j,
+            -0.6 + 60.0j,
+            -0.7 - 70.0j,
+            -0.8 + 80.0j,
+            -0.9 - 90.0j,
+            -1.0 + 100.0j,
+            -1.1 - 110.0j,
+        ],
+        dtype=jnp.complex128,
+    )
+    solution = exponential_eigenpairs(
+        jax.jit(lambda vector: eigenvalues * vector),
+        jnp.ones_like(eigenvalues),
+        horizon=10.0,
+        inner_krylov_dim=12,
+        outer_krylov_dim=8,
+        candidates=2,
+        tol=1.0e-8,
+        restarts=2,
+    )
+
+    assert np.all(np.asarray(solution.converged))
+    assert solution.operator_applications == 194
+    np.testing.assert_allclose(
+        np.sort_complex(np.asarray(solution.eigenvalues)),
+        np.sort_complex(np.asarray(eigenvalues[:2])),
+        rtol=1.0e-8,
+        atol=1.0e-9,
     )

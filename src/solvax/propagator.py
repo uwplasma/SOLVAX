@@ -91,6 +91,118 @@ def _rk4_amplification(z: np.ndarray | complex) -> np.ndarray:
     return 1.0 + z + z**2 / 2.0 + z**3 / 6.0 + z**4 / 24.0
 
 
+def _arnoldi_basis(
+    apply: Callable[[jax.Array], jax.Array],
+    start: jax.Array,
+    dimension: int,
+) -> tuple[jax.Array, jax.Array]:
+    """Build a twice-orthogonalized matrix-free Arnoldi factorization."""
+
+    shape, dtype = start.shape, start.dtype
+    norm = jnp.linalg.norm(start)
+    basis = jnp.zeros((dimension + 1, *shape), dtype=dtype)
+    basis = basis.at[0].set(start / jnp.where(norm > 0.0, norm, 1.0))
+    projected = jnp.zeros((dimension + 1, dimension), dtype=dtype)
+
+    def extend(column, carry):
+        vectors, quotient = carry
+        work = apply(vectors[column])
+        operator_scale = jnp.linalg.norm(work)
+
+        def orthogonalize(index, inner):
+            candidate, matrix = inner
+            coefficient = jnp.vdot(vectors[index], candidate)
+            candidate = candidate - coefficient * vectors[index]
+            return candidate, matrix.at[index, column].add(coefficient)
+
+        work, quotient = jax.lax.fori_loop(0, column + 1, orthogonalize, (work, quotient))
+        work, quotient = jax.lax.fori_loop(0, column + 1, orthogonalize, (work, quotient))
+        next_norm = jnp.linalg.norm(work)
+        threshold = (
+            10.0
+            * jnp.finfo(jnp.real(jnp.empty((), dtype=dtype)).dtype).eps
+            * jnp.maximum(operator_scale, 1.0)
+        )
+        resolved = next_norm > threshold
+        quotient = quotient.at[column + 1, column].set(jnp.where(resolved, next_norm, 0.0))
+        vectors = vectors.at[column + 1].set(
+            jnp.where(
+                resolved,
+                work / jnp.where(resolved, next_norm, 1.0),
+                jnp.zeros_like(work),
+            )
+        )
+        return vectors, quotient
+
+    return jax.lax.fori_loop(0, dimension, extend, (basis, projected))
+
+
+def _filtered_eigenpairs(
+    apply: Callable[[jax.Array], jax.Array],
+    filtered: Callable[[jax.Array], jax.Array],
+    v0: jax.Array,
+    *,
+    krylov_dim: int,
+    candidates: int,
+    tol: float,
+    operator_applications: int,
+    restarts: int = 1,
+) -> PropagatorEigenSolution:
+    """Extract and certify continuous modes from a matrix-free filter."""
+
+    @jax.jit
+    def solve(initial):
+        def extract(start, count):
+            basis, projected = _arnoldi_basis(filtered, start, krylov_dim)
+            filter_values, coefficients = jnp.linalg.eig(projected[:krylov_dim, :krylov_dim])
+            indices = jnp.argsort(jnp.abs(filter_values))[-count:][::-1]
+            lifted = jnp.tensordot(
+                coefficients[:, indices].T,
+                basis[:krylov_dim],
+                axes=1,
+            )
+            flattened = lifted.reshape((count, -1))
+            norms = jnp.linalg.norm(flattened, axis=1)
+            return (flattened / jnp.where(norms > 0.0, norms, 1.0)[:, None]).reshape(
+                (count, *initial.shape)
+            )
+
+        initial = jax.lax.fori_loop(
+            1,
+            restarts,
+            lambda _index, start: extract(start, 1)[0],
+            initial,
+        )
+        vectors = extract(initial, candidates)
+
+        def certify(vector):
+            image = apply(vector)
+            denominator = jnp.vdot(vector, vector)
+            value = jnp.vdot(vector, image) / jnp.where(
+                denominator != 0.0,
+                denominator,
+                1.0 + 0.0j,
+            )
+            residual = jnp.linalg.norm(image - value * vector)
+            residual /= jnp.maximum(
+                jnp.abs(value) * jnp.linalg.norm(vector),
+                jnp.finfo(jnp.real(vector).dtype).tiny,
+            )
+            return value, residual
+
+        values, residuals = jax.vmap(certify)(vectors)
+        return values, vectors, residuals
+
+    values, vectors, residuals = solve(v0)
+    return PropagatorEigenSolution(
+        eigenvalues=values,
+        eigenvectors=vectors,
+        residuals=residuals,
+        converged=residuals < tol,
+        operator_applications=operator_applications,
+    )
+
+
 def propagator_eigenpairs(
     apply: Callable[[jax.Array], jax.Array],
     v0: jax.Array,
@@ -114,7 +226,6 @@ def propagator_eigenpairs(
         raise ValueError("require 1 <= candidates <= krylov_dim < operator size")
     if dt <= 0.0 or steps < 1 or tol <= 0.0:
         raise ValueError("dt, steps, and tol must be positive")
-    shape = v0.shape
     dtype = jnp.result_type(v0, jnp.complex64)
     initial = jnp.asarray(v0, dtype=dtype)
     dt_value = jnp.asarray(dt, dtype=jnp.real(initial).dtype)
@@ -134,95 +245,67 @@ def propagator_eigenpairs(
             state,
         )
 
-    @jax.jit
-    def arnoldi(start):
-        norm = jnp.linalg.norm(start)
-        basis = jnp.zeros((krylov_dim + 1, *shape), dtype=dtype)
-        basis = basis.at[0].set(start / jnp.where(norm > 0.0, norm, 1.0))
-        projected = jnp.zeros((krylov_dim + 1, krylov_dim), dtype=dtype)
-
-        def extend(column, carry):
-            vectors, quotient = carry
-            work = filtered(vectors[column])
-            operator_scale = jnp.linalg.norm(work)
-
-            def orthogonalize(index, inner):
-                candidate, matrix = inner
-                coefficient = jnp.vdot(vectors[index], candidate)
-                candidate = candidate - coefficient * vectors[index]
-                matrix = matrix.at[index, column].add(coefficient)
-                return candidate, matrix
-
-            work, quotient = jax.lax.fori_loop(
-                0,
-                column + 1,
-                orthogonalize,
-                (work, quotient),
-            )
-            work, quotient = jax.lax.fori_loop(
-                0,
-                column + 1,
-                orthogonalize,
-                (work, quotient),
-            )
-            next_norm = jnp.linalg.norm(work)
-            real_dtype = jnp.real(jnp.empty((), dtype=dtype)).dtype
-            resolved = next_norm > 10.0 * jnp.finfo(real_dtype).eps * jnp.maximum(
-                operator_scale, 1.0
-            )
-            quotient = quotient.at[column + 1, column].set(jnp.where(resolved, next_norm, 0.0))
-            next_vector = jnp.where(
-                resolved,
-                work / jnp.where(resolved, next_norm, 1.0),
-                jnp.zeros_like(work),
-            )
-            vectors = vectors.at[column + 1].set(next_vector)
-            return vectors, quotient
-
-        return jax.lax.fori_loop(
-            0,
-            krylov_dim,
-            extend,
-            (basis, projected),
-        )
-
-    basis, projected = arnoldi(initial)
-    propagator_values, coefficients = jnp.linalg.eig(projected[:krylov_dim, :krylov_dim])
-    indices = jnp.argsort(jnp.abs(propagator_values))[-candidates:][::-1]
-    lifted = jnp.tensordot(
-        coefficients[:, indices].T,
-        basis[:krylov_dim],
-        axes=1,
-    )
-    flattened = lifted.reshape((candidates, -1))
-    vector_norms = jnp.linalg.norm(flattened, axis=1)
-    vectors = (flattened / jnp.where(vector_norms > 0.0, vector_norms, 1.0)[:, None]).reshape(
-        (candidates, *shape)
-    )
-
-    @jax.jit
-    def certify(vector):
-        image = apply(vector)
-        denominator = jnp.vdot(vector, vector)
-        value = jnp.vdot(vector, image) / jnp.where(
-            denominator != 0.0,
-            denominator,
-            1.0 + 0.0j,
-        )
-        residual = jnp.linalg.norm(image - value * vector)
-        residual = residual / jnp.maximum(
-            jnp.abs(value) * jnp.linalg.norm(vector),
-            jnp.finfo(jnp.real(vector).dtype).tiny,
-        )
-        return value, residual
-
-    values, residuals = jax.vmap(certify)(vectors)
-    return PropagatorEigenSolution(
-        eigenvalues=values,
-        eigenvectors=vectors,
-        residuals=residuals,
-        converged=residuals < tol,
+    return _filtered_eigenpairs(
+        apply,
+        filtered,
+        initial,
+        krylov_dim=krylov_dim,
+        candidates=candidates,
+        tol=tol,
         operator_applications=4 * steps * krylov_dim + candidates,
+    )
+
+
+def exponential_eigenpairs(
+    apply: Callable[[jax.Array], jax.Array],
+    v0: jax.Array,
+    *,
+    horizon: float,
+    inner_krylov_dim: int,
+    outer_krylov_dim: int = 24,
+    candidates: int = 2,
+    tol: float = 1.0e-9,
+    restarts: int = 1,
+) -> PropagatorEigenSolution:
+    """Return leading modes using Arnoldi actions of ``exp(horizon * A)``.
+
+    Projecting each exponential action onto an inner Krylov space removes the
+    explicit stability limit. A second, small Arnoldi space extracts the
+    largest-magnitude propagator modes; every returned pair is certified
+    against the original continuous operator.
+    """
+
+    size = int(v0.size)
+    if not 1 <= candidates <= outer_krylov_dim < size:
+        raise ValueError("require 1 <= candidates <= outer_krylov_dim < operator size")
+    if not 1 < inner_krylov_dim <= size:
+        raise ValueError("inner_krylov_dim must be in (1, operator size]")
+    if horizon <= 0.0 or tol <= 0.0 or restarts < 1:
+        raise ValueError("horizon, tol, and restarts must be positive")
+    dtype = jnp.result_type(v0, jnp.complex64)
+    initial = jnp.asarray(v0, dtype=dtype)
+    horizon_value = jnp.asarray(horizon, dtype=jnp.real(initial).dtype)
+
+    def filtered(vector):
+        basis, projected = _arnoldi_basis(apply, vector, inner_krylov_dim)
+        coefficients = jax.scipy.linalg.expm(
+            horizon_value * projected[:inner_krylov_dim, :inner_krylov_dim]
+        )[:, 0]
+        return jnp.tensordot(
+            coefficients,
+            basis[:inner_krylov_dim],
+            axes=1,
+        )
+
+    return _filtered_eigenpairs(
+        apply,
+        filtered,
+        initial,
+        krylov_dim=outer_krylov_dim,
+        candidates=candidates,
+        tol=tol,
+        operator_applications=(restarts * inner_krylov_dim * outer_krylov_dim + candidates),
+        restarts=restarts,
     )
 
 
@@ -360,5 +443,6 @@ __all__ = [
     "RK4Timestep",
     "adaptive_eigenpair",
     "estimate_rk4_timestep",
+    "exponential_eigenpairs",
     "propagator_eigenpairs",
 ]

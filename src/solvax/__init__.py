@@ -98,6 +98,7 @@ from solvax.propagator import (
     RK4Timestep,
     adaptive_eigenpair,
     estimate_rk4_timestep,
+    exponential_eigenpairs,
     propagator_eigenpairs,
 )
 from solvax.randomized import nystrom_preconditioner
@@ -151,6 +152,7 @@ __all__ = [
     "block_tridiag_relative_residual",
     "eigenpair_reverse",
     "estimate_rk4_timestep",
+    "exponential_eigenpairs",
     "block_thomas",
     "block_thomas_checkpointed_fn",
     "block_thomas_factor",

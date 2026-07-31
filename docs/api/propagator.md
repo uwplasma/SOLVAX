@@ -6,6 +6,10 @@ operator. A deterministic broadband probe supplements the caller's seed so a
 recycled, nearly invariant eigenvector cannot hide peripheral modes.
 `adaptive_eigenpair` wraps a caller-supplied one-restart propagator solve with
 original-operator residual stopping and a numerical growth-defect guard.
+`exponential_eigenpairs` removes the explicit stability limit by projecting
+each matrix-exponential action into an inner Arnoldi space, then extracting
+leading modes in a smaller outer space. Returned values and residuals are
+always recomputed with the original operator.
 
 The propagator action remains application-specific: SOLVAX owns the stability
 and certification policy, while the caller owns the time-stepper and projected

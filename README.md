@@ -174,6 +174,7 @@ nearly defective eigenpairs through an explicit condition-number gate.
 | `solvax.tridiagonal` | Batched scalar tridiagonal solve (reproducible Thomas / fused cuSPARSE backend) and periodic (cyclic) systems via a Sherman--Morrison correction |
 | `solvax.elliptic` | Spectral Fourier--Helmholtz solve for separable periodic-by-bounded elliptic problems — the drift-plane / vorticity `lap phi = rhs` inversion, one FFT + one batched tridiagonal sweep |
 | `solvax.krylov` | Flexible restarted GMRES (CGS2 + Givens) over arrays, scalars and arbitrary pytrees with optional custom inner products, and GCROT Krylov subspace recycling with FIFO or harmonic-Ritz (GCRO-DR) deflated restarting |
+| `solvax.propagator` | Residual-certified RK4 and nested exponential-Arnoldi eigenmode extraction without materializing the operator |
 | `solvax.eigen` | Solver-independent implicit reverse derivatives for externally certified eigenpairs, including eigenvector observables and exceptional-point guards |
 | `solvax.pcg` | Matrix-free pytree PCG with preconditioning, fixed-shape residual history, and explicit convergence/breakdown status |
 | `solvax.fixed_point` | Safeguarded Aitken, bounded-memory (condition-filtered) Anderson, and matrix-free affine fixed-point FGMRES |
