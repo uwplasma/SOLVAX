@@ -68,6 +68,25 @@ def test_reverse_eigenpair_matches_phase_invariant_finite_difference() -> None:
     )
 
 
+def test_reverse_eigenpair_skips_left_solve_without_differentiation() -> None:
+    """A value-only cold solve must not pay for an unused adjoint mode."""
+
+    start, build, primal_solver, _left_solver = _problem()
+
+    def left_solver(*_args):
+        raise AssertionError("value-only solve requested an adjoint eigenvector")
+
+    value, _vector = eigenpair_reverse(
+        0.0,
+        build,
+        start,
+        primal_solver=primal_solver,
+        left_solver=left_solver,
+    )
+
+    assert value == pytest.approx(0.5 + 0.2j)
+
+
 def test_reverse_eigenpair_accepts_transpose_tangent_solver() -> None:
     """An application may replace generic GMRES for the one pullback solve."""
 

@@ -106,8 +106,9 @@ def eigenpair_reverse(
 
     @jax.custom_vjp
     def pair(parameters):
-        value, right, _left = solve_pair(parameters)
-        return value, right
+        apply = build(parameters)
+        value, right = primal_solver(parameters, apply, v0)
+        return jnp.asarray(value), jnp.asarray(right)
 
     def pair_fwd(parameters):
         value, right, left = solve_pair(parameters)
