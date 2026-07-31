@@ -64,6 +64,11 @@ from solvax.implicit import (
 )
 from solvax.krylov import KrylovSolution, gcrot, gmres
 from solvax.native import SpluFactorization, splu_solve
+from solvax.native_eigen import (
+    SparseEigenSolution,
+    sparse_eigenpairs,
+    sparse_operator_matrix,
+)
 from solvax.operators import (
     BlockTridiagonalOperator,
     BorderedOperator,
@@ -243,6 +248,9 @@ __all__ = [
     "chunked_jacrev",
     "chunked_jacobian",
     "SpluFactorization",
+    "SparseEigenSolution",
     "splu_solve",
+    "sparse_eigenpairs",
+    "sparse_operator_matrix",
     "__version__",
 ]

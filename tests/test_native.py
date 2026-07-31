@@ -48,6 +48,10 @@ def test_factorization_reuse_identical():
     # A second right-hand side reuses the same factors.
     x3 = lu.solve(2.0 * b)
     assert np.allclose(np.asarray(x3), 2.0 * np.asarray(x1), atol=1e-10)
+    xh = lu.solve(b, trans="H")
+    assert np.allclose(a.toarray().conj().T @ np.asarray(xh), np.asarray(b), atol=1e-10)
+    with pytest.raises(ValueError, match="trans"):
+        lu.solve(b, trans="bad")
 
 
 def test_splu_solve_raises_under_jit():

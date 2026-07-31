@@ -63,9 +63,39 @@ For large PDEs, a matrix-free Krylov method with a structured preconditioner may
 scale better. For small-to-moderate difficult CPU systems, SuperLU is often the
 more robust engineering choice.
 
+## Sparse shift-invert eigenpairs
+
+For a sparse nonsymmetric operator whose rightmost mode is difficult to
+discover from an unshifted transient, sample JAX operator columns in bounded
+batches and reuse one shifted LU for both right and adjoint modes:
+
+```python
+import scipy.sparse as sp
+import solvax as sx
+
+matrix = sx.sparse_operator_matrix(
+    apply, prototype, batch_size=64, drop_tolerance=1e-14
+)
+shift = 0.2 - 0.4j
+factor = sx.SpluFactorization(matrix - shift * sp.eye(matrix.shape[0]))
+right = sx.sparse_eigenpairs(matrix, shift=shift, factorization=factor)
+left = sx.sparse_eigenpairs(
+    matrix, shift=shift, factorization=factor, adjoint=True
+)
+```
+
+The assembly never holds the full dense matrix, and the adjoint uses the
+conjugate-transpose solve of the same factors. The bridge itself is eager, but
+the converged pair can be supplied to `eigenpair_reverse`; derivatives then
+come from the implicit eigenpair equations rather than from SciPy or the LU
+iteration tape. Always certify a dropped sparse approximation against the
+original application operator.
+
 ## API summary
 
 - {class}`solvax.native.SpluFactorization`
 - {func}`solvax.native.splu_solve`
+- {func}`solvax.native_eigen.sparse_operator_matrix`
+- {func}`solvax.native_eigen.sparse_eigenpairs`
 
 Runnable counterpart: `examples/13_native_splu.py`.

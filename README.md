@@ -25,8 +25,9 @@ and `jax.jvp` raise on it rather than falling back to the taped path (pass the
 full window, or differentiate the untruncated entry point, when forward mode is
 what you need); `eigenpair_reverse` supports reverse mode but orchestrates
 application-supplied eigensolvers on the host, so their compiled kernels sit
-inside rather than around that dispatcher; and `solvax.native` runs SciPy's
-SuperLU on the host, so it refuses to be traced at all and says so.
+inside rather than around that dispatcher; and `solvax.native` host primitives
+refuse direct tracing while still composing as external primals with
+`eigenpair_reverse`.
 
 It complements general JAX solver libraries with block-structured direct
 elimination, coarse-operator and multigrid preconditioning, and Krylov
@@ -181,7 +182,7 @@ nearly defective eigenpairs through an explicit condition-number gate.
 | `solvax.implicit` | Matrix-free `newton_krylov` (JFNK) plus implicit-function-theorem `linear_solve` and `root_solve` — gradients cost one extra (transposed) solve |
 | `solvax.autodiff` | Bounded-memory chunked forward/reverse Jacobians (`chunked_jacfwd`/`jacrev`/`jacobian`) with automatic chunk sizing |
 | `solvax.refine` | Mixed-precision iterative refinement (float32 factor, float64 residuals) |
-| `solvax.native` | Host-side SuperLU bridge (non-differentiable, import-guarded) |
+| `solvax.native` / `native_eigen` | Host-side SuperLU and sparse shift-invert eigenpairs; eager primals compose with implicit eigenpair AD |
 
 Complex-valued GMRES/GCROT, tridiagonal solves, and fixed-point acceleration
 use Hermitian inner products and real-valued safeguards. Remaining roadmap:
