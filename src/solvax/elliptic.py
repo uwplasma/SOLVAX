@@ -6,7 +6,8 @@ Laplacian into a per-mode ``-k_z^2`` multiplier) and solving the remaining
 tridiagonal system in ``x`` for every Fourier mode at once. This is the
 ``lap phi = rhs`` inversion used by reduced drift-plane / vorticity models,
 where the operator is ``d/dx(g11 d/dx) + g33 d^2/dz^2`` with metric weights
-``g11(x)``, ``g33(x)``.
+``g11(x)``, ``g33(x)`` and homogeneous Dirichlet conditions at the bounded
+cell faces.
 
 All routines are pure JAX (``jit``/``grad``/``vmap`` transparent). Build the
 operator once for a fixed geometry with :func:`build_fourier_helmholtz_operator`
@@ -54,8 +55,11 @@ def build_fourier_helmholtz_operator(
 
     ``dx``, ``g11``, ``g33``, ``rhs_scale`` are length-``nx`` arrays along the
     bounded ``x`` axis; ``dz`` sets the periodic ``z`` spacing and ``nz`` its
-    length. The ``x`` boundaries use a reflected (homogeneous-Neumann-like)
-    closure consistent with the reduced drift-plane potential solve.
+    length. The bounded cell faces use homogeneous Dirichlet conditions. An
+    odd-reflected ghost value, ``phi_ghost = -phi_boundary_cell``, places
+    ``phi = 0`` halfway between the ghost and boundary-cell centers and gives
+    the endpoint stencil ``(-3 phi_0 + phi_1) / dx^2`` for constant
+    coefficients.
     """
 
     dx = jnp.asarray(dx, dtype=jnp.float64)

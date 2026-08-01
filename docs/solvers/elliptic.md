@@ -14,7 +14,8 @@ with metric weights $g_{11}(x)$, $g_{33}(x)$ and a right-hand-side scale
 $s(x)$ that depend only on the bounded coordinate. This is the
 $\nabla_\perp^2\phi=\rho$ potential inversion used by reduced drift-plane and
 vorticity models, where $\phi$ is the electrostatic potential and $\rho$ the
-generalized vorticity.
+generalized vorticity. The bounded cell faces impose homogeneous Dirichlet
+conditions, $\phi=0$.
 
 ## Method
 
@@ -34,10 +35,13 @@ $n_z/2+1$ modes are solved simultaneously through one call to
 mode index batched, so the whole inversion costs one FFT, one batched Thomas
 sweep of $O(n_xn_z)$ work, and one inverse FFT — direct, not iterative.
 
-The $x$ boundaries use a reflected closure consistent with the reduced
-drift-plane potential solve; the discrete operator applied to the returned
-solution reproduces the (scaled, transformed) right-hand side mode by mode,
-which is how the implementation is pinned in the test suite.
+The $x$ boundaries use an odd-reflected ghost value,
+$\phi_\mathrm{ghost}=-\phi_\mathrm{boundary\ cell}$. The boundary face lies
+halfway between those two centers, so the reflection imposes $\phi=0$ there.
+For constant coefficients the first second-derivative row is therefore
+$(-3\phi_0+\phi_1)/\Delta x^2$, with the mirrored row at the other end. The
+test suite pins both the assembled operator and an independent discrete
+Dirichlet eigenmode.
 
 ## Usage
 
@@ -53,7 +57,7 @@ phi = sx.solve_fourier_helmholtz(rho, operator=operator)
 
 | Input | Meaning |
 |---|---|
-| `dx`, `g11`, `g33`, `rhs_scale` | length-`nx` arrays along the bounded axis |
+| `dx`, `g11`, `g33`, `rhs_scale` | length-`nx` arrays along the homogeneous-Dirichlet bounded axis |
 | `dz`, `nz` | periodic spacing and length; `zlength = dz[0] * nz` |
 | `rhs` | real `(nx, nz)` right-hand side |
 | `method` | tridiagonal backend; `"thomas"` (default) is complex-safe everywhere |

@@ -16,5 +16,6 @@ api/fixed_point
 api/preconditioners
 api/implicit
 api/autodiff
+api/parallel
 api/native
 ```
