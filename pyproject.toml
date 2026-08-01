@@ -59,6 +59,37 @@ exclude = [
   "/.venv-*/**",
 ]
 
+[tool.mypy]
+# No `python_version` pin: numpy's bundled stubs use 3.12 type syntax, so
+# asking mypy to analyse them as 3.10 fails in numpy itself before it reaches
+# any SOLVAX code. The runtime floor is enforced by the test matrix instead.
+ignore_missing_imports = true          # jax and friends ship partial stubs
+files = ["src/solvax"]
+
+# The package advertises `Typing :: Typed` and ships `py.typed`, so downstream
+# type-checkers trust these annotations. That promise is only worth something
+# if something checks them, which nothing did: the marker shipped without a
+# gate, which is strictly worse than either shipping neither or shipping both.
+#
+# Nine modules do not pass yet. Every failure inspected was an annotation-
+# quality issue or a limitation of inference through `jax.lax.scan` carries and
+# `tuple(genexpr)` -- none was a live bug -- so they are silenced per module
+# rather than papered over with blanket ignores, and the count is recorded so
+# the debt is visible and can be paid down module by module. Anything not
+# listed here is checked, and a new module starts out checked.
+[[tool.mypy.overrides]]
+module = [
+  "solvax.fixed_point",     # 3
+  "solvax.implicit",        # 1
+  "solvax.krylov",          # 6
+  "solvax.operators",       # 3
+  "solvax.pcg",             # 1
+  "solvax.precond",         # 9
+  "solvax.smoothers",       # 4
+  "solvax.tridiagonal",     # 1
+]
+ignore_errors = true
+
 [tool.ruff]
 line-length = 100
 src = ["src"]

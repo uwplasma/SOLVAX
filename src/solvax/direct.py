@@ -459,7 +459,7 @@ def block_thomas_solve(
     # advertised linear_transpose/VJP contract and is also faster after
     # compilation for representative 8--64-block systems; compilation grows
     # with the static block count, as expected for an unrolled recurrence.
-    sigma = [None] * rhs.shape[0]
+    sigma: list[jax.Array] = [None] * rhs.shape[0]  # type: ignore[list-item]
     sigma[-1] = rhs[-1]
     for k in range(rhs.shape[0] - 2, -1, -1):
         sigma[k] = rhs[k] - down_blocks[k] @ tsolve(
@@ -1038,7 +1038,7 @@ def _block_thomas_selected_fn_state(
         # Tail sweep (blocks n-1 .. k): carry the running Schur complement
         # and the L block of the row just processed (needed one step below).
         l_last, d_last, _ = block_fn(jnp.int32(n - 1))
-        carry0 = (lu_factor(d_last), l_last)
+        tail_carry0 = (lu_factor(d_last), l_last)
 
         def tail_step(carry, j):
             delta_next, l_next = carry
@@ -1048,7 +1048,7 @@ def _block_thomas_selected_fn_state(
             return (delta_j, l_j), None
 
         (delta_head, l_head), _ = jax.lax.scan(
-            tail_step, carry0, jnp.arange(k, n - 1, dtype=jnp.int32), reverse=True
+            tail_step, tail_carry0, jnp.arange(k, n - 1, dtype=jnp.int32), reverse=True
         )
     else:
         # No tail: the head's top step has no block above; a dummy identity
@@ -1069,10 +1069,10 @@ def _block_thomas_selected_fn_state(
         delta_j = lu_factor(d_j - u_j @ x)
         return (delta_j, l_j, sigma_j), (delta_j[0], delta_j[1], sigma_j, l_j)
 
-    carry0 = (delta_head, l_head, jnp.zeros_like(rhs_low[0]))
+    head_carry0 = (delta_head, l_head, jnp.zeros_like(rhs_low[0]))
     head_inputs = (jnp.arange(k, dtype=jnp.int32), rhs_low)
     _, (lus, pivs, sigmas, ls) = jax.lax.scan(
-        head_step, carry0, head_inputs, reverse=True
+        head_step, head_carry0, head_inputs, reverse=True
     )
 
     def up_step(x_prev, inputs):
