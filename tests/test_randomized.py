@@ -78,3 +78,42 @@ def test_nystrom_rejects_bad_rank():
         nystrom_preconditioner(lambda v: v, 10, 0, jax.random.PRNGKey(0))
     with pytest.raises(ValueError, match="rank"):
         nystrom_preconditioner(lambda v: v, 10, 11, jax.random.PRNGKey(0))
+
+
+@pytest.mark.parametrize(
+    ("label", "mu"),
+    [("zero-operator-mu0", 0.0), ("zero-operator-mu-positive", 1.0e-8)],
+)
+def test_nystrom_survives_a_zero_operator(label: str, mu: float) -> None:
+    """The sketch-proportional shift vanishes when the sketch does.
+
+    ``nu`` is proportional to ``||Y||``, so a zero operator gets no shift, the
+    core Cholesky is singular, and the triangular solve divides by it. Every
+    downstream value used to be NaN -- and a positive ``mu`` did not help,
+    because the failure happens before ``mu`` is ever used.
+    """
+    n = 8
+    operator = jnp.zeros((n, n))
+    precond = nystrom_preconditioner(
+        lambda v: operator @ v, n, 3, jax.random.PRNGKey(0), mu=mu
+    )
+    out = precond(jnp.ones(n))
+    assert jnp.all(jnp.isfinite(out)), label
+    # An operator with no range should leave the vector alone.
+    assert jnp.allclose(out, jnp.ones(n), atol=1e-10)
+
+
+def test_nystrom_rank_deficient_operator_has_no_zero_over_zero() -> None:
+    """With ``mu = 0`` a null direction gives ``(0 + 0) / (0 + 0)``.
+
+    The null-space limit is the identity on that direction, not an
+    indeterminate: a direction the operator does not see should pass through.
+    """
+    n = 8
+    factor = jax.random.normal(jax.random.PRNGKey(1), (n, 2))
+    operator = factor @ factor.T          # psd, rank 2 < sketch rank 3
+    precond = nystrom_preconditioner(
+        lambda v: operator @ v, n, 3, jax.random.PRNGKey(0), mu=0.0
+    )
+    out = precond(jnp.ones(n))
+    assert jnp.all(jnp.isfinite(out))

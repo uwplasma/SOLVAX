@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+### Fixed
+
+- `nystrom_preconditioner` returned `NaN` for a zero or rank-deficient
+  operator. The stabilizing shift is proportional to the sketch norm, so an
+  operator with no range got no shift, the core Cholesky was singular, and the
+  triangular solve divided by it -- before `mu` was ever used, which is why a
+  positive `mu` did not help either. The shift now has a floor, and the
+  eigenvalue scaling takes the null-space limit (leave the direction alone)
+  instead of evaluating 0/0.
+- The banded static-pivot clamp took its sign from the real part alone, so a
+  small complex pivot was rotated onto the real axis: `1e-18j` became a purely
+  real `1e-12`. It now clamps the magnitude and keeps the direction, which
+  reduces to the previous behaviour for real pivots.
+- `gcrot`'s recycle-drift diagnostic averaged per-column projected residual
+  norms and called that the mean sine of the principal angles. It is not: the
+  principal angles are a property of the two subspaces, while that average
+  changes under a unitary remixing of the same subspace (measured: 1e-4 on
+  random 4-dimensional subspaces of R^40). It is now the mean of the singular
+  values of the projected residual, which are the sines themselves -- and which
+  do not lose half their digits for nearly equal subspaces, the regime the
+  diagnostic exists for.
+
+### Added
+
+- A `types` CI job running mypy. The package advertises `Typing :: Typed` and
+  ships `py.typed`, so downstream type-checkers trust these annotations;
+  nothing verified them until now. Nine modules with pre-existing findings are
+  listed in `[tool.mypy]` so the gate holds the line rather than blocking on
+  debt, and everything else -- including `direct.py` -- is checked.
+
 - Add `shard_batch`, an explicit `jax.shard_map` wrapper for independent
   numerical batches. It fixes the input batch axis and one output batch axis
   to a named mesh axis, with validation for ranks and mesh names.

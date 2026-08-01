@@ -11,7 +11,11 @@ from jax.sharding import PartitionSpec as P
 try:
     from jax import shard_map as _shard_map
 except ImportError:  # JAX 0.4
-    from jax.experimental.shard_map import shard_map as _shard_map
+    # A conditional import of the same name is a redefinition to a static
+    # checker, which cannot know only one branch runs.
+    from jax.experimental.shard_map import (  # type: ignore[no-redef]
+        shard_map as _shard_map,
+    )
 
 InputT = TypeVar("InputT")
 OutputT = TypeVar("OutputT")

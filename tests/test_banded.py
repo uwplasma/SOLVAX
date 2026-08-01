@@ -213,3 +213,40 @@ def test_gradient_through_solve():
         e = jnp.zeros_like(bands).at[idx].set(eps)
         fd = (loss(bands + e) - loss(bands - e)) / (2 * eps)
         assert np.isclose(float(g[idx]), float(fd), rtol=1e-5)
+
+
+def test_static_pivot_clamp_preserves_a_complex_phase():
+    """Clamping the magnitude must not rotate the pivot.
+
+    Taking the sign from the real part alone is correct for real pivots and
+    wrong for complex ones: a pivot of ``1e-18j`` was replaced by a purely real
+    floor, a ninety-degree rotation of the number the elimination then divides
+    by. This checks a complex banded solve against a dense reference on a
+    system built to drive a pivot tiny and off the real axis.
+    """
+    n, kl, ku = 6, 1, 1
+    dense = jnp.zeros((n, n), dtype=jnp.complex128)
+    for i in range(n):
+        dense = dense.at[i, i].set(1.0 + 0.5j)
+        if i + 1 < n:
+            dense = dense.at[i, i + 1].set(0.3 - 0.2j)
+            dense = dense.at[i + 1, i].set(0.25 + 0.4j)
+    # Make one interior pivot small and almost purely imaginary.
+    dense = dense.at[3, 3].set(1e-13j)
+
+    bands = jnp.zeros((kl + ku + 1, n), dtype=jnp.complex128)
+    for i in range(n):
+        bands = bands.at[ku, i].set(dense[i, i])
+        if i + 1 < n:
+            bands = bands.at[ku - 1, i + 1].set(dense[i, i + 1])
+            bands = bands.at[ku + 1, i].set(dense[i + 1, i])
+
+    rhs = jnp.asarray([1.0 + 0j, 0.5j, -1.0, 2.0, 0.25 - 0.5j, 1.0])
+    factors = lu_factor_banded(bands, kl, ku)
+    got = lu_solve_banded(factors, rhs)
+    expected = jnp.linalg.solve(dense, rhs)
+    # The clamp perturbs the factorization, so this is not exact; it must still
+    # land in the right complex half-plane rather than rotated onto the reals.
+    assert jnp.all(jnp.isfinite(got))
+    relative = jnp.linalg.norm(got - expected) / jnp.linalg.norm(expected)
+    assert float(relative) < 0.5, f"solve is not close to the dense reference: {relative}"
