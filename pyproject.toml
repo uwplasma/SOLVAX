@@ -29,7 +29,11 @@ Documentation = "https://solvax.readthedocs.io"
 # Optional chunking backend. Kept optional on purpose: adv-jax-math pins a
 # narrower JAX range than SOLVAX supports, and SOLVAX must not constrain the
 # JAX version of the codes that depend on it.
-adv = ["adv-jax-math"]
+# The lower bound stays. Removing *upper* bounds is the right policy -- a
+# solver library must not cap the JAX its dependents may use -- but a lower
+# bound is the opposite thing: without it an old adv-jax-math resolves and
+# fails on an API it never had, at import time, far from the cause.
+adv = ["adv-jax-math>=1.1"]
 native = ["scipy"]
 dev = ["pytest", "pytest-cov", "pytest-xdist", "scipy", "numpy", "ruff"]
 bench = ["lineax", "scipy"]
