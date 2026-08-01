@@ -67,7 +67,17 @@ def nystrom_preconditioner(
 
     # Stabilized Nystrom factorization (Frangella-Tropp-Udell, Alg. 2.1):
     # shift by nu ~ eps ||Y|| so the core Cholesky exists for psd A.
-    nu = jnp.finfo(dtype).eps * jnp.linalg.norm(sketch)
+    #
+    # ``nu`` is proportional to ``||Y||``, so an operator whose sketch is zero
+    # -- the zero operator, or one whose range misses the sketch entirely --
+    # gets no shift at all. The core is then singular, its Cholesky is zero,
+    # and the triangular solve divides by it: every downstream value is NaN
+    # before the eigenvalue shift is even reached. A positive ``mu`` does not
+    # rescue this, because the damage is done upstream of ``mu``. The floor
+    # below keeps the shift strictly positive whatever the sketch contains.
+    eps = jnp.finfo(dtype).eps
+    sketch_norm = jnp.linalg.norm(sketch)
+    nu = jnp.maximum(eps * sketch_norm, jnp.asarray(eps, dtype) ** 2)
     shifted = sketch + nu * omega
     core = jnp.linalg.cholesky(omega.T @ shifted)
     half = jax.scipy.linalg.solve_triangular(core, shifted.T, lower=True).T
@@ -76,9 +86,18 @@ def nystrom_preconditioner(
 
     smallest = eigenvalues[-1]
 
+    # With ``mu = 0`` and a rank-deficient operator the smallest retained
+    # eigenvalue is zero, and the scale factor becomes 0/0. The limit that
+    # matters is the null-space one: an eigendirection the operator does not
+    # see should be left alone, which is the factor one, not an
+    # indeterminate. Clamping the denominator away from zero gives exactly
+    # that, and changes nothing when the shift is well defined.
+    denominator = jnp.where(eigenvalues + mu > 0.0, eigenvalues + mu, 1.0)
+    numerator = jnp.where(eigenvalues + mu > 0.0, smallest + mu, 1.0)
+
     def precond(v: jax.Array) -> jax.Array:
         projected = basis.T @ v
-        scaled = (smallest + mu) / (eigenvalues + mu) * projected
+        scaled = numerator / denominator * projected
         return basis @ (scaled - projected) + v
 
     return precond
