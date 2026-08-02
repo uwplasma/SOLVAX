@@ -105,17 +105,17 @@ class KrylovSolution(NamedTuple):
 #: perturbed along a fixed direction, ``m = 20``, ``k = 8``, ``rtol = 1e-10``,
 #: comparing a warm-started solve against a cold one at the same parameter:
 #:
-#: =========  =====================  ============
-#: drift      warm / cold iterations  verdict
-#: =========  =====================  ============
-#: 3.5e-05    12 / 21                 reuse helps
-#: 3.5e-03    16 / 21                 reuse helps
-#: 3.5e-02    18 / 21                 reuse helps
-#: 0.33       28 / 30                 reuse helps
-#: 0.58       69 / 70                 reuse helps
-#: 0.73       449 / 432               reuse costs 4%
-#: 0.87       neither converges       operator is the problem
-#: =========  =====================  ============
+#: =======  ======================  =======================
+#: drift    warm / cold iterations  verdict
+#: =======  ======================  =======================
+#: 3.5e-05  12 / 21                 reuse helps
+#: 3.5e-03  16 / 21                 reuse helps
+#: 3.5e-02  18 / 21                 reuse helps
+#: 0.33     28 / 30                 reuse helps
+#: 0.58     69 / 70                 reuse helps
+#: 0.73     449 / 432               reuse costs 4%
+#: 0.87     neither converges       operator is the problem
+#: =======  ======================  =======================
 #:
 #: Two things that calibration settles. Reuse pays over almost the whole range
 #: -- a pair whose subspace has rotated by a third of a right angle on average
