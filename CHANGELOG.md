@@ -1,6 +1,69 @@
 # Changelog
 
-## Unreleased
+## 0.12.0
+
+### Fixed
+
+- The Thomas pivot guard was a fixed `1e-12`, neither scale- nor
+  dtype-invariant: enormous beside a float32 system of order one, negligible
+  beside a float64 system scaled to `1e12`. It is now `sqrt(eps)` of the
+  working dtype times the coefficient scale, reduced along the solve axis only
+  so a sharded batch stays collective-free -- and so each system in a batch is
+  guarded against its own coefficients rather than the largest anywhere.
+- The Fourier--Helmholtz solver hard-cast its geometry to `float64`, silently
+  upgrading an x64-disabled program, or meaning nothing at all with x64 off. It
+  now infers the working precision from the caller and rejects complex
+  geometry explicitly.
+- `nystrom_preconditioner`'s null-direction test compared against exact zero.
+  On a rank-deficient operator those eigenvalues emerge from an SVD as rounding
+  noise, so the result depended on the linear-algebra backend: the same zero
+  operator gave the identity under one JAX release and arbitrary O(1) values
+  under another. The test is now relative, with a floor at the construction's
+  own resolution.
+
+### Added
+
+- `certified_adjoint_window` returns the smallest window whose relative
+  gradient error is *provably* within a requested tolerance. This is the
+  certificate `localization_crossover_window` has always declined to give, and
+  it is available because the exact-window rule leaves exactly one
+  approximation to bound: the source cotangent and every retained row cotangent
+  are exact blocks of the full solve, so the tail identity holds with equality
+  and each of its factors has a computable envelope. Making the statement
+  *relative* needs a lower bound on the gradient, which norms of the summands
+  cannot supply -- they cannot see cancellation -- so one windowed gradient
+  supplies it through the reverse triangle inequality. Conservative by two and a
+  half to seven orders of magnitude depending on the family, and a chain that
+  does not localize gets the full window rather than a plausible guess.
+- `plan_chain_windows` for batches whose chains localize at different rows.
+  `adjoint_window` is static, so one `vmap` runs the whole batch at the widest
+  window any chain needs; on a collisionality scan the criterion gives up on the
+  least collisional chain and drags everything to the full window. Padding to
+  the maximum does not fix that -- it is the problem -- so the planner cuts the
+  batch into a few static buckets by dynamic programming over the distinct
+  window values. Measured on a 24-chain scan: four buckets remove 51% of the
+  retained rows against a per-chain ideal of 59%.
+- `chain_window=` on `block_thomas_truncated_fn`, a traced per-chain window
+  under a static bound. It changes which rows contribute, not the retained
+  state, and is bit-identical to the uniform path when the two agree.
+- Forward-mode differentiation through the windowed rule now raises an error
+  that names what to do instead. JAX's own message is true and useless -- "can't
+  apply forward-mode autodiff (jvp) to a custom_vjp function" -- and a code
+  whose gradients are reverse but whose audits are forward needs to be told
+  which entry point supports both.
+- `nystrom_preconditioner` reports `spectrum_span`, the smallest retained
+  eigenvalue over the largest, so a caller can see whether the sketch reached
+  into the decaying tail or sat on a flat plateau. `nystrom_preconditioner_adaptive`
+  grows the rank until that estimate clears a target and returns the rank used.
+- `RECYCLE_DRIFT_ADVISORY`, a calibrated threshold for when to drop a recycle
+  pair, with the measurements behind it in the docstring. The calibration says
+  something worth knowing: reuse keeps paying up to a drift of about 0.6, far
+  further than a cautious guess would suggest, and the penalty for keeping a
+  stale pair is a few percent rather than a factor.
+- A scope-and-scaling suite covering tridiagonal behaviour across eight decades
+  of scaling, the complex banded path at sizes up to 512 with several
+  bandwidths, dtype promotion at the public entry points, and the forward-mode
+  message.
 
 ### Fixed
 

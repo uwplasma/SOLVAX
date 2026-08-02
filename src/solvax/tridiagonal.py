@@ -19,7 +19,7 @@ Two backends, selected per *lowering platform* at trace time:
       x[n-1] = d'[n-1],   x[j] = d'[j] - c'[j] x[j+1],
 
   implemented as two ``jax.lax.scan`` sweeps over the radial axis with a
-  ``eps = 1e-12`` guard on vanishing pivots. Fully jit/vmap/grad-transparent
+  ``sqrt(eps)*||A||`` guard on vanishing pivots. Fully jit/vmap/grad-transparent
   and, because the arithmetic is fixed, **bitwise reproducible** — the CPU
   path.
 
@@ -69,8 +69,35 @@ try:  # jax >= 0.4.16: per-lowering-platform branch selection.
 except ImportError:  # pragma: no cover - very old jax
     _platform_dependent = None
 
-#: Guard substituted for a vanishing pivot in both backends.
-_PIVOT_EPS = 1.0e-12
+def _pivot_guard(*arrays: jax.Array) -> jax.Array:
+    """Scale- and dtype-aware substitute for a vanishing pivot.
+
+    A fixed ``1e-12`` is neither: it is enormous next to a float32 system whose
+    entries are of order one, and negligible next to a float64 system scaled to
+    ``1e12``, so the same constant is simultaneously too aggressive and too
+    timid depending on the caller. The guard is instead ``sqrt(eps)`` of the
+    working dtype times the largest coefficient magnitude, which is the same
+    rule the banded factorization already uses for its static-pivot floor, and
+    which tracks both the precision and the scaling of the problem it is
+    handed. A system of all zeros has no scale to borrow, so the dtype's own
+    ``sqrt(eps)`` is the floor.
+    """
+    dtype = jnp.result_type(*arrays)
+    real_dtype = jnp.zeros((), dtype).real.dtype
+    # Reduce along the solve axis only, never over the batch axes. A global
+    # maximum would be an all-reduce the moment the batch is sharded across
+    # devices, which turns a collective-free banded solve into a communicating
+    # one -- `test_sharded_batched_tridiagonal_is_collective_free...` catches
+    # exactly that, and caught this. Reducing along axis 0 is local to each
+    # shard, and it is also the better quantity: each system in the batch gets
+    # a guard scaled to its own coefficients rather than to the largest system
+    # anywhere in the batch.
+    scale = None
+    for array in arrays:
+        column_max = jnp.max(jnp.abs(jnp.asarray(array)), axis=0)
+        scale = column_max if scale is None else jnp.maximum(scale, column_max)
+    root_eps = jnp.asarray(jnp.sqrt(jnp.finfo(real_dtype).eps), real_dtype)
+    return jnp.maximum(root_eps * scale, root_eps).astype(dtype)
 
 
 class TridiagonalSolveDiagnostics(NamedTuple):
@@ -317,7 +344,7 @@ def cyclic_tridiagonal_solve(
     # Numerical Recipes names the bottom-left corner alpha and top-right beta;
     # the public band arrays store those at upper[-1] and lower[0].
     alpha, beta = upper[-1], lower[0]
-    eps = jnp.asarray(_PIVOT_EPS, dtype=diag.dtype)
+    eps = _pivot_guard(diag, lower, upper)
     gamma = jnp.where(jnp.abs(diag[0]) > eps, -diag[0], -jnp.ones_like(diag[0]))
     core_diag = diag.at[0].set(diag[0] - gamma)
     core_diag = core_diag.at[-1].set(diag[-1] - alpha * beta / gamma)
@@ -389,7 +416,7 @@ def _lax_solve_raw(
     dl = jnp.broadcast_to(lower, d.shape)
     dl = dl.at[0].set(0.0)
     du = du.at[-1].set(0.0)
-    eps = jnp.asarray(_PIVOT_EPS, dtype=rhs.dtype)
+    eps = _pivot_guard(d, dl, du)
     d = jnp.where(d != 0.0, d, eps)
     tail = rhs.shape[d.ndim :]
     n_fields = int(np.prod(tail, dtype=np.int64)) if tail else 1
@@ -414,7 +441,7 @@ def _thomas_solve(lower: jax.Array, diag: jax.Array, upper: jax.Array, rhs: jax.
     if n_rows == 0:  # pragma: no cover - guarded upstream by tridiagonal_solve
         return rhs
 
-    eps = jnp.asarray(_PIVOT_EPS, dtype=rhs.dtype)
+    eps = _pivot_guard(diag, lower, upper)
     diag0 = jnp.where(diag[0] != 0.0, diag[0], eps)
     upper0 = upper[0] / diag0
     x0 = rhs[0] / diag0
@@ -489,7 +516,7 @@ def _reusable_tridiagonal_solver(lower, diag, upper):
     band_dtype = jnp.result_type(lower, diag, upper)
     lower, diag, upper = (value.astype(band_dtype)
         for value in (lower, diag, upper))
-    eps = jnp.asarray(_PIVOT_EPS, dtype=band_dtype)
+    eps = _pivot_guard(diag, lower, upper)
     pivot0 = jnp.where(diag[0] != 0.0, diag[0], eps)
     upper0 = upper[0] / pivot0
 

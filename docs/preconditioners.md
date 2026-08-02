@@ -292,6 +292,36 @@ decaying-spectrum SPD operator with a flat tail the test suite pins at least a
 2x PCG iteration reduction; the target regime is fast spectral decay ahead of
 a regularization shift.
 
+### Choosing the rank
+
+The bound is stated in terms of the $\mu$-effective dimension, which a caller
+does not usually know. `spectrum_span` is the posterior read: the smallest
+retained eigenvalue over the largest. Near zero the sketch has reached into the
+decaying tail and the approximation is capturing structure; near one the
+spectrum inside the sketch is flat, which means the rank is too small to be
+preconditioning anything and the bound's precondition is not met.
+
+```python
+precond = sx.nystrom_preconditioner(matvec, n, rank, key, mu=mu)
+print(float(precond.spectrum_span))  # << 1 means the sketch reached the tail
+```
+
+`nystrom_preconditioner_adaptive` acts on that reading, doubling the rank until
+the span clears a target and returning the rank it used:
+
+```python
+precond, rank = sx.nystrom_preconditioner_adaptive(matvec, n, key, mu=mu, span_target=1e-2)
+```
+
+The loop is ordinary Python, because each rank is a different static shape and
+the growth cannot happen inside one traced computation. Build the
+preconditioner when the operator changes, not inside a hot loop; each
+individual build is pure JAX and the result is traceable as usual. On a
+spectrum decaying geometrically the loop stops at rank 16; on a flat one it
+grows to the cap and returns that rank, which is the honest report — no rank
+preconditions a flat spectrum, and the caller learns that rather than paying
+for a sketch that cannot help.
+
 ## Symmetric Galerkin deflation
 
 PCG needs a fixed symmetric positive-definite preconditioner. Given a symmetric

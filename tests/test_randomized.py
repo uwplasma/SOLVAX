@@ -5,7 +5,12 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from solvax import nystrom_preconditioner, pcg, pcg_linear_solve
+from solvax import (
+    nystrom_preconditioner,
+    nystrom_preconditioner_adaptive,
+    pcg,
+    pcg_linear_solve,
+)
 
 jax.config.update("jax_enable_x64", True)
 
@@ -117,3 +122,56 @@ def test_nystrom_rank_deficient_operator_has_no_zero_over_zero() -> None:
     )
     out = precond(jnp.ones(n))
     assert jnp.all(jnp.isfinite(out))
+
+
+def test_nystrom_reports_how_much_spectrum_the_sketch_spans() -> None:
+    """The posterior read on whether the rank was adequate.
+
+    A sketch sitting on a flat plateau of the spectrum has a span near one and
+    is preconditioning almost nothing; one that reaches into the decaying tail
+    has a small span. Without this a caller cannot tell the two apart.
+    """
+    n = 64
+    rng = np.random.default_rng(0)
+    basis, _ = np.linalg.qr(rng.normal(size=(n, n)))
+
+    def build(decay):
+        spectrum = np.array([decay(i) for i in range(n)])
+        return jnp.asarray(basis @ np.diag(spectrum) @ basis.T)
+
+    fast = build(lambda i: 10.0 ** (-0.15 * i))
+    slow = build(lambda i: 1.0 / (1.0 + 0.02 * i))
+    key = jax.random.PRNGKey(0)
+
+    fast_span = float(
+        nystrom_preconditioner(lambda v: fast @ v, n, 32, key, mu=1e-8).spectrum_span
+    )
+    slow_span = float(
+        nystrom_preconditioner(lambda v: slow @ v, n, 32, key, mu=1e-8).spectrum_span
+    )
+    assert fast_span < 1e-3, "a decaying spectrum should report a small span"
+    assert slow_span > 0.1, "a flat spectrum should report a large span"
+
+
+def test_nystrom_adaptive_stops_early_on_a_decaying_spectrum() -> None:
+    """Growth must stop when the sketch is adequate, and cap when it is not."""
+    n = 64
+    rng = np.random.default_rng(0)
+    basis, _ = np.linalg.qr(rng.normal(size=(n, n)))
+
+    def build(decay):
+        return jnp.asarray(
+            basis @ np.diag(np.array([decay(i) for i in range(n)])) @ basis.T
+        )
+
+    key = jax.random.PRNGKey(0)
+    _, fast_rank = nystrom_preconditioner_adaptive(
+        lambda v: build(lambda i: 10.0 ** (-0.15 * i)) @ v, n, key, mu=1e-8
+    )
+    precond, slow_rank = nystrom_preconditioner_adaptive(
+        lambda v: build(lambda i: 1.0 / (1.0 + 0.02 * i)) @ v, n, key, mu=1e-8
+    )
+    assert fast_rank < n, "a decaying spectrum should not need the full rank"
+    assert slow_rank == n, "a flat spectrum should grow to the cap"
+    # And it reports honestly rather than pretending the cap was enough.
+    assert float(precond.spectrum_span) > 0.1

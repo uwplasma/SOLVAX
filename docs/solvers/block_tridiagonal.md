@@ -278,6 +278,109 @@ $O((K+w)m^2)$ scratch — **no band arrays exist in either direction**, and the
 reverse-mode footprint is measured flat from $N=32$ to $N=1024$ in the test
 suite and the transport-inversion benchmark.
 
+### Choosing the window, with a proof
+
+The window is a tolerance dial, and `certified_adjoint_window` sets it from the
+tolerance rather than from a rule of thumb. What makes a proof available here
+is that the exact-window rule leaves *one* approximation to bound: the source
+cotangent and every retained row cotangent are exact blocks of the full solve,
+so
+
+$$
+\nabla_p J - g_W = \sum_{j \ge W} DB_j(p)^*[\bar L_j, \bar D_j, \bar U_j]
+$$
+
+holds with equality. Bounding each factor by its envelope --- the primal and
+transposed transfer products, and the generator sensitivity
+$\gamma_j = \|DB_j(p)\|_F$ --- gives a computable
+
+$$
+\|\nabla_p J - g_W\| \le S \sum_{j \ge W}
+    \gamma_j \Lambda_j (X_{j-1} + X_j + X_{j+1}) =: B(W),
+$$
+
+with $S = \|\lambda_{K-1}\| \|x_{K-1}\|$ read off one selected-head solve.
+
+Turning that into a *relative* statement needs a lower bound on the gradient,
+which norms of the summands cannot give — they cannot see cancellation. One
+windowed gradient supplies it through the reverse triangle inequality,
+$\|\nabla_p J\| \ge \|g_{W_0}\| - B(W_0)$, and that bound is valid whichever
+window produced it, so searching over windows costs no further solves.
+
+```python
+cert = sx.certified_adjoint_window(
+    block_fn, n_blocks=N, keep_lowest=K, params=params,
+    rhs_low=rhs_low, cotangent=cotangent, rtol=1e-8,
+)
+cert.window                     # smallest window that provably meets rtol
+cert.certified_relative_error   # the proven bound, at or below rtol
+cert.tail_bound                 # the absolute bound on ||grad - g_W||
+```
+
+Two things to expect. The bound is a norm bound, so it is conservative, and how
+conservative depends strongly on the family: measured across the block-dominant,
+weakly-dominant and kinetic chains in `tests/test_certified_window.py`, the
+realized error runs between two and a half and seven orders of magnitude below
+the certified one. The returned window is wider than strictly necessary by the
+same token — the certificate buys a guarantee, not the minimal window, and
+`check_localized_gradient` remains the way to find out how much narrower you
+could have gone. And a chain that does not localize gets the full window with
+`status="full-window"` and a zero tail bound — an over-estimate, never an
+under-estimate.
+
+The certificate depends on the *cotangent*, not on the operator alone. That is
+not a wart: which window suffices genuinely depends on what is being
+differentiated, and a window certified for one objective is not certified for
+another.
+
+Cost is two localization sweeps, one generator Jacobian per row, and one or two
+differentiated solves. Pass `sensitivity=` when the per-row Jacobians are too
+expensive or an analytic bound on $\gamma_j$ is known; overstating it only
+widens the window, never invalidates the certificate.
+
+### Batches whose chains localize differently
+
+`adjoint_window` is static, so one `vmap` over a batch runs every chain at the
+widest window any chain needs. On a collisionality scan that is expensive in
+exactly the wrong place: the criterion gives up on the least collisional chain
+and drags the whole batch to the full window, while most chains would localize
+in a fraction of it.
+
+Padding to the maximum does not fix this — it *is* the problem. A segmented
+layout does: sort by window, cut into a few groups, trace one shape per group.
+`plan_chain_windows` chooses the cuts optimally by dynamic programming over the
+distinct window values, minimizing $\sum_b |b|(K + W_b)$.
+
+```python
+windows = [int(sx.certified_adjoint_window(chain, N, K, p, rhs, ct, rtol=1e-6))
+           for chain in chains]
+plan = sx.plan_chain_windows(windows, keep_lowest=K, max_buckets=4)
+for window, members in plan.buckets:
+    grads = jax.vmap(lambda c: chain_gradient(c, adjoint_window=window))(members)
+```
+
+Measured on a 24-chain scan spanning $\nu = 10^{-3.5}$ to $10^{-0.5}$ at
+$N=80$, $K=3$, `rtol=1e-6`, where the certified windows run from 5 to the full
+77:
+
+| buckets | retained rows | vs. uniform |
+|---|---:|---:|
+| 1 (uniform) | 1920 | — |
+| 2 | 1170 | 39.1% |
+| 3 | 1015 | 47.1% |
+| 4 | 935 | 51.3% |
+| 8 | 833 | 56.6% |
+| per-chain ideal | 785 | 59.1% |
+
+Four buckets recover most of what per-chain windows could give, for four traced
+shapes instead of twenty-four.
+
+Inside a bucket, `chain_window=` gives each chain its own window as a traced
+value. It changes which rows contribute to the gradient, not the retained
+state, which the bucket's static window fixes — so use it for accuracy
+bookkeeping, and the buckets for memory. With `chain_window` equal to the
+static window the result is bit-identical to the uniform path.
+
 ## Residual gate
 
 Validate a solve with an operator action independent of the factorization:
@@ -347,6 +450,10 @@ defect corrections recover accuracy when the conditioning permits. See
 - {func}`solvax.direct.block_thomas_truncated`
 - {func}`solvax.direct.block_thomas_truncated_fn`
 - {func}`solvax.direct.block_thomas_truncated_fn_with_residual`
+- {func}`solvax.direct.certified_adjoint_window`
+- {func}`solvax.direct.plan_chain_windows`
+- {func}`solvax.direct.localization_crossover_window`
+- {func}`solvax.direct.check_localized_gradient`
 - {func}`solvax.direct.mixed_precision_block_thomas`
 
 Runnable counterparts: `examples/01_block_tridiagonal_kinetic.py`,
