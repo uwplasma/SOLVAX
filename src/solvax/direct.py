@@ -2198,15 +2198,17 @@ def certified_adjoint_window(
         return float(np.sqrt(sum(squares)))
 
     heuristic = localization_crossover_window(primal_fn, n, k)
-    probe = full if probe_window is None else min(max(int(probe_window), 0), full)
     if probe_window is None:
         probe = min(int(heuristic.window), full)
+    else:
+        probe = min(max(int(probe_window), 0), full)
 
-    # Reverse triangle inequality needs ||g_probe|| > B(probe). Widen until it
-    # holds; the full window always does, since its tail is empty.
+    # The reverse triangle inequality needs ||g_probe|| > B(probe) to say
+    # anything. Widen until it does; the full window always does, because its
+    # tail is empty and its bound is therefore exactly zero.
     lower = gradient_norm(probe) - bound(probe)
     while lower <= 0.0 and probe < full:
-        probe = full if probe == 0 else min(probe * 2, full)
+        probe = min(max(probe, 1) * 2, full)
         lower = gradient_norm(probe) - bound(probe)
 
     if lower <= 0.0:
