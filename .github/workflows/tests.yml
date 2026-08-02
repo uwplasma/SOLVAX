@@ -61,7 +61,14 @@ jobs:
             python: "3.12"
             stack: adv
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    # Thirty rather than fifteen. The suite grows every release and the old
+    # budget had stopped being a backstop against a hang and become a race:
+    # the last green run finished with fourteen seconds to spare, and the run
+    # after it was cancelled mid-step on two platforms. A timeout that trips on
+    # ordinary growth reports "cancelled", which reads like a failing test and
+    # costs a diagnosis every time. If a job ever genuinely hangs, thirty
+    # minutes still catches it.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -91,7 +98,7 @@ jobs:
       # Executing every example spawns one subprocess each. What that checks
       # is that the code runs at all, which is not platform-specific, so one
       # OS is enough --- and running it on the slower macOS runner as well was
-      # what pushed that job past its fifteen-minute limit.
+      # what first pushed that job past its time limit.
       - run: pytest -n auto --cov --cov-report=xml
         if: matrix.os == 'ubuntu-latest'
       - run: pytest -n auto --cov --cov-report=xml -m "not slow_examples"

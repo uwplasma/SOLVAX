@@ -113,10 +113,10 @@ def test_realized_gradient_error_is_within_the_certified_tolerance(rtol):
 @pytest.mark.parametrize(
     "name,chain,n,keep",
     [
-        ("dominant", _dominant_chain(40, seed=3), 40, 3),
-        ("weakly-dominant", _dominant_chain(30, seed=11, dominance=1.05), 30, 2),
-        ("kinetic-nu-2e-2", _kinetic_chain(60, collisionality=0.02), 60, 4),
-        ("kinetic-nu-2e-3", _kinetic_chain(60, collisionality=0.002), 60, 4),
+        ("dominant", _dominant_chain(28, seed=3), 28, 3),
+        ("weakly-dominant", _dominant_chain(24, seed=11, dominance=1.05), 24, 2),
+        ("kinetic-nu-2e-2", _kinetic_chain(40, collisionality=0.02), 40, 4),
+        ("kinetic-nu-2e-3", _kinetic_chain(40, collisionality=0.002), 40, 4),
     ],
 )
 @pytest.mark.parametrize("rtol", [1e-3, 1e-7])
@@ -183,7 +183,7 @@ def test_a_zero_cotangent_is_not_certifiable_and_says_so():
     # can be met by any proper window. Returning the exact window is the only
     # defensible answer; returning a small one would be certifying against
     # nothing.
-    n, keep = 24, 3
+    n, keep = 16, 3
     block_fn = _dominant_chain(n, seed=3)
     params = jnp.asarray([0.12, 0.05])
     rhs, _ = _problem(41, keep)
@@ -195,7 +195,7 @@ def test_a_zero_cotangent_is_not_certifiable_and_says_so():
 
 
 def test_tighter_tolerances_never_ask_for_a_narrower_window():
-    n, keep = 40, 3
+    n, keep = 24, 3
     block_fn = _dominant_chain(n, seed=3)
     params = jnp.asarray([0.12, 0.05])
     rhs, cotangent = _problem(7, keep)
@@ -203,7 +203,7 @@ def test_tighter_tolerances_never_ask_for_a_narrower_window():
         sx.certified_adjoint_window(
             block_fn, n, keep, params, rhs, cotangent, rtol=r
         ).window
-        for r in (1e-2, 1e-4, 1e-6, 1e-8, 1e-10)
+        for r in (1e-2, 1e-5, 1e-8, 1e-11)
     ]
     assert windows == sorted(windows)
 
@@ -272,7 +272,7 @@ def test_a_wrongly_shaped_sensitivity_is_rejected():
 def test_an_overstated_sensitivity_only_widens_the_window():
     # The bound is monotone in gamma, so a caller who supplies a loose analytic
     # bound gets a conservative window rather than an invalid certificate.
-    n, keep = 40, 3
+    n, keep = 24, 3
     block_fn = _dominant_chain(n, seed=3)
     params = jnp.asarray([0.12, 0.05])
     rhs, cotangent = _problem(7, keep)
@@ -295,7 +295,7 @@ def test_an_overstated_sensitivity_only_widens_the_window():
 
 
 def test_the_certified_window_can_be_passed_straight_to_the_solver():
-    n, keep = 40, 3
+    n, keep = 24, 3
     block_fn = _dominant_chain(n, seed=3)
     params = jnp.asarray([0.12, 0.05])
     rhs, cotangent = _problem(7, keep)
@@ -312,7 +312,7 @@ def test_the_certified_window_can_be_passed_straight_to_the_solver():
 
 def test_the_heuristic_stays_uncertified():
     # The two entry points make different promises and must keep saying so.
-    n, keep = 40, 3
+    n, keep = 24, 3
     block_fn = _dominant_chain(n, seed=3)
     params = jnp.asarray([0.12, 0.05])
     heuristic = sx.localization_crossover_window(

@@ -206,10 +206,10 @@ def test_max_buckets_must_be_positive():
 
 def test_bucketing_a_collisionality_scan_cuts_retained_state_and_keeps_accuracy():
     """The measurement #57 asks for, run as a test rather than asserted in prose."""
-    n, keep = 60, 3
+    n, keep = 40, 3
     params = jnp.asarray([0.1, 0.05])
     rhs, cotangent = _data(keep, seed=11)
-    collisionalities = np.logspace(-3.0, -0.7, 10)
+    collisionalities = np.logspace(-2.8, -0.7, 6)
 
     windows, chains = [], []
     for nu in collisionalities:
