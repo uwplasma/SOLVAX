@@ -23,6 +23,29 @@
 
 ### Added
 
+- `certified_adjoint_window` returns the smallest window whose relative
+  gradient error is *provably* within a requested tolerance. This is the
+  certificate `localization_crossover_window` has always declined to give, and
+  it is available because the exact-window rule leaves exactly one
+  approximation to bound: the source cotangent and every retained row cotangent
+  are exact blocks of the full solve, so the tail identity holds with equality
+  and each of its factors has a computable envelope. Making the statement
+  *relative* needs a lower bound on the gradient, which norms of the summands
+  cannot supply -- they cannot see cancellation -- so one windowed gradient
+  supplies it through the reverse triangle inequality. Conservative by two and a
+  half to seven orders of magnitude depending on the family, and a chain that
+  does not localize gets the full window rather than a plausible guess.
+- `plan_chain_windows` for batches whose chains localize at different rows.
+  `adjoint_window` is static, so one `vmap` runs the whole batch at the widest
+  window any chain needs; on a collisionality scan the criterion gives up on the
+  least collisional chain and drags everything to the full window. Padding to
+  the maximum does not fix that -- it is the problem -- so the planner cuts the
+  batch into a few static buckets by dynamic programming over the distinct
+  window values. Measured on a 24-chain scan: four buckets remove 51% of the
+  retained rows against a per-chain ideal of 59%.
+- `chain_window=` on `block_thomas_truncated_fn`, a traced per-chain window
+  under a static bound. It changes which rows contribute, not the retained
+  state, and is bit-identical to the uniform path when the two agree.
 - Forward-mode differentiation through the windowed rule now raises an error
   that names what to do instead. JAX's own message is true and useless -- "can't
   apply forward-mode autodiff (jvp) to a custom_vjp function" -- and a code

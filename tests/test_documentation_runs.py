@@ -118,6 +118,25 @@ sup = jnp.full((n_line,), -1.0)
 line_rhs = jnp.ones((n_line,))
 rhs1 = rhs
 rhs2 = 2.0 * rhs
+
+# Output cotangent for the certified-window excerpt: it certifies a window for
+# a particular differentiated quantity, so the snippet needs one.
+ct = jnp.ones((K, m))
+
+# A small batch of chains that localize at different rows, for the per-chain
+# window excerpt.
+chains = jnp.arange(4)
+windows = [1, 2, 3, 5]
+
+
+def chain_gradient(chain, adjoint_window):
+    def head(q):
+        return sx.block_thomas_truncated_fn(
+            block_fn, N, rhs[:K], keep_lowest=K, params=q,
+            adjoint_window=adjoint_window,
+        )
+
+    return jax.grad(lambda q: loss(head(q)))(p)
 """
 
 

@@ -56,6 +56,7 @@ from math import isqrt
 from typing import NamedTuple
 
 import jax
+import jax.flatten_util
 import jax.numpy as jnp
 import numpy as np
 from jax.scipy.linalg import lu_factor, lu_solve
@@ -1259,6 +1260,86 @@ def _truncated_fn_bwd(block_fn, n_blocks, keep_lowest, adjoint_window, residuals
     return params_bar, rhs_bar
 
 
+@partial(jax.custom_vjp, nondiff_argnums=(0, 1, 3, 4))
+def _truncated_fn_masked(
+    block_fn,
+    n_blocks: int,
+    params,
+    keep_lowest: int,
+    adjoint_window: int,
+    rhs_low: jax.Array,
+    row_mask: jax.Array,
+) -> jax.Array:
+    """Windowed solve whose retained rows are selected by a *traced* mask.
+
+    Identical to :func:`_truncated_fn_bounded` in the forward direction --- the
+    mask does not enter the primal at all --- and identical in reverse when the
+    mask is all ones. Its reason to exist is ``vmap``: ``adjoint_window`` is
+    static and therefore shared by every chain in a batch, whereas a mask is
+    ordinary data and can differ per chain.
+    """
+    solution, _, _, _, _ = _block_thomas_selected_fn_state(
+        lambda k: block_fn(params, k), n_blocks, rhs_low, keep_lowest, keep_lowest
+    )
+    return solution
+
+
+def _truncated_fn_masked_fwd(
+    block_fn, n_blocks, params, keep_lowest, adjoint_window, rhs_low, row_mask
+):
+    _, primal_window = _window_lengths(n_blocks, keep_lowest, adjoint_window)
+    x_window, _, _, _, _ = _block_thomas_selected_fn_state(
+        lambda k: block_fn(params, k), n_blocks, rhs_low, keep_lowest, primal_window
+    )
+    return x_window[:keep_lowest], (params, rhs_low, x_window, row_mask)
+
+
+def _truncated_fn_masked_bwd(
+    block_fn, n_blocks, keep_lowest, adjoint_window, residuals, ct
+):
+    """Exact-window reverse rule with a per-chain row selection.
+
+    The mask multiplies the *retained row* cotangents only. It must not touch
+    the source cotangent ``bar b = P_K lambda``, which is exact at every window
+    and would be silently corrupted by narrowing it -- that gradient does not
+    depend on the window and masking it would introduce an error the uniform
+    path does not have.
+    """
+    params, rhs_low, x_window, row_mask = residuals
+    n, k = n_blocks, keep_lowest
+    retained_rows, _ = _window_lengths(n, k, adjoint_window)
+
+    transposed_block_fn = _generated_transpose_block_fn(block_fn, params, n)
+    lam_window, _, _, _, _ = _block_thomas_selected_fn_state(
+        transposed_block_fn, n, ct, k, retained_rows
+    )
+    rhs_bar = lam_window[:k]
+
+    lower_bar, diag_bar, upper_bar = _retained_row_cotangents(lam_window, x_window)
+    weights = row_mask.astype(lower_bar.dtype).reshape((-1,) + (1,) * (lower_bar.ndim - 1))
+    lower_bar = lower_bar * weights
+    diag_bar = diag_bar * weights
+    upper_bar = upper_bar * weights
+
+    def accumulate(carry, inputs):
+        j, l_bar, d_bar, u_bar = inputs
+        _, pullback = jax.vjp(lambda p: block_fn(p, j), params)
+        (contribution,) = pullback((l_bar, d_bar, u_bar))
+        return jax.tree.map(jnp.add, carry, contribution), None
+
+    zero = jax.tree.map(jnp.zeros_like, params)
+    indices = jnp.arange(retained_rows, dtype=jnp.int32)
+    params_bar, _ = jax.lax.scan(
+        accumulate, zero, (indices, lower_bar, diag_bar, upper_bar)
+    )
+    # The mask selects an approximation; it is not a quantity the primal
+    # depends on, so its cotangent is exactly zero.
+    return params_bar, rhs_bar, jnp.zeros_like(row_mask)
+
+
+_truncated_fn_masked.defvjp(_truncated_fn_masked_fwd, _truncated_fn_masked_bwd)
+
+
 def _leading_principal_params_bar(
     block_fn, n_blocks: int, params, keep_lowest: int, adjoint_window: int, rhs_low, ct
 ):
@@ -1405,6 +1486,7 @@ def block_thomas_truncated_fn(
     *,
     params=None,
     adjoint_window: int | None = None,
+    chain_window: jax.Array | None = None,
 ) -> jax.Array:
     """Truncated block-tridiagonal solve with on-the-fly block assembly.
 
@@ -1436,6 +1518,14 @@ def block_thomas_truncated_fn(
             ``params``); band-gradient error decays as ``O(rho^{2w})`` for
             block diagonally dominant systems, exactly as for
             :func:`block_thomas_truncated`.
+        chain_window: optional *traced* per-chain window, at most
+            ``adjoint_window``. Because ``adjoint_window`` is static it is
+            shared by every chain under ``vmap``, which forces one worst-case
+            width on the whole batch; ``chain_window`` is ordinary data and so
+            can differ per chain. ``adjoint_window`` then bounds the retained
+            rows (and hence the memory) while each chain contributes only its
+            own. Passing ``chain_window=adjoint_window`` reproduces the uniform
+            gradient exactly.
 
     Returns:
         The lowest ``keep_lowest`` solution blocks, same layout as ``rhs_low``.
@@ -1447,12 +1537,26 @@ def block_thomas_truncated_fn(
         if adjoint_window < 0:
             raise ValueError("params requires a non-negative adjoint_window")
         try:
+            if chain_window is not None:
+                retained_rows, _ = _window_lengths(
+                    n_blocks, keep_lowest, adjoint_window
+                )
+                rows = jnp.arange(retained_rows, dtype=jnp.int32)
+                mask = (rows < keep_lowest + jnp.asarray(chain_window)).astype(
+                    jnp.result_type(rhs_low).type(0).real.dtype
+                )
+                return _truncated_fn_masked(
+                    block_fn, n_blocks, params, keep_lowest, adjoint_window,
+                    rhs_low, mask,
+                )
             return _truncated_fn_bounded(
                 block_fn, n_blocks, params, keep_lowest, adjoint_window, rhs_low
             )
         except TypeError as error:  # forward-mode through a custom_vjp
             _reraise_forward_mode(error)
             raise
+    if chain_window is not None:
+        raise ValueError("chain_window requires params")
     solution, _, _, _, _ = _block_thomas_truncated_fn_state(
         block_fn, n_blocks, rhs_low, keep_lowest
     )
@@ -1634,9 +1738,17 @@ class LocalizationWindow:
             below ``threshold``, or ``n_blocks`` if it never does.
         localized: whether such a row exists within the chain.
         primal_profile: the full ``rho_k`` array the decision was read from.
-        certified: always ``False``. Present so that calling code can branch on
-            it today and keep working if a certified estimator is added later.
-        status: ``"heuristic"`` or ``"full-window"``.
+        certified: whether the window carries a proof that the realized
+            gradient error is within ``tolerance``. ``False`` from
+            :func:`localization_crossover_window`, which is a diagnostic;
+            ``True`` from :func:`certified_adjoint_window`.
+        status: ``"heuristic"``, ``"certified"`` or ``"full-window"``.
+        tolerance: the relative tolerance certified against, when certified.
+        tail_bound: absolute bound on ``||grad - g_W||`` at this window.
+        gradient_lower_bound: the certified lower bound on ``||grad||`` that
+            made the relative statement possible.
+        certified_relative_error: ``tail_bound / gradient_lower_bound`` -- the
+            proven relative gradient error, at or below ``tolerance``.
     """
 
     window: int
@@ -1645,6 +1757,10 @@ class LocalizationWindow:
     primal_profile: np.ndarray
     certified: bool = False
     status: str = "heuristic"
+    tolerance: float | None = None
+    tail_bound: float | None = None
+    gradient_lower_bound: float | None = None
+    certified_relative_error: float | None = None
 
     def __int__(self) -> int:
         return int(self.window)
@@ -1736,6 +1852,394 @@ def suggest_adjoint_window(
         localization_crossover_window(
             block_fn, n_blocks, keep_lowest, threshold=threshold, margin=margin
         )
+    )
+
+
+def _generator_sensitivity(
+    block_fn: Callable[..., tuple[jax.Array, jax.Array, jax.Array]],
+    params,
+    n_blocks: int,
+) -> jax.Array:
+    """``gamma_j = ||D B_j(p)||_F`` for every row of a generated chain.
+
+    ``B_j`` is the map from the parameters to row ``j``'s block triple, so
+    ``gamma_j`` bounds how much of a row cotangent the generator can transmit
+    back into parameter space: ``||D B_j(p)^*[M]||_2 <= gamma_j ||M||_F``. The
+    Frobenius norm is used rather than the induced 2-norm because it is an
+    upper bound on it and is computable exactly, where the induced norm would
+    need an iteration that converges from *below* -- the wrong side for a
+    certificate.
+
+    Cost is one full Jacobian per row, mapped so that only one is live at a
+    time. That is affordable as a setup diagnostic and prohibitive inside a
+    solve, which is why :func:`certified_adjoint_window` accepts a precomputed
+    ``sensitivity`` for callers whose parameter vector is large or whose
+    generator has a known analytic bound.
+    """
+
+    flat, unravel = jax.flatten_util.ravel_pytree(params)
+    basis = jnp.eye(flat.size, dtype=flat.dtype)
+    # A complex parameter is differentiated as R^2, not as C: the generator is
+    # not assumed holomorphic, and `jacfwd` refuses complex input for exactly
+    # that reason. Summing over both real tangent directions gives the
+    # Frobenius norm of the real Jacobian, which is the object the bound needs.
+    # For a generator that *is* holomorphic this over-counts by sqrt(2), which
+    # is the safe direction for a certificate.
+    if jnp.issubdtype(flat.dtype, jnp.complexfloating):
+        basis = jnp.concatenate([basis, 1j * basis], axis=0)
+
+    def row_norm(j):
+        def column(tangent_flat):
+            _, tangent = jax.jvp(
+                lambda p: block_fn(p, j), (params,), (unravel(tangent_flat),)
+            )
+            leaves = jax.tree_util.tree_leaves(tangent)
+            squares = [jnp.sum(jnp.abs(leaf) ** 2) for leaf in leaves]
+            return sum(squares[1:], squares[0])
+
+        return jnp.sqrt(jnp.sum(jax.vmap(column)(basis)))
+
+    return jax.lax.map(row_norm, jnp.arange(n_blocks, dtype=jnp.int32))
+
+
+def _tail_bound_profile(
+    block_fn,
+    params,
+    n_blocks: int,
+    keep_lowest: int,
+    sensitivity: jax.Array | None,
+) -> np.ndarray:
+    """Log of the unscaled tail bound ``T(W)`` for every retained-row count.
+
+    Returns ``log T`` indexed by ``W`` in ``[keep_lowest, n_blocks]``, where
+
+        ||grad - g_W|| <= S * T(W),
+        T(W) = sum_{j>=W} gamma_j Lambda_j (X_{j-1} + X_j + X_{j+1}),
+
+    ``S = ||lambda_{K-1}||_F ||x_{K-1}||_F`` is the scale supplied separately by
+    the caller's own data, and ``X``, ``Lambda`` are the primal and transposed
+    envelopes normalized to one at row ``K-1``.
+
+    The envelopes are ordered products of per-row transfer norms. Above the
+    source support the primal recursion is homogeneous, ``x_j = -Delta_j^{-1}
+    L_j x_{j-1}``, so ``||x_j|| <= rho_j ||x_{j-1}||`` with ``rho`` exactly the
+    profile :func:`localization_profile_fn` already computes; the adjoint obeys
+    the same recursion on the conjugate-transposed chain. Everything is
+    accumulated in logs, because these products run over the whole chain and a
+    chain that is not localized in its head has ``rho > 1`` there -- a direct
+    product overflows long before the interesting rows are reached.
+    """
+    n, k = n_blocks, keep_lowest
+    rho = np.asarray(localization_profile_fn(lambda j: block_fn(params, j), n))
+    transposed = _generated_transpose_block_fn(block_fn, params, n)
+    rho_t = np.asarray(localization_profile_fn(transposed, n))
+    if sensitivity is None:
+        gamma = np.asarray(_generator_sensitivity(block_fn, params, n))
+    else:
+        gamma = np.asarray(sensitivity)
+        if gamma.shape != (n,):
+            raise ValueError(f"sensitivity must have shape ({n},); got {gamma.shape}")
+
+    with np.errstate(divide="ignore"):
+        log_rho = np.log(np.abs(rho).astype(np.float64))
+        log_rho_t = np.log(np.abs(rho_t).astype(np.float64))
+        log_gamma = np.log(np.abs(gamma).astype(np.float64))
+
+    # X_j and Lambda_j for j in [K-1, N-1], with index N reserved for the
+    # out-of-chain block x_N = 0 that the last retained row pairs against.
+    log_x = np.full(n + 1, -np.inf)
+    log_lam = np.full(n + 1, -np.inf)
+    log_x[k - 1] = 0.0
+    log_lam[k - 1] = 0.0
+    for j in range(k, n):
+        log_x[j] = log_x[j - 1] + log_rho[j]
+        log_lam[j] = log_lam[j - 1] + log_rho_t[j]
+
+    # Row j contributes gamma_j * ||lambda_j|| * (||x_{j-1}|| + ||x_j|| + ||x_{j+1}||).
+    neighbourhood = np.logaddexp(
+        np.logaddexp(log_x[k - 1 : n - 1], log_x[k:n]), log_x[k + 1 : n + 1]
+    )
+    terms = log_gamma[k:n] + log_lam[k:n] + neighbourhood
+
+    # Suffix log-sum-exp: entry w is the bound for retaining rows [0, K+w).
+    suffix = np.full(n - k + 1, -np.inf)
+    for i in range(n - k - 1, -1, -1):
+        suffix[i] = np.logaddexp(terms[i], suffix[i + 1])
+    return suffix
+
+
+@dataclasses.dataclass(frozen=True)
+class ChainWindowPlan:
+    """How to run a batch of chains whose certified windows differ.
+
+    Attributes:
+        buckets: ``(window, chain_indices)`` pairs. Every chain in a bucket is
+            solved with that bucket's static ``adjoint_window``, so each bucket
+            is one traced shape.
+        retained_rows: total retained block rows under this plan.
+        uniform_retained_rows: total under the single worst-case window, which
+            is what one static window over the whole batch costs.
+        reduction: fraction of retained rows the plan removes.
+        ideal_retained_rows: total if every chain had its own window --- the
+            bound no bucketing can beat.
+    """
+
+    buckets: tuple[tuple[int, np.ndarray], ...]
+    retained_rows: int
+    uniform_retained_rows: int
+    reduction: float
+    ideal_retained_rows: int
+
+
+def plan_chain_windows(
+    windows,
+    keep_lowest: int,
+    *,
+    max_buckets: int = 4,
+) -> ChainWindowPlan:
+    """Group chains with different windows into a few static ones.
+
+    ``adjoint_window`` is static, so one ``vmap`` over a batch runs every chain
+    at the widest window any chain needs. When the chains are a collisionality
+    scan that is badly wasteful: the criterion gives up on the least collisional
+    chain and drags the whole batch to the full window, while most chains would
+    localize in a fraction of it.
+
+    Padding to the maximum does not fix this --- it *is* the problem. What fixes
+    it is a segmented layout: sort the chains by window, cut them into at most
+    ``max_buckets`` groups, and trace one shape per group. This function chooses
+    those cuts optimally, by dynamic programming over the distinct window
+    values, minimizing total retained rows ``sum_b |b| (K + W_b)``.
+
+    Args:
+        windows: per-chain windows, e.g. from :func:`certified_adjoint_window`
+            applied to each chain.
+        keep_lowest: source and output support ``K``.
+        max_buckets: how many distinct traced shapes to allow. More buckets
+            approach the per-chain ideal at the cost of more compilations.
+
+    Returns:
+        A :class:`ChainWindowPlan`. Run each bucket separately::
+
+            for window, chains in plan.buckets:
+                grads = jax.vmap(lambda c: gradient(c, adjoint_window=window))(chains)
+
+        Use ``chain_window=`` inside a bucket if the chains within it should
+        still use their individual windows; that changes which rows contribute
+        but not the retained state, which the bucket's static window fixes.
+    """
+    windows = np.asarray(windows, dtype=np.int64)
+    if windows.ndim != 1 or windows.size == 0:
+        raise ValueError("windows must be a non-empty one-dimensional array")
+    if max_buckets < 1:
+        raise ValueError("need max_buckets >= 1")
+    k = int(keep_lowest)
+
+    values, counts = np.unique(windows, return_counts=True)  # ascending
+    n_values = values.size
+    buckets = min(int(max_buckets), n_values)
+
+    # cost[i][j] = rows for chains with window in values[i..j], all run at
+    # values[j] -- the widest in the group.
+    prefix = np.concatenate([[0], np.cumsum(counts)])
+
+    def segment_cost(i, j):
+        return int(prefix[j + 1] - prefix[i]) * (k + int(values[j]))
+
+    # best[b][j]: minimum rows covering values[0..j] with b+1 buckets.
+    best = np.full((buckets, n_values), np.inf)
+    cut = np.zeros((buckets, n_values), dtype=np.int64)
+    for j in range(n_values):
+        best[0, j] = segment_cost(0, j)
+    for b in range(1, buckets):
+        for j in range(n_values):
+            for i in range(1, j + 1):
+                candidate = best[b - 1, i - 1] + segment_cost(i, j)
+                if candidate < best[b, j]:
+                    best[b, j] = candidate
+                    cut[b, j] = i
+
+    edges, j, b = [], n_values - 1, buckets - 1
+    while b > 0:
+        i = int(cut[b, j])
+        edges.append((i, j))
+        j, b = i - 1, b - 1
+    edges.append((0, j))
+    edges.reverse()
+
+    assignment = []
+    for i, j in edges:
+        window = int(values[j])
+        members = np.flatnonzero((windows >= values[i]) & (windows <= values[j]))
+        assignment.append((window, members))
+
+    retained = int(sum(len(m) * (k + w) for w, m in assignment))
+    uniform = int(windows.size * (k + int(values[-1])))
+    ideal = int(np.sum(windows + k))
+    return ChainWindowPlan(
+        buckets=tuple(assignment),
+        retained_rows=retained,
+        uniform_retained_rows=uniform,
+        reduction=1.0 - retained / uniform,
+        ideal_retained_rows=ideal,
+    )
+
+
+def certified_adjoint_window(
+    block_fn: Callable[..., tuple[jax.Array, jax.Array, jax.Array]],
+    n_blocks: int,
+    keep_lowest: int,
+    params,
+    rhs_low: jax.Array,
+    cotangent: jax.Array,
+    *,
+    rtol: float = 1.0e-6,
+    sensitivity: jax.Array | None = None,
+    probe_window: int | None = None,
+) -> LocalizationWindow:
+    r"""Smallest window whose gradient error is *provably* within ``rtol``.
+
+    This is the certificate that :func:`localization_crossover_window` declines
+    to give. It is possible because the exact-window rule leaves exactly one
+    approximation to bound: every retained row cotangent and the source
+    cotangent are exact blocks of the full solve, so
+
+    .. math::
+        \nabla_p J - g_W = \sum_{j \ge W} DB_j(p)^*[\bar L_j, \bar D_j, \bar U_j]
+
+    holds with equality, and the row cotangents are the rank-one products
+    :math:`\bar L_j = -\lambda_j x_{j-1}^*` and its neighbours. Bounding each
+    factor by its envelope gives a fully computable
+
+    .. math::
+        \|\nabla_p J - g_W\| \le S \sum_{j\ge W} \gamma_j \Lambda_j
+            (X_{j-1} + X_j + X_{j+1}) =: B(W),
+
+    with :math:`S = \|\lambda_{K-1}\|\,\|x_{K-1}\|` read off one selected-head
+    solve of the caller's own data and :math:`\gamma_j = \|DB_j(p)\|_F`.
+
+    Making that *relative* needs a lower bound on the gradient itself, which
+    norms of the summands cannot supply -- they cannot see cancellation. So one
+    windowed gradient is evaluated at a probe window, and the reverse triangle
+    inequality turns it into one: :math:`\|\nabla_p J\| \ge \|g_{W_0}\| -
+    B(W_0)`. That bound is valid whichever window produced it, so the search
+    over windows costs no further differentiated solves.
+
+    The returned window therefore satisfies
+    :math:`\|\nabla_p J - g_W\| \le \mathtt{rtol}\,\|\nabla_p J\|` --- a
+    statement about the realized gradient error, not about the bound.
+
+    Cost is two localization sweeps, ``n_blocks`` generator Jacobians, and one
+    or two differentiated solves. It is a setup computation: call it when the
+    operator or parameters change materially, not inside an optimizer step.
+
+    Args:
+        block_fn: row generator ``(params, k) -> (L_k, D_k, U_k)``.
+        n_blocks: static number of block rows.
+        keep_lowest: source and output support ``K`` (>= 1).
+        params: the parameters the gradient is taken with respect to.
+        rhs_low: the ``(K, m, ...)`` source, as passed to the solver.
+        cotangent: the output cotangent, same shape as the returned head. This
+            is problem data: the certified window depends on what is being
+            differentiated, not on the operator alone.
+        rtol: target relative gradient error.
+        sensitivity: precomputed ``gamma`` of shape ``(n_blocks,)``, if the
+            per-row Jacobians are too expensive or an analytic bound is known.
+        probe_window: window at which to evaluate the probe gradient. Defaults
+            to the heuristic crossover window, widening automatically if the
+            resulting lower bound is not positive.
+
+    Returns:
+        A :class:`LocalizationWindow` with ``certified=True``, carrying the
+        absolute bound, the gradient lower bound, and the certified relative
+        error. If no proper window is certifiable the full window is returned,
+        whose bound is zero because its tail is empty -- an over-estimate,
+        never an under-estimate.
+
+    See also:
+        :func:`localization_crossover_window` for the cheap uncertified
+        starting point, and :func:`check_localized_gradient` for the empirical
+        refinement check that needs no generator Jacobians.
+    """
+    if n_blocks < 2:
+        raise ValueError("need n_blocks >= 2")
+    if not 1 <= keep_lowest <= n_blocks:
+        raise ValueError("need 1 <= keep_lowest <= n_blocks")
+    if not 0.0 < rtol < 1.0:
+        raise ValueError("rtol must lie strictly between zero and one")
+
+    n, k = n_blocks, keep_lowest
+    full = n - k
+    log_tail = _tail_bound_profile(block_fn, params, n, k, sensitivity)
+
+    # S: the scale the envelopes are relative to. Both heads are exact blocks
+    # of the full solutions, so a K-row selected-head solve suffices for each.
+    primal_fn = lambda j: block_fn(params, j)  # noqa: E731
+    x_head, *_ = _block_thomas_selected_fn_state(primal_fn, n, rhs_low, k, k)
+    transposed = _generated_transpose_block_fn(block_fn, params, n)
+    lam_head, *_ = _block_thomas_selected_fn_state(transposed, n, cotangent, k, k)
+    scale = float(jnp.linalg.norm(x_head[k - 1])) * float(jnp.linalg.norm(lam_head[k - 1]))
+
+    def bound(window: int) -> float:
+        return scale * float(np.exp(log_tail[min(int(window), full)]))
+
+    def gradient_norm(window: int) -> float:
+        def head(p):
+            return block_thomas_truncated_fn(
+                block_fn, n, rhs_low, keep_lowest=k, params=p, adjoint_window=int(window)
+            )
+
+        _, pullback = jax.vjp(head, params)
+        (grad,) = pullback(cotangent)
+        squares = [
+            float(jnp.sum(jnp.abs(leaf) ** 2))
+            for leaf in jax.tree_util.tree_leaves(grad)
+        ]
+        return float(np.sqrt(sum(squares)))
+
+    heuristic = localization_crossover_window(primal_fn, n, k)
+    probe = full if probe_window is None else min(max(int(probe_window), 0), full)
+    if probe_window is None:
+        probe = min(int(heuristic.window), full)
+
+    # Reverse triangle inequality needs ||g_probe|| > B(probe). Widen until it
+    # holds; the full window always does, since its tail is empty.
+    lower = gradient_norm(probe) - bound(probe)
+    while lower <= 0.0 and probe < full:
+        probe = full if probe == 0 else min(probe * 2, full)
+        lower = gradient_norm(probe) - bound(probe)
+
+    if lower <= 0.0:
+        # The gradient is numerically zero: no proper window is certifiable
+        # against a relative tolerance, and the exact one is the honest answer.
+        return LocalizationWindow(
+            window=full,
+            crossover_row=heuristic.crossover_row,
+            localized=heuristic.localized,
+            primal_profile=heuristic.primal_profile,
+            certified=True,
+            status="full-window",
+            tolerance=float(rtol),
+            tail_bound=0.0,
+            gradient_lower_bound=float(max(lower, 0.0)),
+            certified_relative_error=0.0,
+        )
+
+    target = rtol * lower
+    admissible = np.flatnonzero(scale * np.exp(log_tail) <= target)
+    window = int(admissible[0]) if admissible.size else full
+    achieved = bound(window)
+    return LocalizationWindow(
+        window=window,
+        crossover_row=heuristic.crossover_row,
+        localized=heuristic.localized,
+        primal_profile=heuristic.primal_profile,
+        certified=True,
+        status="certified" if window < full else "full-window",
+        tolerance=float(rtol),
+        tail_bound=achieved,
+        gradient_lower_bound=lower,
+        certified_relative_error=achieved / lower,
     )
 
 

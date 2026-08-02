@@ -24,6 +24,7 @@ from solvax.banded import (
 )
 from solvax.direct import (
     BlockTridiagFactors,
+    ChainWindowPlan,
     LocalizationWindow,
     block_thomas,
     block_thomas_checkpointed_fn,
@@ -35,10 +36,12 @@ from solvax.direct import (
     block_thomas_truncated_fn_with_residual,
     block_tridiag_matvec,
     block_tridiag_relative_residual,
+    certified_adjoint_window,
     check_localized_gradient,
     localization_crossover_window,
     localization_profile_fn,
     mixed_precision_block_thomas,
+    plan_chain_windows,
     suggest_adjoint_window,
 )
 from solvax.elliptic import (
@@ -141,6 +144,8 @@ __all__ = [
     "block_tridiag_matvec",
     "block_tridiag_relative_residual",
     "block_thomas",
+    "ChainWindowPlan",
+    "certified_adjoint_window",
     "block_thomas_checkpointed_fn",
     "block_thomas_factor",
     "block_thomas_factor_fn",
@@ -151,6 +156,7 @@ __all__ = [
     "LocalizationWindow",
     "check_localized_gradient",
     "localization_crossover_window",
+    "plan_chain_windows",
     "suggest_adjoint_window",
     "block_thomas_truncated_fn_with_residual",
     "mixed_precision_block_thomas",

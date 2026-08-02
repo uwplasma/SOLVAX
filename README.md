@@ -78,31 +78,47 @@ x_low = sx.block_thomas_truncated(lower, diag, upper, rhs[:3], keep_lowest=3)
 
 Differentiate a generated selected-head solve with respect to the compact
 parameters that build its rows, at retained state independent of the block
-count. The window is estimated up front from the chain's own localization
-profile. The estimate is a diagnostic, not a certificate: it reports where the
-chain's transfer norms drop below one, and you should confirm the accuracy you
-need by widening the window until the gradient stops moving.
+count. Ask for the accuracy you want and get a window that provably delivers
+it:
 
 ```python
-advice = sx.localization_crossover_window(lambda k: block_fn(p, k), N, keep_lowest=3)
-# advice.certified is False: an estimate, not a guarantee. It can be passed
-# straight back to the solver, or unpacked as advice.window.
+# Smallest window whose relative gradient error is provably below rtol.
+cert = sx.certified_adjoint_window(block_fn, N, keep_lowest=3, params=p,
+                                   rhs_low=rhs[:3], cotangent=ct, rtol=1e-8)
+print(cert.window, cert.certified_relative_error)  # proven, not estimated
 
 def objective(params):
     x_low = sx.block_thomas_truncated_fn(
         block_fn, N, rhs[:3], keep_lowest=3,
-        params=params, adjoint_window=advice,
+        params=params, adjoint_window=cert,
     )
     return loss(x_low)
 
 grad = jax.grad(objective)(p)
+```
 
-# Confirm the window before trusting it: widen it and see if the gradient moves.
-report = sx.check_localized_gradient(
-    lambda w: jax.grad(lambda q: loss(sx.block_thomas_truncated_fn(
-        block_fn, N, rhs[:3], keep_lowest=3, params=q, adjoint_window=w)))(p),
-    window=advice.window,
-)
+The certificate is possible because the exact-window rule leaves exactly one
+approximation to bound — the omitted rows — while every retained row cotangent
+is an exact block of the full solve. It costs two localization sweeps, one
+generator Jacobian per row, and a differentiated solve, so it is a setup
+computation rather than something to run each optimizer step.
+
+Two cheaper options remain for when that is too much.
+`localization_crossover_window` reads the chain's transfer norms and returns a
+starting window with `certified=False`, and `check_localized_gradient` widens a
+window to see whether the gradient moves — evidence rather than a bound, but it
+needs no Jacobians.
+
+For a batch of chains that localize at different rows — a collisionality scan,
+say — `adjoint_window` is static and would impose the worst chain's width on
+all of them. `plan_chain_windows` cuts the batch into a few static buckets
+instead, and `chain_window=` gives each chain its own window inside one:
+
+```python
+plan = sx.plan_chain_windows(windows, keep_lowest=3, max_buckets=4)
+print(plan.reduction)  # measured: 51% fewer retained rows on a 24-chain nu scan
+for window, chains in plan.buckets:
+    grads = jax.vmap(lambda c: chain_gradient(c, adjoint_window=window))(chains)
 ```
 
 Everything is differentiable (`jax.grad` through the solve) and batchable
