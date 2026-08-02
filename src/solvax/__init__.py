@@ -24,6 +24,7 @@ from solvax.banded import (
 )
 from solvax.direct import (
     BlockTridiagFactors,
+    ChainWindowPlan,
     LocalizationWindow,
     block_thomas,
     block_thomas_checkpointed_fn,
@@ -35,10 +36,12 @@ from solvax.direct import (
     block_thomas_truncated_fn_with_residual,
     block_tridiag_matvec,
     block_tridiag_relative_residual,
+    certified_adjoint_window,
     check_localized_gradient,
     localization_crossover_window,
     localization_profile_fn,
     mixed_precision_block_thomas,
+    plan_chain_windows,
     suggest_adjoint_window,
 )
 from solvax.eigen import eigenpair_reverse
@@ -62,7 +65,7 @@ from solvax.implicit import (
     recycled_linear_solve,
     root_solve,
 )
-from solvax.krylov import KrylovSolution, gcrot, gmres
+from solvax.krylov import RECYCLE_DRIFT_ADVISORY, KrylovSolution, gcrot, gmres
 from solvax.native import SpluFactorization, splu_solve
 from solvax.native_eigen import (
     SparseEigenSolution,
@@ -107,7 +110,10 @@ from solvax.propagator import (
     exponential_eigenpairs,
     propagator_eigenpairs,
 )
-from solvax.randomized import nystrom_preconditioner
+from solvax.randomized import (
+    nystrom_preconditioner,
+    nystrom_preconditioner_adaptive,
+)
 from solvax.refine import as_low_precision, iterative_refinement
 from solvax.smoothers import (
     alternating_smoother,
@@ -138,9 +144,10 @@ from solvax.tridiagonal import (
     tridiagonal_solve_checked,
 )
 
-__version__ = "0.11.2"
+__version__ = "0.12.0"
 
 __all__ = [
+    "RECYCLE_DRIFT_ADVISORY",
     "BandedLUFactors",
     "AdaptiveEigenSolution",
     "PropagatorEigenSolution",
@@ -160,6 +167,8 @@ __all__ = [
     "estimate_rk4_timestep",
     "exponential_eigenpairs",
     "block_thomas",
+    "ChainWindowPlan",
+    "certified_adjoint_window",
     "block_thomas_checkpointed_fn",
     "block_thomas_factor",
     "block_thomas_factor_fn",
@@ -170,6 +179,7 @@ __all__ = [
     "LocalizationWindow",
     "check_localized_gradient",
     "localization_crossover_window",
+    "plan_chain_windows",
     "suggest_adjoint_window",
     "block_thomas_truncated_fn_with_residual",
     "mixed_precision_block_thomas",
@@ -242,6 +252,7 @@ __all__ = [
     "kronecker_nkp",
     "nearest_kronecker",
     "nystrom_preconditioner",
+    "nystrom_preconditioner_adaptive",
     "iterative_refinement",
     "as_low_precision",
     "chunk_map",

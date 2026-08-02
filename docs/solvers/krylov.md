@@ -188,6 +188,40 @@ steps (a 3.3× total matvec reduction over ten steps) at measured drift
 ~1e-3 per step, while per-step cold GCROT shows no gain at all — the carrying
 is the mechanism, not the deflation itself.
 
+### When to drop the pair
+
+The diagnostic reports; it does not decide. `RECYCLE_DRIFT_ADVISORY` is a
+calibrated answer to the question it raises, measured on a continuation of a
+200×200 diagonally dominant operator perturbed along a fixed direction with
+`m=20`, `k=8`, `rtol=1e-10`, comparing a warm-started solve against a cold one
+at the same parameter:
+
+| drift | warm / cold iterations | verdict |
+|---|---|---|
+| 3.5e-05 | 12 / 21 | reuse helps |
+| 3.5e-03 | 16 / 21 | reuse helps |
+| 3.5e-02 | 18 / 21 | reuse helps |
+| 0.33 | 28 / 30 | reuse helps |
+| 0.58 | 69 / 70 | reuse helps |
+| 0.73 | 449 / 432 | reuse costs 4% |
+| 0.87 | neither converges | operator is the problem |
+
+Two things that settles. Reuse pays over almost the whole range — a pair whose
+subspace has rotated by a third of a right angle on average still beats
+starting cold — so a conservative threshold throws away most of the benefit.
+And the downside is mild: keeping an obviously stale pair cost four percent,
+not a factor. Hence the advisory value of 0.6, and hence the advice not to
+agonize below it:
+
+```python
+sol = sx.gcrot(matvec, b, recycle=previous.recycle)
+carry = None if sol.recycle_drift > sx.RECYCLE_DRIFT_ADVISORY else sol.recycle
+```
+
+This is one operator family. A problem whose spectrum *reorganizes* rather than
+shifts can invalidate a pair at much lower drift, so confirm the number against
+a cold solve on your own continuation before relying on it.
+
 ## Relationship to the literature
 
 The implementation follows the recycling framework of Parks et al. and the

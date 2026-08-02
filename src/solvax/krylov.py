@@ -83,6 +83,12 @@ class KrylovSolution(NamedTuple):
             measure of how far the operator has drifted since the pair was
             built (0 for an unchanged operator, up to 1 for an orthogonal
             rotation). ``0.0`` on a cold start, ``None`` for :func:`gmres`.
+
+            On when to act on it, see :data:`RECYCLE_DRIFT_ADVISORY`. The
+            short version, from the calibration recorded there: reuse keeps
+            paying much further into the drift range than one might guess, and
+            the penalty for keeping a stale pair is small, so this is a
+            monitor rather than a trigger.
     """
 
     x: PyTree
@@ -91,6 +97,38 @@ class KrylovSolution(NamedTuple):
     converged: jax.Array
     recycle: tuple[jax.Array, jax.Array] | None = None
     recycle_drift: jax.Array | None = None
+
+
+#: Drift above which dropping the recycle pair is worth considering.
+#:
+#: Calibrated on a continuation of a 200x200 diagonally dominant operator
+#: perturbed along a fixed direction, ``m = 20``, ``k = 8``, ``rtol = 1e-10``,
+#: comparing a warm-started solve against a cold one at the same parameter:
+#:
+#: =======  ======================  =======================
+#: drift    warm / cold iterations  verdict
+#: =======  ======================  =======================
+#: 3.5e-05  12 / 21                 reuse helps
+#: 3.5e-03  16 / 21                 reuse helps
+#: 3.5e-02  18 / 21                 reuse helps
+#: 0.33     28 / 30                 reuse helps
+#: 0.58     69 / 70                 reuse helps
+#: 0.73     449 / 432               reuse costs 4%
+#: 0.87     neither converges       operator is the problem
+#: =======  ======================  =======================
+#:
+#: Two things that calibration settles. Reuse pays over almost the whole range
+#: -- a pair whose subspace has rotated by a third of a right angle on average
+#: still beats starting cold -- so a conservative threshold throws away most of
+#: the benefit. And the downside is mild: keeping an obviously stale pair cost
+#: four percent, not a factor. Dropping is therefore worth doing above roughly
+#: this value and not worth agonizing over below it.
+#:
+#: This is one operator family. A problem whose spectrum reorganizes rather
+#: than shifts can invalidate a recycle pair at much lower drift, so treat the
+#: number as a starting point and confirm it by comparing against a cold solve
+#: on your own continuation.
+RECYCLE_DRIFT_ADVISORY = 0.6
 
 
 def _identity(v: jax.Array) -> jax.Array:
