@@ -64,6 +64,18 @@ def eigenpair_reverse(
     Nelson's bordered reduced resolvent and therefore require one transposed
     linear solve.
 
+    ``condition_limit`` gates the eigenvalue condition number
+    ``||left|| ||right|| / |left^H right|``, which is computed from the pair the
+    application supplies. That is the only pair available, and it bounds what
+    the gate can see: near an exceptional point the application's own solver
+    loses accuracy first, and the degraded vectors it returns can make the
+    condition number look acceptable. Measured on a perturbed Jordan block at a
+    separation of ``1e-18``, the true condition number is ``5e8`` -- above the
+    default limit -- while the gate saw ``4.5e7``, accepted, and the pipeline
+    returned a derivative of ``0.955`` where the analytic value is ``0.5``. A
+    condition number within an order of magnitude of the limit therefore
+    deserves independent confirmation rather than trust.
+
     ``transpose_tangent_solver`` may replace generic GMRES with an
     application-specific solver.  ``tangent_preconditioner`` supplies an
     approximate inverse for the bordered operator; its linear transpose is

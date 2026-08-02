@@ -160,7 +160,11 @@ For `leftᴴ right = 1`, the eigenvalue rule is
 `dλ = leftᴴ (dA) right`; eigenvector observables use one bordered
 reduced-resolvent solve. This is independent of state layout and primal
 algorithm, avoids differentiating the eigensolver iteration, and rejects
-nearly defective eigenpairs through an explicit condition-number gate.
+nearly defective eigenpairs through an explicit condition-number gate. That
+gate reads the pair you supply, so it is bounded by your own solver's accuracy:
+near an exceptional point the solver degrades first, and the vectors it returns
+can make the condition number look acceptable when it is not. Treat a value
+within an order of magnitude of the limit as unconfirmed.
 
 ## What's in the box
 
