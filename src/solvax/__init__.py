@@ -61,7 +61,7 @@ from solvax.implicit import (
     recycled_linear_solve,
     root_solve,
 )
-from solvax.krylov import KrylovSolution, gcrot, gmres
+from solvax.krylov import RECYCLE_DRIFT_ADVISORY, KrylovSolution, gcrot, gmres
 from solvax.native import SpluFactorization, splu_solve
 from solvax.operators import (
     BlockTridiagonalOperator,
@@ -92,7 +92,10 @@ from solvax.precond import (
     p_multigrid,
     semicoarsening_hierarchy,
 )
-from solvax.randomized import nystrom_preconditioner
+from solvax.randomized import (
+    nystrom_preconditioner,
+    nystrom_preconditioner_adaptive,
+)
 from solvax.refine import as_low_precision, iterative_refinement
 from solvax.smoothers import (
     alternating_smoother,
@@ -126,6 +129,7 @@ from solvax.tridiagonal import (
 __version__ = "0.11.2"
 
 __all__ = [
+    "RECYCLE_DRIFT_ADVISORY",
     "BandedLUFactors",
     "PeriodicBandedLUFactors",
     "banded_matvec",
@@ -219,6 +223,7 @@ __all__ = [
     "kronecker_nkp",
     "nearest_kronecker",
     "nystrom_preconditioner",
+    "nystrom_preconditioner_adaptive",
     "iterative_refinement",
     "as_low_precision",
     "chunk_map",

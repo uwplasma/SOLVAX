@@ -4,6 +4,46 @@
 
 ### Fixed
 
+- The Thomas pivot guard was a fixed `1e-12`, neither scale- nor
+  dtype-invariant: enormous beside a float32 system of order one, negligible
+  beside a float64 system scaled to `1e12`. It is now `sqrt(eps)` of the
+  working dtype times the coefficient scale, reduced along the solve axis only
+  so a sharded batch stays collective-free -- and so each system in a batch is
+  guarded against its own coefficients rather than the largest anywhere.
+- The Fourier--Helmholtz solver hard-cast its geometry to `float64`, silently
+  upgrading an x64-disabled program, or meaning nothing at all with x64 off. It
+  now infers the working precision from the caller and rejects complex
+  geometry explicitly.
+- `nystrom_preconditioner`'s null-direction test compared against exact zero.
+  On a rank-deficient operator those eigenvalues emerge from an SVD as rounding
+  noise, so the result depended on the linear-algebra backend: the same zero
+  operator gave the identity under one JAX release and arbitrary O(1) values
+  under another. The test is now relative, with a floor at the construction's
+  own resolution.
+
+### Added
+
+- Forward-mode differentiation through the windowed rule now raises an error
+  that names what to do instead. JAX's own message is true and useless -- "can't
+  apply forward-mode autodiff (jvp) to a custom_vjp function" -- and a code
+  whose gradients are reverse but whose audits are forward needs to be told
+  which entry point supports both.
+- `nystrom_preconditioner` reports `spectrum_span`, the smallest retained
+  eigenvalue over the largest, so a caller can see whether the sketch reached
+  into the decaying tail or sat on a flat plateau. `nystrom_preconditioner_adaptive`
+  grows the rank until that estimate clears a target and returns the rank used.
+- `RECYCLE_DRIFT_ADVISORY`, a calibrated threshold for when to drop a recycle
+  pair, with the measurements behind it in the docstring. The calibration says
+  something worth knowing: reuse keeps paying up to a drift of about 0.6, far
+  further than a cautious guess would suggest, and the penalty for keeping a
+  stale pair is a few percent rather than a factor.
+- A scope-and-scaling suite covering tridiagonal behaviour across eight decades
+  of scaling, the complex banded path at sizes up to 512 with several
+  bandwidths, dtype promotion at the public entry points, and the forward-mode
+  message.
+
+### Fixed
+
 - `nystrom_preconditioner` returned `NaN` for a zero or rank-deficient
   operator. The stabilizing shift is proportional to the sketch norm, so an
   operator with no range got no shift, the core Cholesky was singular, and the

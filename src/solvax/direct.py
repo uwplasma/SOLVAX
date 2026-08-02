@@ -1366,6 +1366,37 @@ _truncated_fn_bounded_with_residual.defvjp(
 
 
 
+_FORWARD_MODE_HINT = (
+    "the exact-window rule is registered as a custom vector--Jacobian product, "
+    "which defines reverse mode only, so `jax.jacfwd` and `jax.jvp` cannot be "
+    "pushed through it -- they raise here rather than falling back to a taped "
+    "path.\n\n"
+    "Two ways forward, depending on what you need:\n"
+    "  * for a *derivative audit* against reverse mode, differentiate the "
+    "untruncated entry point `block_thomas_checkpointed_fn`, which supports "
+    "both modes and is exact;\n"
+    "  * for forward sensitivities as the production derivative, call this "
+    "function without `params` and differentiate the band arrays, or use "
+    "`block_thomas_truncated`.\n\n"
+    "A code that takes reverse-mode gradients but forward-mode audits needs "
+    "both paths available; that is expected, not a misuse."
+)
+
+
+def _reraise_forward_mode(error: Exception) -> None:
+    """Turn JAX's generic custom_vjp message into an actionable one.
+
+    JAX says only \"can't apply forward-mode autodiff (jvp) to a custom_vjp
+    function\", which is true and tells the caller nothing about what to do
+    instead. Naming the entry point that does support forward mode is the whole
+    content of the answer, so it belongs in the error.
+    """
+    text = str(error)
+    if "custom_vjp" in text and ("jvp" in text or "forward-mode" in text):
+        raise TypeError(f"{text}\n\n{_FORWARD_MODE_HINT}") from error
+    raise
+
+
 def block_thomas_truncated_fn(
     block_fn: Callable[..., tuple[jax.Array, jax.Array, jax.Array]],
     n_blocks: int,
@@ -1415,9 +1446,13 @@ def block_thomas_truncated_fn(
         adjoint_window = _as_window(adjoint_window)
         if adjoint_window < 0:
             raise ValueError("params requires a non-negative adjoint_window")
-        return _truncated_fn_bounded(
-            block_fn, n_blocks, params, keep_lowest, adjoint_window, rhs_low
-        )
+        try:
+            return _truncated_fn_bounded(
+                block_fn, n_blocks, params, keep_lowest, adjoint_window, rhs_low
+            )
+        except TypeError as error:  # forward-mode through a custom_vjp
+            _reraise_forward_mode(error)
+            raise
     solution, _, _, _, _ = _block_thomas_truncated_fn_state(
         block_fn, n_blocks, rhs_low, keep_lowest
     )

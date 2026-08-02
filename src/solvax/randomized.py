@@ -86,18 +86,101 @@ def nystrom_preconditioner(
 
     smallest = eigenvalues[-1]
 
-    # With ``mu = 0`` and a rank-deficient operator the smallest retained
-    # eigenvalue is zero, and the scale factor becomes 0/0. The limit that
-    # matters is the null-space one: an eigendirection the operator does not
-    # see should be left alone, which is the factor one, not an
-    # indeterminate. Clamping the denominator away from zero gives exactly
-    # that, and changes nothing when the shift is well defined.
-    denominator = jnp.where(eigenvalues + mu > 0.0, eigenvalues + mu, 1.0)
-    numerator = jnp.where(eigenvalues + mu > 0.0, smallest + mu, 1.0)
+    # A posterior read on whether the sketch was wide enough. The Nystrom
+    # approximation captures the leading part of the spectrum; the ratio of the
+    # smallest retained eigenvalue to the largest says how much of the decay the
+    # sketch actually spans. Near one, the spectrum inside the sketch is flat
+    # and the rank is almost certainly too small to be preconditioning
+    # anything; near zero, the sketch reaches into the tail. This is reported
+    # rather than acted on, because growing the sketch means more operator
+    # applications and only the caller knows what those cost.
+    largest = eigenvalues[0]
+    spectrum_span = jnp.where(largest > 0, smallest / largest, jnp.ones((), dtype))
+
+    # A direction the operator does not see should be left alone: the scale
+    # factor there is one, not an indeterminate 0/0.
+    #
+    # The test for "does not see" has to be *relative*, not `== 0`. On a
+    # rank-deficient operator the null eigenvalues come out of an SVD as
+    # rounding noise, positive or zero depending on the LAPACK path, so an
+    # exact-zero test makes the result depend on the linear-algebra backend --
+    # measured, the same zero operator gave the identity under one JAX release
+    # and arbitrary O(1) values under another. Comparing against the largest
+    # retained eigenvalue makes the degenerate case deterministic.
+    # Two floors. Relative to the largest retained eigenvalue, for a spectrum
+    # with genuine scale; and at ``nu`` itself, because the eigenvalues are
+    # formed as ``singular**2 - nu`` and so cannot resolve anything below that
+    # shift. Without the second floor a zero operator has no scale to be
+    # relative *to*, and the comparison is against noise.
+    null_threshold = jnp.maximum(jnp.finfo(dtype).eps * jnp.maximum(largest, 0.0), nu)
+    seen = (eigenvalues > null_threshold) & (eigenvalues + mu > 0.0)
+    denominator = jnp.where(seen, eigenvalues + mu, 1.0)
+    numerator = jnp.where(seen, smallest + mu, 1.0)
 
     def precond(v: jax.Array) -> jax.Array:
         projected = basis.T @ v
         scaled = numerator / denominator * projected
         return basis @ (scaled - projected) + v
 
+    # Attached rather than returned separately so existing callers are
+    # unaffected and a caller who wants the diagnostic can read it.
+    precond.retained_eigenvalues = eigenvalues       # type: ignore[attr-defined]
+    precond.spectrum_span = spectrum_span            # type: ignore[attr-defined]
     return precond
+
+
+def nystrom_preconditioner_adaptive(
+    matvec: MatVec,
+    n: int,
+    key: jax.Array,
+    *,
+    mu: float = 0.0,
+    span_target: float = 1.0e-2,
+    initial_rank: int = 4,
+    max_rank: int | None = None,
+    dtype=None,
+) -> tuple[MatVec, int]:
+    """Grow the sketch until it spans enough of the spectrum.
+
+    :func:`nystrom_preconditioner` takes a fixed rank, and a rank chosen once is
+    either wasteful or inadequate whenever the spectrum changes -- which is
+    exactly the continuation setting the recycling machinery targets. This
+    doubles the rank until the posterior ``spectrum_span`` (the smallest
+    retained eigenvalue over the largest) falls below ``span_target``, meaning
+    the sketch has reached into the decaying tail rather than sitting on a flat
+    plateau of the spectrum.
+
+    The loop is ordinary Python: each sketch has a different static shape, so
+    the growth cannot happen inside one traced computation. Every individual
+    build is still pure JAX, and the returned preconditioner is traceable as
+    usual. Call this once when the operator changes, not inside a hot loop.
+
+    Args:
+        matvec: symmetric positive semidefinite operator.
+        n: problem dimension.
+        key: PRNG key; each attempt draws its own sketch from a fresh split.
+        mu: regularization shift of the system being solved.
+        span_target: stop once ``spectrum_span`` is below this.
+        initial_rank: first rank tried.
+        max_rank: cap; defaults to ``n``.
+
+    Returns:
+        ``(preconditioner, rank)`` -- the rank actually used, so a caller can
+        record what the operator required rather than what was requested.
+    """
+    if not 1 <= initial_rank <= n:
+        raise ValueError("need 1 <= initial_rank <= n")
+    if not 0.0 < span_target < 1.0:
+        raise ValueError("span_target must lie strictly between zero and one")
+    ceiling = n if max_rank is None else min(int(max_rank), n)
+    if ceiling < initial_rank:
+        raise ValueError("max_rank must be at least initial_rank")
+
+    rank = int(initial_rank)
+    while True:
+        key, attempt = jax.random.split(key)
+        precond = nystrom_preconditioner(matvec, n, rank, attempt, mu=mu, dtype=dtype)
+        span = float(precond.spectrum_span)  # type: ignore[attr-defined]
+        if span <= span_target or rank >= ceiling:
+            return precond, rank
+        rank = min(rank * 2, ceiling)
