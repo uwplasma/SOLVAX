@@ -98,7 +98,12 @@ class SpluFactorization:
         self.shape = matrix.shape
         self._lu = sparse_linalg.splu(matrix.tocsc())
 
-    def solve(self, b) -> jax.Array:
+    def _solve_numpy(self, b, *, trans: str = "N") -> np.ndarray:
+        """Apply stored factors without a host/device round trip."""
+
+        return self._lu.solve(np.asarray(b), trans=trans)
+
+    def solve(self, b, *, trans: str = "N") -> jax.Array:
         """Solve ``A x = b`` with the stored factors.
 
         Args:
@@ -112,7 +117,9 @@ class SpluFactorization:
             RuntimeError: if called with a traced value (under jit/vmap/grad).
         """
         _check_not_traced(b, "SpluFactorization.solve")
-        return jnp.asarray(self._lu.solve(np.asarray(b)))
+        if trans not in {"N", "T", "H"}:
+            raise ValueError("trans must be 'N', 'T', or 'H'")
+        return jnp.asarray(self._solve_numpy(b, trans=trans))
 
 
 def splu_solve(matrix, b) -> jax.Array:

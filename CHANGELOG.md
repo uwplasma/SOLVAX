@@ -101,6 +101,15 @@
 - Add an eight-device test that checks the per-device batch size, output
   sharding, numerical result, and zero-collective HLO.
 
+### Differentiable externally solved eigenpairs
+
+- `eigenpair_reverse` differentiates a caller-certified right/left eigenpair
+  implicitly, including eigenvector observables, an application-supplied
+  transposed reduced-resolvent solve, and an exceptional-point condition guard.
+- Propagator helpers provide RK4 stability estimation, continuous-operator
+  residual stopping, and multi-candidate extraction without prescribing an
+  application eigensolver.
+
 ## 0.11.2 - 2026-07-28
 
 ### An archivable release

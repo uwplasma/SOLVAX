@@ -11,6 +11,8 @@ api/operators
 api/direct
 api/elliptic
 api/krylov
+api/eigen
+api/propagator
 api/pcg
 api/fixed_point
 api/preconditioners

@@ -19,12 +19,15 @@ line smoothers),
 mixed-precision iterative refinement, and implicit differentiation of every solve —
 traceable under `jit`, `vmap` and `grad`, on CPU and GPU.
 
-Two documented exceptions, because "transparent to every transform" would not be
-true: the exact-window reverse rule is a `custom_vjp`, so `jax.jacfwd` and
-`jax.jvp` raise on it rather than falling back to the taped path (pass the full
-window, or differentiate the untruncated entry point, when forward mode is what
-you need); and `solvax.native` runs SciPy's SuperLU on the host, so it refuses
-to be traced at all and says so.
+Three documented exceptions, because "transparent to every transform" would
+not be true: the exact-window reverse rule is a `custom_vjp`, so `jax.jacfwd`
+and `jax.jvp` raise on it rather than falling back to the taped path (pass the
+full window, or differentiate the untruncated entry point, when forward mode is
+what you need); `eigenpair_reverse` supports reverse mode but orchestrates
+application-supplied eigensolvers on the host, so their compiled kernels sit
+inside rather than around that dispatcher; and `solvax.native` host primitives
+refuse direct tracing while still composing as external primals with
+`eigenpair_reverse`.
 
 It complements general JAX solver libraries with block-structured direct
 elimination, coarse-operator and multigrid preconditioning, and Krylov
@@ -124,6 +127,61 @@ for window, chains in plan.buckets:
 Everything is differentiable (`jax.grad` through the solve) and batchable
 (`jax.vmap` over stacked systems).
 
+## Differentiate a certified eigenmode without taping its solver
+
+Applications often need a mode shape as well as its eigenvalue, but recording
+hundreds of Krylov or timestepper iterations makes reverse-mode optimization
+slow and memory hungry. `eigenpair_reverse` leaves mode finding to the
+application and differentiates only the converged simple eigenpair:
+
+```python
+initial_mode = jnp.ones(2, dtype=jnp.complex128)
+parameters = jnp.asarray(0.0)
+
+def build(parameters):
+    matrix = jnp.asarray(
+        [[0.5 + 0.3 * parameters + 0.2j, 0.0],
+         [parameters, -1.0 + 3.0j]],
+        dtype=jnp.complex128,
+    )
+    return lambda vector: matrix @ vector
+
+def primal_solver(parameters, _apply, _start):
+    # A real application injects its residual-certified matrix-free solver.
+    eigenvalue = 0.5 + 0.3 * parameters + 0.2j
+    eigenvector = jnp.asarray(
+        [1.0, parameters / (eigenvalue + 1.0 - 3.0j)],
+        dtype=jnp.complex128,
+    )
+    return eigenvalue, eigenvector
+
+def left_solver(_parameters, _apply, _start, _eigenvalue):
+    return jnp.asarray([1.0, 0.0], dtype=jnp.complex128)
+
+def objective(parameters):
+    eigenvalue, eigenvector = sx.eigenpair_reverse(
+        parameters,
+        build,
+        initial_mode,
+        primal_solver=primal_solver,
+        left_solver=left_solver,
+    )
+    normalized = eigenvector / jnp.linalg.norm(eigenvector)
+    return jnp.real(eigenvalue) + 0.1 * jnp.real(normalized[1])
+
+gradient = jax.grad(objective)(parameters)
+```
+
+For `leftᴴ right = 1`, the eigenvalue rule is
+`dλ = leftᴴ (dA) right`; eigenvector observables use one bordered
+reduced-resolvent solve. This is independent of state layout and primal
+algorithm, avoids differentiating the eigensolver iteration, and rejects
+nearly defective eigenpairs through an explicit condition-number gate. That
+gate reads the pair you supply, so it is bounded by your own solver's accuracy:
+near an exceptional point the solver degrades first, and the vectors it returns
+can make the condition number look acceptable when it is not. Treat a value
+within an order of magnitude of the limit as unconfirmed.
+
 ## What's in the box
 
 | Module | Contents |
@@ -137,12 +195,14 @@ Everything is differentiable (`jax.grad` through the solve) and batchable
 | `solvax.tridiagonal` | Batched scalar tridiagonal solve (reproducible Thomas / fused cuSPARSE backend) and periodic (cyclic) systems via a Sherman--Morrison correction |
 | `solvax.elliptic` | Spectral Fourier--Helmholtz solve for separable periodic-by-bounded elliptic problems — the drift-plane / vorticity `lap phi = rhs` inversion, one FFT + one batched tridiagonal sweep |
 | `solvax.krylov` | Flexible restarted GMRES (CGS2 + Givens) over arrays, scalars and arbitrary pytrees with optional custom inner products, and GCROT Krylov subspace recycling with FIFO or harmonic-Ritz (GCRO-DR) deflated restarting |
+| `solvax.propagator` | Residual-certified RK4 and nested exponential-Arnoldi eigenmode extraction without materializing the operator |
+| `solvax.eigen` | Solver-independent implicit reverse derivatives for externally certified eigenpairs, including eigenvector observables and exceptional-point guards |
 | `solvax.pcg` | Matrix-free pytree PCG with preconditioning, fixed-shape residual history, and explicit convergence/breakdown status |
 | `solvax.fixed_point` | Safeguarded Aitken, bounded-memory (condition-filtered) Anderson, and matrix-free affine fixed-point FGMRES |
 | `solvax.implicit` | Matrix-free `newton_krylov` (JFNK) plus implicit-function-theorem `linear_solve` and `root_solve` — gradients cost one extra (transposed) solve |
 | `solvax.autodiff` | Bounded-memory chunked forward/reverse Jacobians (`chunked_jacfwd`/`jacrev`/`jacobian`) with automatic chunk sizing |
 | `solvax.refine` | Mixed-precision iterative refinement (float32 factor, float64 residuals) |
-| `solvax.native` | Host-side SuperLU bridge (non-differentiable, import-guarded) |
+| `solvax.native` / `native_eigen` | Host-side SuperLU and sparse shift-invert eigenpairs; eager primals compose with implicit eigenpair AD |
 
 Complex-valued GMRES/GCROT, tridiagonal solves, and fixed-point acceleration
 use Hermitian inner products and real-valued safeguards. Remaining roadmap:

@@ -44,6 +44,7 @@ from solvax.direct import (
     plan_chain_windows,
     suggest_adjoint_window,
 )
+from solvax.eigen import eigenpair_reverse
 from solvax.elliptic import (
     FourierHelmholtzOperator,
     build_fourier_helmholtz_operator,
@@ -66,6 +67,11 @@ from solvax.implicit import (
 )
 from solvax.krylov import RECYCLE_DRIFT_ADVISORY, KrylovSolution, gcrot, gmres
 from solvax.native import SpluFactorization, splu_solve
+from solvax.native_eigen import (
+    SparseEigenSolution,
+    sparse_eigenpairs,
+    sparse_operator_matrix,
+)
 from solvax.operators import (
     BlockTridiagonalOperator,
     BorderedOperator,
@@ -94,6 +100,15 @@ from solvax.precond import (
     nearest_kronecker,
     p_multigrid,
     semicoarsening_hierarchy,
+)
+from solvax.propagator import (
+    AdaptiveEigenSolution,
+    PropagatorEigenSolution,
+    RK4Timestep,
+    adaptive_eigenpair,
+    estimate_rk4_timestep,
+    exponential_eigenpairs,
+    propagator_eigenpairs,
 )
 from solvax.randomized import (
     nystrom_preconditioner,
@@ -134,7 +149,12 @@ __version__ = "0.12.0"
 __all__ = [
     "RECYCLE_DRIFT_ADVISORY",
     "BandedLUFactors",
+    "AdaptiveEigenSolution",
+    "PropagatorEigenSolution",
     "PeriodicBandedLUFactors",
+    "RK4Timestep",
+    "adaptive_eigenpair",
+    "propagator_eigenpairs",
     "banded_matvec",
     "lu_factor_banded",
     "lu_factor_banded_periodic",
@@ -143,6 +163,9 @@ __all__ = [
     "BlockTridiagFactors",
     "block_tridiag_matvec",
     "block_tridiag_relative_residual",
+    "eigenpair_reverse",
+    "estimate_rk4_timestep",
+    "exponential_eigenpairs",
     "block_thomas",
     "ChainWindowPlan",
     "certified_adjoint_window",
@@ -238,6 +261,9 @@ __all__ = [
     "chunked_jacrev",
     "chunked_jacobian",
     "SpluFactorization",
+    "SparseEigenSolution",
     "splu_solve",
+    "sparse_eigenpairs",
+    "sparse_operator_matrix",
     "__version__",
 ]
