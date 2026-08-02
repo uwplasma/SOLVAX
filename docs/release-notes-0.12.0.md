@@ -103,6 +103,44 @@ gradient, not the retained state, so it is the accuracy primitive while the
 buckets are the memory one. With `chain_window` equal to the static window the
 result is bit-identical to the uniform path.
 
+## Differentiating an externally solved eigenpair
+
+Some eigenproblems are best solved by something that is not JAX — a sparse
+factorization, a native Arnoldi, an application's own solver. `eigenpair_reverse`
+differentiates such a solve implicitly, given a caller-certified simple right and
+left eigenpair, without putting the eigensolver's iterations on the reverse tape.
+
+For a normalized simple eigenpair the eigenvalue derivative is
+$d\lambda = \ell^H (dA) r$; eigenvector-dependent objectives cost one bordered
+reduced-resolvent solve. The eigensolver is injected rather than prescribed, so
+the primal can be whatever the application already trusts.
+
+A condition gate guards the exceptional-point case, and it is worth being
+precise about what it does and does not see. On a deliberately near-defective
+pair at $\varepsilon = 10^{-18}$ the true condition number was $5 \times 10^8$
+while the gate measured $4.5 \times 10^7$, and the derivative came out 0.955
+against an analytic 0.5. The gate catches the obvious degeneracy; it is not a
+certificate of well-conditioning, and a caller near a genuine exceptional point
+should not read a passing gate as one.
+
+Alongside it:
+
+- `estimate_rk4_timestep`, `propagator_eigenpairs` and `exponential_eigenpairs`
+  for RK4-filtered and exponential-action extraction, with every candidate
+  re-evaluated against the original continuous operator rather than the
+  filtered one.
+- `adaptive_eigenpair` for residual stopping, growth-defect rejection and
+  operator-work accounting around an application-supplied restart.
+- `sparse_operator_matrix`, `sparse_eigenpairs` and `SpluFactorization`, a
+  bounded sparse bridge that converts each JAX column block straight to CSR
+  rather than materializing a dense $n \times n$ host matrix, and lets one
+  shifted LU serve the right and conjugate-transpose Arnoldi so implicit
+  reverse mode does not refactor the same operator.
+
+The sparse bridge is eager and CPU-factorized: JAX supplies the operator actions
+and parameter derivatives, and the native primal is treated as an external
+certified solve. It is not traceable, and says so.
+
 ## Scale and precision fixes
 
 **The Thomas pivot guard was a fixed `1e-12`**, neither scale- nor

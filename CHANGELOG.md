@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.12.0
+## 0.12.0 - 2026-08-02
 
 ### Fixed
 
@@ -109,6 +109,19 @@
 - Propagator helpers provide RK4 stability estimation, continuous-operator
   residual stopping, and multi-candidate extraction without prescribing an
   application eigensolver.
+- A bounded sparse bridge -- `sparse_operator_matrix`, `sparse_eigenpairs` and
+  `SpluFactorization` -- converts each JAX column block straight to CSR instead
+  of materializing a dense n-by-n host matrix, and lets one shifted LU serve
+  both the right and the conjugate-transpose Arnoldi so implicit reverse mode
+  does not refactor the same operator. It is eager and CPU-factorized: JAX
+  supplies the operator actions and parameter derivatives, the native primal is
+  an external certified solve, and it refuses to be traced rather than
+  pretending otherwise.
+- The exceptional-point condition gate measures what it can see, not the true
+  condition number. On a deliberately near-defective pair at `eps = 1e-18` the
+  true condition number was 5e8 while the gate measured 4.5e7, and the
+  derivative came out 0.955 against an analytic 0.5. It guards the obvious
+  degeneracy and is not a certificate of well-conditioning.
 
 ## 0.11.2 - 2026-07-28
 
