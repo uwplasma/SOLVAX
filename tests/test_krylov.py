@@ -496,3 +496,49 @@ def test_recycle_drift_is_jit_compatible():
         ).recycle_drift
     )(cold.recycle)
     assert np.isfinite(float(warm))
+
+
+def test_recycle_drift_is_basis_independent():
+    """The diagnostic must measure the subspace, not the basis describing it.
+
+    The previous form averaged per-column projected residuals, which is not
+    what principal angles are: mix the columns of an orthonormal basis by a
+    unitary and the subspace does not change, but that average does. This
+    builds the same subspace in two bases and requires the same answer.
+    """
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    n, k = 40, 4
+    new_span, _ = np.linalg.qr(rng.normal(size=(n, k)))
+    old_basis, _ = np.linalg.qr(rng.normal(size=(n, k)))
+    mixing, _ = np.linalg.qr(rng.normal(size=(k, k)))
+
+    def drift(basis):
+        residual = basis - new_span @ (new_span.conj().T @ basis)
+        return float(np.mean(np.linalg.svd(residual, compute_uv=False)))
+
+    def old_form(basis):
+        residual = basis - new_span @ (new_span.conj().T @ basis)
+        return float(np.mean(np.linalg.norm(residual, axis=0)))
+
+    assert drift(old_basis) == pytest.approx(drift(old_basis @ mixing), abs=1e-12)
+    # And the superseded form really was basis-dependent, so this test has teeth.
+    assert abs(old_form(old_basis) - old_form(old_basis @ mixing)) > 1e-6
+
+
+def test_recycle_drift_endpoints():
+    """Zero for an unchanged subspace, one for an orthogonal one."""
+    import numpy as np
+
+    rng = np.random.default_rng(1)
+    n, k = 30, 3
+    basis, _ = np.linalg.qr(rng.normal(size=(n, 2 * k)))
+    same, orthogonal = basis[:, :k], basis[:, k:]
+
+    def drift(span, other):
+        residual = other - span @ (span.conj().T @ other)
+        return float(np.mean(np.linalg.svd(residual, compute_uv=False)))
+
+    assert drift(same, same) == pytest.approx(0.0, abs=1e-12)
+    assert drift(same, orthogonal) == pytest.approx(1.0, abs=1e-12)

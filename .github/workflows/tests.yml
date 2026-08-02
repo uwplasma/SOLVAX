@@ -23,6 +23,23 @@ jobs:
       - run: pip install ruff==0.15.10
       - run: ruff check src tests examples
 
+  # The package advertises `Typing :: Typed` and ships `py.typed`, so a
+  # downstream type-checker trusts these annotations. Nothing verified them
+  # until this job existed, which made the marker a promise the repository was
+  # not keeping. Modules that do not pass yet are listed in `[tool.mypy]`, so
+  # this gate holds the line rather than blocking on pre-existing debt.
+  types:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install mypy==1.20.0 jax numpy
+      - run: mypy
+
   test:
     strategy:
       fail-fast: false

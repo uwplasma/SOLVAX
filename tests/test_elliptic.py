@@ -78,6 +78,43 @@ def test_operator_round_trip_reproduces_rhs():
     assert np.allclose(recovered, expected, rtol=1e-9, atol=1e-11)
 
 
+def test_manufactured_cell_centered_dirichlet_mode():
+    """Recover an independent eigenmode of the documented endpoint closure."""
+    nx, nz = 12, 18
+    length_x = 1.7
+    length_z = 2.3
+    dx_value = length_x / nx
+    dz_value = length_z / nz
+    dx = jnp.full((nx,), dx_value, dtype=jnp.float64)
+    dz = jnp.full((nx,), dz_value, dtype=jnp.float64)
+    coefficients = jnp.ones((nx,), dtype=jnp.float64)
+    operator = build_fourier_helmholtz_operator(
+        dx=dx,
+        dz=dz,
+        g11=coefficients,
+        g33=coefficients,
+        rhs_scale=coefficients,
+        nz=nz,
+    )
+
+    x = (jnp.arange(nx, dtype=jnp.float64) + 0.5) * dx_value
+    z = jnp.arange(nz, dtype=jnp.float64) * dz_value
+    bounded_mode = 2
+    periodic_mode = 3
+    solution = jnp.sin(bounded_mode * jnp.pi * x[:, None] / length_x) * jnp.cos(
+        2.0 * jnp.pi * periodic_mode * z[None, :] / length_z
+    )
+    bounded_eigenvalue = -4.0 * jnp.sin(
+        bounded_mode * jnp.pi / (2.0 * nx)
+    ) ** 2 / dx_value**2
+    periodic_eigenvalue = -(2.0 * jnp.pi * periodic_mode / length_z) ** 2
+    rhs = (bounded_eigenvalue + periodic_eigenvalue) * solution
+
+    recovered = solve_fourier_helmholtz(rhs, operator=operator)
+
+    assert np.allclose(recovered, solution, rtol=1e-10, atol=1e-11)
+
+
 def test_solve_is_jit_and_grad_transparent():
     nx, nz = 6, 12
     dx, dz, g11, g33, rhs_scale = _geometry(nx, nz, seed=4)

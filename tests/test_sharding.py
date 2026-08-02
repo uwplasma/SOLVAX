@@ -21,7 +21,14 @@ import pytest
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
-from solvax import gmres, linear_solve, pcg, pcg_linear_solve, tridiagonal_solve
+from solvax import (
+    gmres,
+    linear_solve,
+    pcg,
+    pcg_linear_solve,
+    shard_batch,
+    tridiagonal_solve,
+)
 
 jax.config.update("jax_enable_x64", True)
 
@@ -53,6 +60,52 @@ def _mesh():
 
 def _shard(mesh, value, spec):
     return jax.device_put(value, NamedSharding(mesh, spec))
+
+
+def test_shard_batch_runs_only_each_devices_local_items():
+    mesh = _mesh()
+    values = _shard(mesh, jnp.arange(48.0).reshape(16, 3), P("i", None))
+
+    def local_transpose(local_values):
+        local_batch_size = local_values.shape[0]
+        return local_values.T + 100.0 * local_batch_size
+
+    mapped = shard_batch(
+        local_transpose,
+        mesh=mesh,
+        input_rank=2,
+        output_rank=2,
+        output_batch_axis=1,
+        axis_name="i",
+    )
+    result = jax.jit(mapped)(values)
+
+    assert result.sharding.spec == P(None, "i")
+    assert np.allclose(np.asarray(result), np.asarray(values).T + 200.0)
+    assert count_collectives(mapped, values) == 0
+
+
+def test_shard_batch_validates_layout():
+    mesh = _mesh()
+
+    def identity(value):
+        return value
+
+    with pytest.raises(ValueError, match="input_rank"):
+        shard_batch(identity, mesh=mesh, input_rank=0, output_rank=1, axis_name="i")
+    with pytest.raises(ValueError, match="output_rank"):
+        shard_batch(identity, mesh=mesh, input_rank=1, output_rank=0, axis_name="i")
+    with pytest.raises(ValueError, match="output_batch_axis"):
+        shard_batch(
+            identity,
+            mesh=mesh,
+            input_rank=1,
+            output_rank=1,
+            output_batch_axis=1,
+            axis_name="i",
+        )
+    with pytest.raises(ValueError, match="no axis"):
+        shard_batch(identity, mesh=mesh, input_rank=1, output_rank=1, axis_name="missing")
 
 
 def test_sharded_batched_tridiagonal_is_collective_free_forward_and_reverse():

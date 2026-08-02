@@ -199,7 +199,16 @@ def lu_factor_banded(
             c = c.at[ku - t + 1 : ku - t + 1 + kl].add(-m_hist[:, ku - t] * u_kj)
         p = c[ku]
         small = jnp.abs(p) < floor
-        p = jnp.where(small, jnp.where(p >= 0, floor, -floor), p)
+        # Clamp the magnitude, keep the direction. Taking the sign from the
+        # real part alone is right for real pivots and wrong for complex ones:
+        # it discards the phase, so a pivot of 1e-18j is replaced by a purely
+        # real floor -- a ninety-degree rotation of the value the elimination
+        # then divides by. Scaling by p/|p| reduces to the same +/- floor when
+        # p is real, and preserves the phase when it is not. The magnitude
+        # guard keeps 0/0 out of the direction itself.
+        magnitude = jnp.abs(p)
+        direction = jnp.where(magnitude > 0, p / jnp.where(magnitude > 0, magnitude, 1), 1)
+        p = jnp.where(small, floor * direction, p)
         mults = c[ku + 1 :] / p
         c = c.at[ku].set(p).at[ku + 1 :].set(mults)
         if ku > 0:

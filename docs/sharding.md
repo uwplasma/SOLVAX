@@ -18,6 +18,31 @@ b = jax.device_put(b, NamedSharding(mesh, P("i")))
 solution = jax.jit(lambda rhs: sx.pcg(matvec, rhs, single_reduction=True))(b)
 ```
 
+## Independent batches
+
+Named sharding describes where an array lives. It does not always force the
+compiler to run only the local batch items. Use `shard_batch` when each device
+must execute its own independent cases:
+
+```python
+def integrate_local(local_cases):
+    return time_integrator(local_cases)
+
+integrate = sx.shard_batch(
+    integrate_local,
+    mesh=mesh,
+    input_rank=4,
+    output_rank=5,
+    output_batch_axis=0,
+)
+result = jax.jit(integrate)(cases)
+```
+
+`integrate_local` sees the local part of input axis 0. The matching output axis
+stays sharded. No collective is needed when the local program does not add
+one. The test records zero collectives and checks the local batch size on an
+eight-device mesh.
+
 ## Counting communication
 
 Because solves are jit-compiled, their communication is inspectable: count the
@@ -70,7 +95,7 @@ exactly why they are measured, not asserted from the algebra.
 
 ## Scope
 
-Multi-host meshes and explicit `shard_map` layouts are exercised downstream
-(SPECTRAX, DRBX) on multi-GPU hardware; the in-repo tests emulate an
-eight-device mesh on CPU so every CI run checks sharding preservation and
-communication counts without accelerators.
+The in-repo tests emulate an eight-device mesh on CPU. They check named
+sharding, explicit batch maps, gradients, and communication counts without
+requiring accelerators. Downstream codes test the same API on multi-GPU and
+multi-process meshes.
