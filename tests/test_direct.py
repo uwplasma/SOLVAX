@@ -445,13 +445,26 @@ def test_regenerated_solve_keeps_the_right_hand_side_out_of_scan_inputs():
         ]
         assert len(scans) == 2, "the solve should be exactly two sweeps"
         for equation in scans:
-            num_consts = equation.params["num_consts"]
-            num_carry = equation.params["num_carry"]
-            xs_avals = [v.aval for v in equation.invars[num_consts + num_carry :]]
-            # Per step the inputs are the index and this row's Schur factors.
-            # Only the pivots share the right-hand side's block shape, and they
-            # are integers; a *floating* input of that shape would be the
-            # right-hand side, the solution, or sigma travelling as an ``xs``.
+            # Identify the scan inputs without reading the primitive's
+            # bookkeeping parameters, which are not stable across JAX releases
+            # (0.11 dropped ``num_consts``/``num_carry``). What is stable is the
+            # shapes: a scan input is sliced along its leading axis before the
+            # body sees it, so its body aval is the outer one minus that axis,
+            # while constants and carries keep identical avals.
+            body = equation.params["jaxpr"]
+            body_vars = getattr(body, "jaxpr", body).invars
+            xs_avals = [
+                outer.aval
+                for outer, inner in zip(equation.invars, body_vars, strict=True)
+                if outer.aval.shape != inner.aval.shape
+                and outer.aval.shape[1:] == inner.aval.shape
+            ]
+            assert xs_avals, "no scan inputs found; the structure check is stale"
+
+            # Per step the inputs are the row index and that row's Schur
+            # factors. Only the pivots share the right-hand side's block shape,
+            # and they are integers; a *floating* input of that shape would be
+            # the right-hand side, sigma or the solution travelling as an ``xs``.
             offenders = [
                 aval.shape
                 for aval in xs_avals
