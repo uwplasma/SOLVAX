@@ -71,6 +71,12 @@ x2 = sx.block_thomas_solve(factors, rhs2)
 # parameters as its first argument.
 generated_factors = sx.block_thomas_factor_fn(row, n_blocks=N)
 
+# Same factors, a third of the state: keep the Schur LU only and rebuild the
+# off-diagonal blocks from `row` during each substitution sweep.
+lean_factors = sx.block_thomas_factor_fn(row, n_blocks=N, store_offdiagonals=False)
+x_lean = sx.block_thomas_solve(lean_factors, rhs)
+adjoint = sx.block_thomas_solve(lean_factors, rhs, transpose=True)
+
 # One generated solve with O(sqrt(N) m^2) factor storage and exact JVP/VJP.
 x = sx.block_thomas_checkpointed_fn(row, N, rhs)
 

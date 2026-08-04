@@ -31,6 +31,17 @@ and every retained row cotangent are exact at any window, and the only
 approximation is the omission of rows j >= W (see
 ``_block_thomas_selected_fn_state`` and ``_retained_row_cotangents``).
 
+When the whole solution is needed and the same matrix is solved many times, the
+factors themselves are what has to fit in memory. Reusable factors nominally
+hold three (N, m, m) arrays: the Schur LU factors and the two off-diagonal
+bands the substitution reads. Only the first cannot be recovered.
+``block_thomas_factor_fn(..., store_offdiagonals=False)`` therefore keeps the
+Schur LU alone and has ``block_thomas_solve`` regenerate L_k and U_k from the
+same block generator, a third of the state (a sixth against float64 bands when
+the LU is float32) for two extra generator evaluations per row per solve. The
+elimination still runs exactly once, so this stays a factor/solve split and not
+a one-shot solver like ``block_thomas_checkpointed_fn``.
+
 Stability note: block LU without pivoting is guaranteed stable only for
 block-diagonally-dominant systems (Demmel, Higham & Schreiber, Numer. Linear
 Algebra Appl. 2, 173 (1995)); each block here is factored with partial
@@ -79,6 +90,60 @@ class BlockTridiagFactors(NamedTuple):
     delta_piv: jax.Array
     lower: jax.Array
     upper: jax.Array
+
+
+@jax.tree_util.register_pytree_node_class
+@dataclasses.dataclass(frozen=True, eq=False)
+class GeneratedBlockTridiagFactors:
+    """Reusable elimination state that keeps *only* the Schur LU factors.
+
+    Returned by :func:`block_thomas_factor_fn` with ``store_offdiagonals=False``
+    and accepted by :func:`block_thomas_solve` exactly like
+    :class:`BlockTridiagFactors`. The two off-diagonal bands are not stored;
+    the substitution sweeps call ``block_fn`` again to rebuild ``L_k`` and
+    ``U_k`` one block at a time.
+
+    That is a factor-three cut in retained state --- three ``(n_blocks, m, m)``
+    arrays become one --- and a factor six when the LU factors are float32 and
+    the bands would have been float64. For a family of chains preconditioned
+    together it is often the difference between fitting on a device and not;
+    see :func:`block_thomas_factor_fn` for the cost that buys it.
+
+    Attributes:
+        delta_lu: LU factors of every Schur complement ``Delta_k``,
+            shape ``(n_blocks, m, m)``.
+        delta_piv: matching pivot indices, shape ``(n_blocks, m)``.
+        block_fn: the row generator the factors were built from. It is carried
+            here rather than passed at solve time so that factors and generator
+            cannot be paired up wrongly, which would be silently wrong rather
+            than an error.
+        n_blocks: number of block rows.
+        work_dtype: working precision of the generated blocks, recorded at
+            factorization so that a low ``factor_dtype`` does not change the
+            precision the substitution accumulates in.
+
+    As a pytree, ``delta_lu`` and ``delta_piv`` are the children and the other
+    three fields are static, so the state can cross a ``jit`` boundary. A
+    ``block_fn`` that closes over arrays makes them compile-time constants of
+    the consuming trace, and a freshly created closure is a fresh static value:
+    build the generator once if the factors are passed as an argument.
+    """
+
+    delta_lu: jax.Array
+    delta_piv: jax.Array
+    block_fn: Callable[[jax.Array], tuple[jax.Array, jax.Array, jax.Array]]
+    n_blocks: int
+    work_dtype: object
+
+    def tree_flatten(self):
+        return (
+            (self.delta_lu, self.delta_piv),
+            (self.block_fn, self.n_blocks, self.work_dtype),
+        )
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        return cls(*children, *aux_data)
 
 
 def block_thomas_factor(
@@ -130,24 +195,46 @@ def block_thomas_factor_fn(
     block_fn: Callable[[jax.Array], tuple[jax.Array, jax.Array, jax.Array]],
     n_blocks: int,
     factor_dtype=None,
-) -> BlockTridiagFactors:
+    *,
+    store_offdiagonals: bool = True,
+) -> BlockTridiagFactors | GeneratedBlockTridiagFactors:
     """Factor generated block rows once for reusable primal/transpose solves.
 
     Unlike :func:`block_thomas_factor`, this entry point never materializes the
-    diagonal band. ``block_fn`` is evaluated exactly once per block index; the
-    returned state stores Schur LU factors and the two off-diagonal bands needed
-    by :func:`block_thomas_solve`.
+    diagonal band. ``block_fn`` is evaluated exactly once per block index.
+
+    With ``store_offdiagonals=False`` the returned state keeps *only* the Schur
+    LU factors and pivots; :func:`block_thomas_solve` then regenerates ``L_k``
+    and ``U_k`` from the same ``block_fn`` during its two substitution sweeps.
+    Retained state falls from three ``(n_blocks, m, m)`` arrays to one --- a
+    third, or a sixth against float64 bands when ``factor_dtype`` is
+    ``jnp.float32`` --- which is what makes a chain family fit in device memory
+    when the full band state does not.
+
+    The cost is generator evaluations, not arithmetic: ``block_fn`` is called
+    once per index to factor, and then **twice per index per solve**, once in
+    the downward sweep and once in the upward one. Triangular-solve and
+    matrix-product counts are unchanged. The factors stay reusable --- this is
+    not :func:`block_thomas_checkpointed_fn`, which re-eliminates on every
+    application; here the elimination happens exactly once, so a solve costs
+    two block regenerations per row and no factorization at all.
 
     Args:
         block_fn: maps a traced int32 index to ``(lower, diagonal, upper)``
-            blocks of identical square shape.
+            blocks of identical square shape. It must be a pure function of its
+            index: the substitution assumes a regenerated block equals the one
+            the factorization saw.
         n_blocks: static positive number of block rows.
         factor_dtype: optional lower precision for Schur LU factorizations, with
-            the same contract as :func:`block_thomas_factor`.
+            the same contract as :func:`block_thomas_factor`. It composes with
+            ``store_offdiagonals=False``.
+        store_offdiagonals: keep the two off-diagonal bands (default) and return
+            :class:`BlockTridiagFactors`, or drop them and return
+            :class:`GeneratedBlockTridiagFactors`.
 
     Returns:
         Reusable factors accepted by :func:`block_thomas_solve`, including its
-        exact ``transpose=True`` path.
+        exact ``transpose=True`` path, under either storage policy.
     """
     if n_blocks < 1:
         raise ValueError("n_blocks must be positive")
@@ -162,19 +249,35 @@ def block_thomas_factor_fn(
         lower, diagonal, upper = block_fn(index)
         solved_lower = lu_solve(delta_next, l_next.astype(fdt)).astype(work)
         delta = lu_factor((diagonal - upper @ solved_lower).astype(fdt))
-        return (delta, lower), (delta[0], delta[1], lower, upper)
+        # With the bands dropped nothing of size ``(n_blocks, m, m)`` beyond the
+        # Schur factors is ever stacked; only the running ``L`` sits in the
+        # carry, exactly as it must for the elimination itself.
+        emitted = (delta[0], delta[1])
+        if store_offdiagonals:
+            emitted += (lower, upper)
+        return (delta, lower), emitted
 
-    _, (lus, pivs, lowers, uppers) = jax.lax.scan(
+    _, emitted = jax.lax.scan(
         down_step,
         (last, l_last),
         jnp.arange(n_blocks - 1, dtype=jnp.int32),
         reverse=True,
     )
+    delta_lu = jnp.concatenate([emitted[0], last[0][None]], axis=0)
+    delta_piv = jnp.concatenate([emitted[1], last[1][None]], axis=0)
+    if not store_offdiagonals:
+        return GeneratedBlockTridiagFactors(
+            delta_lu=delta_lu,
+            delta_piv=delta_piv,
+            block_fn=block_fn,
+            n_blocks=n_blocks,
+            work_dtype=work,
+        )
     return BlockTridiagFactors(
-        delta_lu=jnp.concatenate([lus, last[0][None]], axis=0),
-        delta_piv=jnp.concatenate([pivs, last[1][None]], axis=0),
-        lower=jnp.concatenate([lowers, l_last[None]], axis=0),
-        upper=jnp.concatenate([uppers, u_last[None]], axis=0),
+        delta_lu=delta_lu,
+        delta_piv=delta_piv,
+        lower=jnp.concatenate([emitted[2], l_last[None]], axis=0),
+        upper=jnp.concatenate([emitted[3], u_last[None]], axis=0),
     )
 
 
@@ -409,8 +512,94 @@ def block_thomas_checkpointed_fn(
     )
 
 
+def _block_thomas_solve_regenerated(
+    factors: GeneratedBlockTridiagFactors, rhs: jax.Array, transpose: bool
+) -> jax.Array:
+    """Substitution that rebuilds the off-diagonal blocks instead of reading them.
+
+    The recurrences are the ones in :func:`block_thomas_solve`, re-associated so
+    that step ``k`` of each sweep touches only ``Delta_k`` and one block of row
+    ``k`` --- never row ``k+1``'s Schur factor. That matters twice over.
+
+    First, it lets both sweeps take the *whole* ``delta_lu`` band as scan inputs
+    rather than a shifted slice of it. A slice would materialize a second
+    ``(n_blocks, m, m)`` array during the solve and hand back most of the memory
+    this storage policy exists to save.
+
+    Second, it keeps every scan carry linear in the right-hand side: the
+    regenerated blocks are consumed where they are produced and never enter a
+    carry. Reverse mode and :func:`jax.linear_transpose` therefore transpose
+    these scans in the ordinary way.
+
+    Writing ``z_k = Delta_k^{-1} sigma_k``, the downward sweep carries ``z``
+    instead of ``sigma`` and emits ``sigma``,
+
+        sigma_k = b_k - C_k z_{k+1},   z_k = Delta_k^{-1} sigma_k,
+
+    with ``z_N = 0`` and ``C_k`` the regenerated coupling (``U_k`` for the primal
+    system, ``L_{k+1}^T`` for the transposed one). The upward sweep is unchanged
+    apart from where its blocks come from. These are the stored-band operations
+    in the stored-band order, so the two paths agree at round-off rather than at
+    a solver tolerance --- what little they differ by is how XLA fuses a scan
+    against an unrolled loop. The one extra triangular solve is ``z_0``, which
+    the upward sweep recomputes as ``x_0`` so that its inputs stay unsliced too.
+    """
+    delta_lu, delta_piv = factors.delta_lu, factors.delta_piv
+    block_fn, n_blocks = factors.block_fn, factors.n_blocks
+    if int(rhs.shape[0]) != n_blocks:
+        raise ValueError("rhs leading dimension must equal n_blocks")
+
+    fdt = delta_lu.dtype
+    work = jnp.result_type(rhs, factors.work_dtype)
+    trans = 1 if transpose else 0
+    swap = lambda block: jnp.swapaxes(block, -1, -2)  # noqa: E731
+
+    def tsolve(lu, piv, v):
+        return lu_solve((lu, piv), v.astype(fdt), trans=trans).astype(work)
+
+    def down_step(z_next, inputs):
+        index, lu, piv, b_k = inputs
+        if transpose:
+            # Row ``k+1``'s sub-diagonal block; at the top row it multiplies the
+            # zero carry, and the clamp keeps the generator index in range.
+            lower_next, _, _ = block_fn(jnp.minimum(index + 1, n_blocks - 1))
+            coupling = swap(lower_next)
+        else:
+            _, _, upper_k = block_fn(index)
+            coupling = upper_k
+        # ``select`` rather than relying on a zero carry: ``upper[-1]`` is
+        # documented as unused, so a generator may return anything there.
+        sigma_k = jnp.where(index == n_blocks - 1, b_k, b_k - coupling @ z_next)
+        return tsolve(lu, piv, sigma_k), sigma_k
+
+    indices = jnp.arange(n_blocks, dtype=jnp.int32)
+    zero = jnp.zeros(rhs.shape[1:], work)
+    _, sigma = jax.lax.scan(
+        down_step, zero, (indices, delta_lu, delta_piv, rhs), reverse=True
+    )
+
+    def up_step(x_previous, inputs):
+        index, lu, piv, sigma_k = inputs
+        if transpose:
+            _, _, upper_previous = block_fn(jnp.maximum(index - 1, 0))
+            coupling = swap(upper_previous)
+        else:
+            lower_k, _, _ = block_fn(index)
+            coupling = lower_k
+        value = jnp.where(index == 0, sigma_k, sigma_k - coupling @ x_previous)
+        x_k = tsolve(lu, piv, value)
+        return x_k, x_k
+
+    _, solution = jax.lax.scan(
+        up_step, zero, (indices, delta_lu, delta_piv, sigma)
+    )
+    return solution
+
+
 def block_thomas_solve(
-    factors: BlockTridiagFactors, rhs: jax.Array, transpose: bool = False
+    factors: BlockTridiagFactors | GeneratedBlockTridiagFactors,
+    rhs: jax.Array,
+    transpose: bool = False,
 ) -> jax.Array:
     """Solve using precomputed factors.
 
@@ -426,14 +615,23 @@ def block_thomas_solve(
     forward and the adjoint solve — exactly what implicit differentiation
     needs.
 
+    :class:`GeneratedBlockTridiagFactors` is accepted here on the same terms.
+    Those factors carry no off-diagonal bands, so both sweeps call the factored
+    ``block_fn`` again, one block at a time, in place of reading them; the
+    transposed solve is exact under that policy too, because it needs the same
+    two blocks per row.
+
     Args:
-        factors: output of :func:`block_thomas_factor`.
+        factors: output of :func:`block_thomas_factor` or
+            :func:`block_thomas_factor_fn`, under either storage policy.
         rhs: ``(n_blocks, m)`` or ``(n_blocks, m, n_rhs)``.
         transpose: if True, solve ``A^T x = rhs`` instead of ``A x = rhs``.
 
     Returns:
         Solution with the same shape as ``rhs``.
     """
+    if isinstance(factors, GeneratedBlockTridiagFactors):
+        return _block_thomas_solve_regenerated(factors, rhs, transpose)
     delta_lu, delta_piv, lower, upper = factors
     if transpose:
         down_blocks = jnp.swapaxes(lower[1:], -1, -2)

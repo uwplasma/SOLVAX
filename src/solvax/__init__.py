@@ -25,6 +25,7 @@ from solvax.banded import (
 from solvax.direct import (
     BlockTridiagFactors,
     ChainWindowPlan,
+    GeneratedBlockTridiagFactors,
     LocalizationWindow,
     block_thomas,
     block_thomas_checkpointed_fn,
@@ -161,6 +162,7 @@ __all__ = [
     "lu_solve_banded",
     "lu_solve_banded_periodic",
     "BlockTridiagFactors",
+    "GeneratedBlockTridiagFactors",
     "block_tridiag_matvec",
     "block_tridiag_relative_residual",
     "eigenpair_reverse",

@@ -6,6 +6,10 @@ then applies it to any right-hand side, and with `transpose=True` solves the
 implicit differentiation needs (one elimination covers the forward and the
 adjoint solve).
 
+The last section keeps the same reuse but a third of the storage: when the
+blocks are generated rather than stored, the off-diagonal bands can be rebuilt
+during substitution instead of retained.
+
 Expected runtime: about a second on a laptop CPU.
 """
 
@@ -45,3 +49,27 @@ print("adjoint matches jax.linear_transpose:", bool(jnp.allclose(x_adj, x_adj_re
 # The convenience wrapper factors + solves in one call.
 x_oneshot = sx.block_thomas(lower, diag, upper, rhs)
 print("one-shot matches factor/solve:", bool(jnp.allclose(x_oneshot, x, atol=1e-12)))
+
+
+# Same reuse, a third of the state: with generated rows, the off-diagonal bands
+# need not be kept — each substitution sweep rebuilds the block it needs.
+def row(k):
+    return lower[k], diag[k], upper[k]
+
+
+lean = sx.block_thomas_factor_fn(row, n_blocks, store_offdiagonals=False)
+x_lean = sx.block_thomas_solve(lean, rhs)
+x_lean_adj = sx.block_thomas_solve(lean, rhs, transpose=True)
+print("regenerated bands match stored:", bool(jnp.allclose(x_lean, x, atol=1e-12)))
+print("regenerated adjoint matches:", bool(jnp.allclose(x_lean_adj, x_adj, atol=1e-12)))
+
+
+def retained_bytes(factors):
+    return sum(int(leaf.nbytes) for leaf in jax.tree_util.tree_leaves(factors))
+
+
+full = sx.block_thomas_factor_fn(row, n_blocks)
+print(
+    "retained state:",
+    f"{retained_bytes(lean) / retained_bytes(full):.2f}x the full-band factors",
+)

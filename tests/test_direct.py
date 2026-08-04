@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from solvax import (
+    GeneratedBlockTridiagFactors,
     block_thomas,
     block_thomas_checkpointed_fn,
     block_thomas_factor,
@@ -117,6 +118,320 @@ def test_generated_factor_assembles_each_index_once():
 def test_generated_factor_rejects_empty_system():
     with pytest.raises(ValueError, match="positive"):
         block_thomas_factor_fn(lambda _: (None, None, None), 0)
+
+
+# --- Schur-only factors: the off-diagonal bands are regenerated, not stored ---
+
+
+def _pinned_singular_system(n_blocks, m, n_rhs, pin, seed):
+    """A chain that is singular but for a regularizing pin, plus its dense form.
+
+    Every block row is built so that ``L_k + D_k + U_k = 0`` with the
+    out-of-domain slots zeroed, which makes the constant vector an exact null
+    vector of the whole chain; ``pin`` is then added to the diagonal, the way a
+    kinetic chain's constraint is pinned. Comparing *solutions* on such a system
+    measures its conditioning; comparing residuals measures the code.
+    """
+    rng = np.random.default_rng(seed)
+    lower = rng.standard_normal((n_blocks, m, m))
+    upper = rng.standard_normal((n_blocks, m, m))
+    lower[0] = 0.0
+    upper[-1] = 0.0
+    diag = -(lower + upper) + pin * np.eye(m)
+    shape = (n_blocks, m) if n_rhs is None else (n_blocks, m, n_rhs)
+    rhs = rng.standard_normal(shape)
+
+    dense = np.zeros((n_blocks * m, n_blocks * m))
+    for k in range(n_blocks):
+        s = slice(k * m, (k + 1) * m)
+        dense[s, s] = diag[k]
+        if k > 0:
+            dense[s, slice((k - 1) * m, k * m)] = lower[k]
+        if k < n_blocks - 1:
+            dense[s, slice((k + 1) * m, (k + 2) * m)] = upper[k]
+    return map(jnp.asarray, (lower, diag, upper, rhs)), dense
+
+
+def _relative_difference(actual, expected):
+    """Largest entrywise difference, relative to the scale of the reference."""
+    actual, expected = np.asarray(actual), np.asarray(expected)
+    scale = np.max(np.abs(expected))
+    return float(np.max(np.abs(actual - expected)) / max(scale, np.finfo(float).tiny))
+
+
+def _transposed_bands(lower, diag, upper):
+    """Bands of ``A^T``, for residuals of the transposed solve."""
+    t = lambda a: jnp.swapaxes(a, -1, -2)  # noqa: E731
+    return (
+        jnp.concatenate([jnp.zeros_like(upper[:1]), t(upper[:-1])], axis=0),
+        t(diag),
+        jnp.concatenate([t(lower[1:]), jnp.zeros_like(lower[:1])], axis=0),
+    )
+
+
+@pytest.mark.parametrize("n_rhs", [None, 3])
+@pytest.mark.parametrize("n_blocks,m", [(1, 3), (12, 4), (96, 3), (5, 8)])
+def test_regenerated_factors_match_stored_bands_primal_and_transpose(n_blocks, m, n_rhs):
+    """Dropping the bands changes storage, not arithmetic.
+
+    ``(96, 3)`` is the shape the storage saving is for: many short block rows,
+    where the bands dominate. ``n_rhs=3`` is the other axis the consumer uses.
+    """
+    (lower, diag, upper, rhs), dense = make_system(n_blocks, m, n_rhs, seed=41)
+    block_fn = _fn_from_arrays(lower, diag, upper)
+    lean = block_thomas_factor_fn(block_fn, n_blocks, store_offdiagonals=False)
+    stored = block_thomas_factor(lower, diag, upper)
+    assert isinstance(lean, GeneratedBlockTridiagFactors)
+
+    for transpose in (False, True):
+        actual = block_thomas_solve(lean, rhs, transpose=transpose)
+        expected = block_thomas_solve(stored, rhs, transpose=transpose)
+        reference = np.linalg.solve(
+            dense.T if transpose else dense, np.asarray(rhs).reshape(n_blocks * m, -1)
+        )
+        # The two paths run the same operations in the same order --- only the
+        # loop form differs --- so they agree at round-off, not merely at a
+        # solver tolerance.
+        assert _relative_difference(actual, expected) < 1e-13
+        assert np.allclose(
+            np.asarray(actual).reshape(n_blocks * m, -1), reference, atol=1e-11
+        )
+
+
+@pytest.mark.parametrize("transpose", [False, True])
+def test_regenerated_factors_match_on_a_near_singular_chain(transpose):
+    """Residuals, not solution vectors, on a chain held together by one pin."""
+    n_blocks, m, n_rhs = 32, 5, 2
+    (lower, diag, upper, rhs), dense = _pinned_singular_system(
+        n_blocks, m, n_rhs, pin=1.0e-6, seed=42
+    )
+    assert np.linalg.cond(dense) > 1.0e8, "the fixture stopped being near-singular"
+
+    block_fn = _fn_from_arrays(lower, diag, upper)
+    lean = block_thomas_factor_fn(block_fn, n_blocks, store_offdiagonals=False)
+    stored = block_thomas_factor(lower, diag, upper)
+    actual = block_thomas_solve(lean, rhs, transpose=transpose)
+    expected = block_thomas_solve(stored, rhs, transpose=transpose)
+
+    bands = _transposed_bands(lower, diag, upper) if transpose else (lower, diag, upper)
+    residual_actual = np.asarray(block_tridiag_relative_residual(*bands, actual, rhs))
+    residual_expected = np.asarray(block_tridiag_relative_residual(*bands, expected, rhs))
+    # Both paths solve this chain equally well. The residual is around 1e-8
+    # rather than round-off *because* the chain is near-singular, which is why
+    # this is the quantity compared and the solution vector is not.
+    assert np.all(residual_actual <= 1.5 * residual_expected + 1e-14)
+    assert np.all(residual_actual < 1.0e-6)
+    assert _relative_difference(actual, expected) < 1e-13
+
+
+@pytest.mark.parametrize("transpose", [False, True])
+def test_regenerated_factors_compose_with_a_float32_schur_lu(transpose):
+    """The 8.9 GB row of the storage table: no bands *and* a low-precision LU."""
+    n_blocks, m = 24, 6
+    (lower, diag, upper, rhs), _ = make_system(n_blocks, m, 2, seed=43)
+    block_fn = _fn_from_arrays(lower, diag, upper)
+    lean = block_thomas_factor_fn(
+        block_fn, n_blocks, jnp.float32, store_offdiagonals=False
+    )
+    stored = block_thomas_factor(lower, diag, upper, factor_dtype=jnp.float32)
+    assert lean.delta_lu.dtype == jnp.float32
+
+    actual = block_thomas_solve(lean, rhs, transpose=transpose)
+    expected = block_thomas_solve(stored, rhs, transpose=transpose)
+    # The float32 factors are shared, so the two substitutions still agree at
+    # round-off; accumulation stays in the working precision of the blocks.
+    assert actual.dtype == rhs.dtype
+    assert _relative_difference(actual, expected) < 1e-13
+
+
+def test_regenerated_factors_retain_a_third_of_the_band_state():
+    """Storage is the whole point, so a regression that stores bands must fail."""
+    n_blocks, m = 48, 24
+    (lower, diag, upper, _), _ = make_system(n_blocks, m, seed=44)
+    block_fn = _fn_from_arrays(lower, diag, upper)
+
+    def state_bytes(factors):
+        return sum(int(leaf.nbytes) for leaf in jax.tree_util.tree_leaves(factors))
+
+    stored = block_thomas_factor_fn(block_fn, n_blocks)
+    lean = block_thomas_factor_fn(block_fn, n_blocks, store_offdiagonals=False)
+    lean32 = block_thomas_factor_fn(
+        block_fn, n_blocks, jnp.float32, store_offdiagonals=False
+    )
+
+    def band_shapes(factors):
+        return [
+            leaf.shape
+            for leaf in jax.tree_util.tree_leaves(factors)
+            if leaf.ndim == 3
+        ]
+
+    assert band_shapes(stored) == [(n_blocks, m, m)] * 3
+    assert band_shapes(lean) == [(n_blocks, m, m)]
+
+    # Three float64 bands -> one, and -> a float32 sixth. The pivots add
+    # 1/(2m) on top of each block band, which is why these are not exactly
+    # 1/3 and 1/6.
+    assert state_bytes(lean) < state_bytes(stored) / 2.9
+    assert state_bytes(lean32) < state_bytes(stored) / 5.5
+
+
+def test_regenerated_solve_reuses_the_elimination():
+    """Reusable factors, not a one-shot solver: an apply factorizes nothing.
+
+    ``block_thomas_checkpointed_fn`` re-eliminates on every call, which is what
+    makes it unusable as a preconditioner. The distinction is structural and is
+    checked structurally: the solve's jaxpr must contain no ``lu`` primitive.
+    """
+    n_blocks, m = 16, 4
+    (lower, diag, upper, rhs), _ = make_system(n_blocks, m, seed=45)
+    block_fn = _fn_from_arrays(lower, diag, upper)
+    lean = block_thomas_factor_fn(block_fn, n_blocks, store_offdiagonals=False)
+
+    solve_only = str(jax.make_jaxpr(lambda b: block_thomas_solve(lean, b))(rhs))
+    assert " lu " not in solve_only and "lu[" not in solve_only
+    assert "triangular_solve" in solve_only
+
+    factor_and_solve = str(
+        jax.make_jaxpr(
+            lambda b: block_thomas_solve(
+                block_thomas_factor_fn(block_fn, n_blocks, store_offdiagonals=False), b
+            )
+        )(rhs)
+    )
+    assert "lu[" in factor_and_solve or " lu " in factor_and_solve
+
+    # And one elimination really does serve several right-hand sides.
+    first = block_thomas_solve(lean, rhs)
+    second = block_thomas_solve(lean, 2.0 * rhs)
+    assert np.allclose(np.asarray(second), 2.0 * np.asarray(first), atol=1e-12)
+
+
+def test_regenerated_solve_calls_the_generator_twice_per_row():
+    """The documented trade: one assembly per row to factor, two per solve."""
+    n_blocks = 4
+    (lower, diag, upper, rhs), _ = make_system(n_blocks, 2, seed=46)
+    seen = []
+
+    def run():
+        def block_fn(index):
+            jax.debug.callback(lambda k: seen.append(int(k)), index, ordered=True)
+            return lower[index], diag[index], upper[index]
+
+        factors = block_thomas_factor_fn(block_fn, n_blocks, store_offdiagonals=False)
+        return block_thomas_solve(factors, rhs)
+
+    jax.jit(run)().block_until_ready()
+    counts = [seen.count(index) for index in range(n_blocks)]
+    # One factorization pass plus one downward and one upward substitution pass.
+    assert counts == [3] * n_blocks
+    assert len(seen) == 3 * n_blocks
+
+
+@pytest.mark.parametrize("transpose", [False, True])
+def test_regenerated_solve_gradient_matches_the_stored_path(transpose):
+    """The property that fails silently if it fails: the reverse rule."""
+    n_blocks, m = 10, 3
+    (lower, diag, upper, rhs), _ = make_system(n_blocks, m, seed=47)
+    eye = jnp.eye(m)
+
+    def loss(shift, store):
+        def block_fn(index):
+            return lower[index], diag[index] + shift * eye, upper[index]
+
+        factors = block_thomas_factor_fn(block_fn, n_blocks, store_offdiagonals=store)
+        return jnp.sum(block_thomas_solve(factors, rhs, transpose=transpose) ** 2)
+
+    shift = jnp.asarray(0.1)
+    lean_grad = jax.grad(loss)(shift, False)
+    stored_grad = jax.grad(loss)(shift, True)
+    assert np.isclose(float(lean_grad), float(stored_grad), rtol=1e-12, atol=0.0)
+
+    eps = 1e-6
+    fd = (loss(shift + eps, False) - loss(shift - eps, False)) / (2 * eps)
+    assert np.isclose(float(lean_grad), float(fd), rtol=1e-5)
+
+    # Forward mode too: the scans carry no state reverse mode has to guess at.
+    tangent = jnp.ones_like(shift)
+    _, lean_jvp = jax.jvp(lambda s: loss(s, False), (shift,), (tangent,))
+    _, stored_jvp = jax.jvp(lambda s: loss(s, True), (shift,), (tangent,))
+    assert np.isclose(float(lean_jvp), float(stored_jvp), rtol=1e-12, atol=0.0)
+
+
+def test_regenerated_solve_band_gradients_match_the_stored_path():
+    """Gradients with respect to the blocks themselves, not just a scalar shift."""
+    n_blocks, m = 8, 3
+    (lower, diag, upper, rhs), _ = make_system(n_blocks, m, seed=48)
+
+    def loss(bands, store, transpose):
+        factors = block_thomas_factor_fn(
+            _fn_from_arrays(*bands), n_blocks, store_offdiagonals=store
+        )
+        return jnp.sum(block_thomas_solve(factors, rhs, transpose=transpose) ** 2)
+
+    for transpose in (False, True):
+        lean = jax.grad(loss)((lower, diag, upper), False, transpose)
+        stored = jax.grad(loss)((lower, diag, upper), True, transpose)
+        for a, b in zip(lean, stored, strict=True):
+            assert np.allclose(np.asarray(a), np.asarray(b), rtol=1e-10, atol=1e-12)
+
+
+def test_regenerated_solve_transpose_matches_linear_transpose():
+    """``transpose=True`` is the adjoint of the primal solve, not an approximation."""
+    n_blocks, m = 9, 4
+    (lower, diag, upper, rhs), _ = make_system(n_blocks, m, 2, seed=49)
+    lean = block_thomas_factor_fn(
+        _fn_from_arrays(lower, diag, upper), n_blocks, store_offdiagonals=False
+    )
+
+    (via_transpose,) = jax.linear_transpose(
+        lambda b: block_thomas_solve(lean, b), rhs
+    )(rhs)
+    via_flag = block_thomas_solve(lean, rhs, transpose=True)
+    assert np.allclose(np.asarray(via_transpose), np.asarray(via_flag), atol=1e-11)
+
+
+def test_regenerated_factors_are_a_pytree_and_survive_jit_and_vmap():
+    n_blocks, m = 7, 3
+    (lower, diag, upper, rhs), _ = make_system(n_blocks, m, seed=50)
+    eye = jnp.eye(m)
+    lean = block_thomas_factor_fn(
+        _fn_from_arrays(lower, diag, upper), n_blocks, store_offdiagonals=False
+    )
+
+    leaves, treedef = jax.tree_util.tree_flatten(lean)
+    assert len(leaves) == 2  # only the Schur LU factors and their pivots
+    rebuilt = jax.tree_util.tree_unflatten(treedef, leaves)
+    assert rebuilt.n_blocks == n_blocks
+
+    passed = jax.jit(block_thomas_solve)(lean, rhs)
+    reference = block_thomas_solve(block_thomas_factor(lower, diag, upper), rhs)
+    assert _relative_difference(passed, reference) < 1e-13
+
+    def solve_shifted(shift):
+        def block_fn(index):
+            return lower[index], diag[index] + shift * eye, upper[index]
+
+        factors = block_thomas_factor_fn(block_fn, n_blocks, store_offdiagonals=False)
+        return block_thomas_solve(factors, rhs)
+
+    shifts = jnp.asarray([0.0, 0.25])
+    batched = jax.vmap(solve_shifted)(shifts)
+    for index, shift in enumerate(shifts):
+        expected = block_thomas_solve(
+            block_thomas_factor(lower, diag + shift * eye, upper), rhs
+        )
+        assert np.allclose(np.asarray(batched[index]), np.asarray(expected), atol=1e-12)
+
+
+def test_regenerated_solve_rejects_a_mismatched_right_hand_side():
+    n_blocks = 4
+    (lower, diag, upper, rhs), _ = make_system(n_blocks, 3, seed=51)
+    lean = block_thomas_factor_fn(
+        _fn_from_arrays(lower, diag, upper), n_blocks, store_offdiagonals=False
+    )
+    with pytest.raises(ValueError, match="leading dimension"):
+        block_thomas_solve(lean, rhs[:-1])
 
 
 @pytest.mark.parametrize("n_blocks,checkpoint_size", [(1, 1), (7, None), (10, 20)])

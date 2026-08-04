@@ -169,6 +169,7 @@ def test_exported_surface_is_stable():
         "block_thomas_truncated_fn_with_residual",
         "block_thomas_checkpointed_fn",
         "BlockTridiagFactors",
+        "GeneratedBlockTridiagFactors",
         "LocalizationWindow",
         "localization_crossover_window",
         "localization_profile_fn",
