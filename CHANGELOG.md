@@ -1,5 +1,54 @@
 # Changelog
 
+## Unreleased
+
+### Reusable block-Thomas factors without the off-diagonal bands
+
+- `block_thomas_factor_fn` gains `store_offdiagonals=False`, which returns a
+  `GeneratedBlockTridiagFactors` holding only the Schur LU factors and their
+  pivots. `block_thomas_solve` accepts it exactly like `BlockTridiagFactors`
+  and rebuilds `L_k` and `U_k` from the same `block_fn`, one block at a time,
+  during each substitution sweep. Both the primal and the `transpose=True`
+  solve are supported and stay exact.
+- Reusable factors nominally hold three `(N, m, m)` arrays; only the Schur LU
+  is irrecoverable. Dropping the other two cuts retained state to a third, and
+  to a sixth against float64 bands when `factor_dtype=jnp.float32` puts the LU
+  in single precision — the two options compose. Measured at `N=48`, `m=24`:
+  0.3368 and 0.1710 of the full-band state, the excess over 1/3 and 1/6 being
+  the pivot indices. On the scale where that decides something: a family of
+  chains whose three float64 bands come to 53.3 GB retains 17.8 GB as Schur LU
+  alone, and 8.9 GB with a float32 LU — the difference between fitting on a
+  24 GB device and not.
+- The cost is generator evaluations, not arithmetic: `block_fn` is called once
+  per index to factor and twice per index per solve. Triangular-solve and
+  matrix-product counts are unchanged, and the elimination still runs exactly
+  once, so this remains a factor-once/solve-many path. It is not a second
+  `block_thomas_checkpointed_fn`, which re-eliminates on every application and
+  is therefore unusable as a preconditioner.
+- Both sweeps thread the right-hand side through the scan *carry* and take only
+  the row index and that row's Schur factors as scan inputs. This is required,
+  not cosmetic: on every JAX release before 0.10.0 a `lax.scan` cannot be
+  transposed if a value linear in the differentiated input arrives as a scan
+  input — the transpose rule classifies every input of a plainly traced scan as
+  a residual and then asserts that no residual is an undefined primal, which a
+  two-line cumulative-sum scan is enough to trip. A linear carry has always
+  been transposable. Reverse mode is unaffected either way, because partial
+  evaluation sets the classification honestly there, so the symptom is confined
+  to `jax.linear_transpose`. XLA fuses the carry's per-step read and write into
+  an in-place slice update, so no sweep does work proportional to the block
+  count per step, and the solve holds one right-hand-side-shaped buffer instead
+  of three. `block_thomas_solve`'s unrolled sweeps exist for the same
+  underlying reason; the comment there now says so.
+- `jax.grad` and `jax.linear_transpose` therefore behave as they do on stored
+  bands. Tests compare gradients against the stored-band path, primal and
+  transposed; state the adjoint property directly as
+  `<A^-T u, v> == <u, A^-1 v>` so it is pinned by arithmetic rather than by
+  JAX's transposition machinery; assert structurally that no
+  right-hand-side-shaped floating input reappears in either scan; and compare
+  residuals rather than solution vectors on a deliberately near-singular pinned
+  chain, where a solution comparison would measure conditioning instead of the
+  code.
+
 ## 0.12.0 - 2026-08-02
 
 ### Fixed

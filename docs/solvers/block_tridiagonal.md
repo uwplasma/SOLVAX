@@ -83,9 +83,9 @@ x = sx.block_thomas_solve(factors, rhs)
 x_t = sx.block_thomas_solve(factors, adjoint_rhs, transpose=True)
 ```
 
-`block_fn` is evaluated once per index. The reusable factors necessarily retain
-`O(N m^2)` LU and off-diagonal state, but no full diagonal input band is kept in
-addition to the Schur factors.
+`block_fn` is evaluated once per index. The reusable factors retain `O(N m^2)`
+LU and off-diagonal state, but no full diagonal input band is kept in addition
+to the Schur factors.
 
 `BlockTridiagFactors` contains:
 
@@ -95,6 +95,38 @@ addition to the Schur factors.
 
 This split is useful for multiple forcing terms, repeated Newton corrections
 with a frozen Jacobian, and direct preconditioning.
+
+## Drop the off-diagonal bands from the factors
+
+Of those three `(N, m, m)` arrays only the Schur LU is irrecoverable; `lower`
+and `upper` are what `block_fn` returns. Ask for the factors without them:
+
+```python
+factors = sx.block_thomas_factor_fn(block_fn, n_blocks=N, store_offdiagonals=False)
+x = sx.block_thomas_solve(factors, rhs)
+x_t = sx.block_thomas_solve(factors, adjoint_rhs, transpose=True)
+```
+
+The result is a `GeneratedBlockTridiagFactors`, accepted by
+`block_thomas_solve` on the same terms as `BlockTridiagFactors` and carrying its
+own `block_fn`, so factors and generator cannot be paired up wrongly. Both
+substitution sweeps rebuild the block they need, one at a time.
+
+Retained state falls by a factor of three, and by six against float64 bands when
+`factor_dtype=jnp.float32` puts the Schur LU in single precision — the two
+options compose. To put the ratios on a scale where they decide something: a
+family of chains whose three float64 bands come to 53.3 GB retains 17.8 GB as
+Schur LU alone, and 8.9 GB with a float32 LU.
+
+What it costs is generator evaluations: `block_fn` runs once per index to
+factor, then **twice per index per solve**. Triangular-solve and matrix-product
+counts are unchanged, and the elimination still happens exactly once, so this
+remains a factor-once/solve-many path — unlike `block_thomas_checkpointed_fn`
+below, which re-eliminates on every application and is priced accordingly. Use
+it when the factors, not the sweep, are what does not fit.
+
+`block_fn` must be a pure function of its index: the substitution assumes a
+regenerated block equals the one the factorization saw.
 
 ## Checkpoint one generated solve
 
@@ -446,6 +478,7 @@ defect corrections recover accuracy when the conditioning permits. See
 - {func}`solvax.direct.block_tridiag_relative_residual`
 - {func}`solvax.direct.block_thomas_factor`
 - {func}`solvax.direct.block_thomas_factor_fn`
+- {class}`solvax.direct.GeneratedBlockTridiagFactors`
 - {func}`solvax.direct.block_thomas_solve`
 - {func}`solvax.direct.block_thomas_truncated`
 - {func}`solvax.direct.block_thomas_truncated_fn`
