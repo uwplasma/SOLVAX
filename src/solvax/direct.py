@@ -519,30 +519,46 @@ def _block_thomas_solve_regenerated(
 
     The recurrences are the ones in :func:`block_thomas_solve`, re-associated so
     that step ``k`` of each sweep touches only ``Delta_k`` and one block of row
-    ``k`` --- never row ``k+1``'s Schur factor. That matters twice over.
-
-    First, it lets both sweeps take the *whole* ``delta_lu`` band as scan inputs
-    rather than a shifted slice of it. A slice would materialize a second
-    ``(n_blocks, m, m)`` array during the solve and hand back most of the memory
-    this storage policy exists to save.
-
-    Second, it keeps every scan carry linear in the right-hand side: the
-    regenerated blocks are consumed where they are produced and never enter a
-    carry. Reverse mode and :func:`jax.linear_transpose` therefore transpose
-    these scans in the ordinary way.
-
-    Writing ``z_k = Delta_k^{-1} sigma_k``, the downward sweep carries ``z``
-    instead of ``sigma`` and emits ``sigma``,
+    ``k`` --- never row ``k+1``'s Schur factor. Writing
+    ``z_k = Delta_k^{-1} sigma_k``, the downward sweep carries ``z`` rather than
+    ``sigma``,
 
         sigma_k = b_k - C_k z_{k+1},   z_k = Delta_k^{-1} sigma_k,
 
     with ``z_N = 0`` and ``C_k`` the regenerated coupling (``U_k`` for the primal
-    system, ``L_{k+1}^T`` for the transposed one). The upward sweep is unchanged
-    apart from where its blocks come from. These are the stored-band operations
-    in the stored-band order, so the two paths agree at round-off rather than at
-    a solver tolerance --- what little they differ by is how XLA fuses a scan
-    against an unrolled loop. The one extra triangular solve is ``z_0``, which
-    the upward sweep recomputes as ``x_0`` so that its inputs stay unsliced too.
+    system, ``L_{k+1}^T`` for the transposed one). The upward sweep is the usual
+    one apart from where its blocks come from. That re-association lets both
+    sweeps take the *whole* ``delta_lu`` band as scan inputs instead of a shifted
+    slice of it; a slice would materialize a second ``(n_blocks, m, m)`` array
+    during the solve and hand back most of the memory this storage policy exists
+    to save.
+
+    **The right-hand side travels in the scan carry, not in ``xs``.** That is
+    not a stylistic choice. ``lax.scan`` cannot be transposed when a value
+    linear in the differentiated input arrives as a scan input: JAX's transpose
+    rule splits ``xs`` into linear and residual parts using the scan's static
+    ``linear`` flags, which a plainly traced scan leaves all false, so every
+    ``xs`` is treated as a residual and the rule then asserts that no residual
+    is an undefined primal. Any linear ``xs`` trips that assertion --- a two-line
+    cumulative-sum scan is enough --- and it is why :func:`block_thomas_solve`
+    unrolls its own sweeps. It was fixed in JAX 0.10.0; every earlier release
+    this library supports raises. Reverse mode is unaffected either way, because
+    partial evaluation sets the flags honestly there, so the symptom is confined
+    to :func:`jax.linear_transpose` and is easy to miss.
+
+    A linear *carry* has always been transposable. So one ``(n_blocks, m, ...)``
+    buffer is threaded through both scans, holding ``rhs``, then ``sigma``, then
+    the solution: each step reads slot ``k`` and writes slot ``k`` back, and no
+    step reads a slot it has already written. XLA fuses the read and the update
+    into an in-place slice update, so neither sweep does work proportional to
+    ``n_blocks`` per step, and the solve allocates one such buffer rather than
+    the three that separate ``xs`` and stacked outputs would need.
+
+    These are the stored-band operations in the stored-band order, so the two
+    paths agree at round-off rather than at a solver tolerance --- what little
+    they differ by is how XLA fuses a scan against an unrolled loop. The one
+    extra triangular solve is ``z_0``, which the upward sweep recomputes as
+    ``x_0`` so that its inputs stay unsliced too.
     """
     delta_lu, delta_piv = factors.delta_lu, factors.delta_piv
     block_fn, n_blocks = factors.block_fn, factors.n_blocks
@@ -553,12 +569,19 @@ def _block_thomas_solve_regenerated(
     work = jnp.result_type(rhs, factors.work_dtype)
     trans = 1 if transpose else 0
     swap = lambda block: jnp.swapaxes(block, -1, -2)  # noqa: E731
+    read = lambda values, index: jax.lax.dynamic_index_in_dim(  # noqa: E731
+        values, index, axis=0, keepdims=False
+    )
+    write = lambda values, block, index: jax.lax.dynamic_update_index_in_dim(  # noqa: E731
+        values, block, index, axis=0
+    )
 
     def tsolve(lu, piv, v):
         return lu_solve((lu, piv), v.astype(fdt), trans=trans).astype(work)
 
-    def down_step(z_next, inputs):
-        index, lu, piv, b_k = inputs
+    def down_step(carry, inputs):
+        z_next, values = carry
+        index, lu, piv = inputs
         if transpose:
             # Row ``k+1``'s sub-diagonal block; at the top row it multiplies the
             # zero carry, and the clamp keeps the generator index in range.
@@ -569,29 +592,35 @@ def _block_thomas_solve_regenerated(
             coupling = upper_k
         # ``select`` rather than relying on a zero carry: ``upper[-1]`` is
         # documented as unused, so a generator may return anything there.
+        b_k = read(values, index)
         sigma_k = jnp.where(index == n_blocks - 1, b_k, b_k - coupling @ z_next)
-        return tsolve(lu, piv, sigma_k), sigma_k
+        return (tsolve(lu, piv, sigma_k), write(values, sigma_k, index)), None
 
     indices = jnp.arange(n_blocks, dtype=jnp.int32)
     zero = jnp.zeros(rhs.shape[1:], work)
-    _, sigma = jax.lax.scan(
-        down_step, zero, (indices, delta_lu, delta_piv, rhs), reverse=True
+    (_, sigma), _ = jax.lax.scan(
+        down_step,
+        (zero, rhs.astype(work)),
+        (indices, delta_lu, delta_piv),
+        reverse=True,
     )
 
-    def up_step(x_previous, inputs):
-        index, lu, piv, sigma_k = inputs
+    def up_step(carry, inputs):
+        x_previous, values = carry
+        index, lu, piv = inputs
         if transpose:
             _, _, upper_previous = block_fn(jnp.maximum(index - 1, 0))
             coupling = swap(upper_previous)
         else:
             lower_k, _, _ = block_fn(index)
             coupling = lower_k
+        sigma_k = read(values, index)
         value = jnp.where(index == 0, sigma_k, sigma_k - coupling @ x_previous)
         x_k = tsolve(lu, piv, value)
-        return x_k, x_k
+        return (x_k, write(values, x_k, index)), None
 
-    _, solution = jax.lax.scan(
-        up_step, zero, (indices, delta_lu, delta_piv, sigma)
+    (_, solution), _ = jax.lax.scan(
+        up_step, (zero, sigma), (indices, delta_lu, delta_piv)
     )
     return solution
 
@@ -658,6 +687,15 @@ def block_thomas_solve(
     # advertised linear_transpose/VJP contract and is also faster after
     # compilation for representative 8--64-block systems; compilation grows
     # with the static block count, as expected for an unrolled recurrence.
+    #
+    # That is one face of a more general obstruction, and the reason this
+    # unrolled path cannot simply be replaced by a scan: on every JAX release
+    # before 0.10.0, a scan carrying a value linear in the differentiated input
+    # through its *inputs* cannot be transposed at all. See
+    # ``_block_thomas_solve_regenerated``, which is a scan and must therefore
+    # thread the right-hand side through the carry instead. Unrolling is only
+    # affordable here because the bands are already materialized; the generated
+    # path serves block counts where it is not.
     sigma: list[jax.Array] = [None] * rhs.shape[0]  # type: ignore[list-item]
     sigma[-1] = rhs[-1]
     for k in range(rhs.shape[0] - 2, -1, -1):

@@ -25,12 +25,29 @@
   once, so this remains a factor-once/solve-many path. It is not a second
   `block_thomas_checkpointed_fn`, which re-eliminates on every application and
   is therefore unusable as a preconditioner.
-- The regenerating sweeps are scans whose carries stay linear in the
-  right-hand side, so `jax.grad` and `jax.linear_transpose` behave as they do
-  on stored bands. Tests compare gradients against the stored-band path,
-  primal and transposed, and compare residuals rather than solution vectors on
-  a deliberately near-singular pinned chain, where a solution comparison would
-  measure conditioning instead of the code.
+- Both sweeps thread the right-hand side through the scan *carry* and take only
+  the row index and that row's Schur factors as scan inputs. This is required,
+  not cosmetic: on every JAX release before 0.10.0 a `lax.scan` cannot be
+  transposed if a value linear in the differentiated input arrives as a scan
+  input — the transpose rule classifies every input of a plainly traced scan as
+  a residual and then asserts that no residual is an undefined primal, which a
+  two-line cumulative-sum scan is enough to trip. A linear carry has always
+  been transposable. Reverse mode is unaffected either way, because partial
+  evaluation sets the classification honestly there, so the symptom is confined
+  to `jax.linear_transpose`. XLA fuses the carry's per-step read and write into
+  an in-place slice update, so no sweep does work proportional to the block
+  count per step, and the solve holds one right-hand-side-shaped buffer instead
+  of three. `block_thomas_solve`'s unrolled sweeps exist for the same
+  underlying reason; the comment there now says so.
+- `jax.grad` and `jax.linear_transpose` therefore behave as they do on stored
+  bands. Tests compare gradients against the stored-band path, primal and
+  transposed; state the adjoint property directly as
+  `<A^-T u, v> == <u, A^-1 v>` so it is pinned by arithmetic rather than by
+  JAX's transposition machinery; assert structurally that no
+  right-hand-side-shaped floating input reappears in either scan; and compare
+  residuals rather than solution vectors on a deliberately near-singular pinned
+  chain, where a solution comparison would measure conditioning instead of the
+  code.
 
 ## 0.12.0 - 2026-08-02
 

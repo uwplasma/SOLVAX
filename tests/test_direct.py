@@ -1,5 +1,7 @@
 """Tests for solvax.direct: block-tridiagonal elimination vs dense reference."""
 
+from functools import partial
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -389,6 +391,77 @@ def test_regenerated_solve_transpose_matches_linear_transpose():
     )(rhs)
     via_flag = block_thomas_solve(lean, rhs, transpose=True)
     assert np.allclose(np.asarray(via_transpose), np.asarray(via_flag), atol=1e-11)
+
+
+def test_regenerated_solve_satisfies_the_adjoint_identity():
+    """The same property stated in arithmetic rather than through JAX.
+
+    ``<A^-T u, v> == <u, A^-1 v>`` is what ``transpose=True`` claims, and it
+    holds or fails independently of whether any JAX release can transpose the
+    implementation. Checking it directly means the guarantee is pinned by the
+    mathematics, not by the transposition machinery that
+    :func:`test_regenerated_solve_transpose_matches_linear_transpose` exercises.
+    """
+    n_blocks, m = 11, 4
+    (lower, diag, upper, rhs), _ = make_system(n_blocks, m, seed=52)
+    rng = np.random.default_rng(52)
+    u = jnp.asarray(rng.standard_normal((n_blocks, m)))
+    lean = block_thomas_factor_fn(
+        _fn_from_arrays(lower, diag, upper), n_blocks, store_offdiagonals=False
+    )
+
+    left = float(jnp.sum(block_thomas_solve(lean, u, transpose=True) * rhs))
+    right = float(jnp.sum(u * block_thomas_solve(lean, rhs)))
+    assert np.isclose(left, right, rtol=1e-11, atol=0.0)
+
+
+def test_regenerated_solve_keeps_the_right_hand_side_out_of_scan_inputs():
+    """Guards the hazard that made this path untransposable on older JAX.
+
+    ``lax.scan`` cannot be transposed when a value linear in the differentiated
+    input arrives as a scan *input*: the transpose rule classifies every ``xs``
+    of a plainly traced scan as a residual and then asserts that no residual is
+    an undefined primal. JAX 0.10.0 fixed it; every earlier release this library
+    supports raises, and only ``jax.linear_transpose`` shows the symptom, so the
+    cheap local check is to confirm the structure rather than the behaviour.
+
+    Both sweeps must therefore carry the right-hand side and take only the
+    index and the Schur factors as inputs. A scan whose ``xs`` grew a
+    right-hand-side-shaped entry would pass every test on current JAX and fail
+    on the supported minimum, which is exactly what happened once.
+    """
+    n_blocks, m = 6, 3
+    for n_rhs in (None, 2):
+        (lower, diag, upper, rhs), _ = make_system(n_blocks, m, n_rhs, seed=53)
+        lean = block_thomas_factor_fn(
+            _fn_from_arrays(lower, diag, upper), n_blocks, store_offdiagonals=False
+        )
+        jaxpr = jax.make_jaxpr(partial(block_thomas_solve, lean))(rhs)
+
+        scans = [
+            equation
+            for equation in jaxpr.jaxpr.eqns
+            if equation.primitive.name == "scan"
+        ]
+        assert len(scans) == 2, "the solve should be exactly two sweeps"
+        for equation in scans:
+            num_consts = equation.params["num_consts"]
+            num_carry = equation.params["num_carry"]
+            xs_avals = [v.aval for v in equation.invars[num_consts + num_carry :]]
+            # Per step the inputs are the index and this row's Schur factors.
+            # Only the pivots share the right-hand side's block shape, and they
+            # are integers; a *floating* input of that shape would be the
+            # right-hand side, the solution, or sigma travelling as an ``xs``.
+            offenders = [
+                aval.shape
+                for aval in xs_avals
+                if jnp.issubdtype(aval.dtype, jnp.floating)
+                and aval.shape[1:] == rhs.shape[1:]
+            ]
+            assert not offenders, (
+                f"a right-hand-side-shaped floating scan input reappeared: "
+                f"{offenders}; it must travel in the carry"
+            )
 
 
 def test_regenerated_factors_are_a_pytree_and_survive_jit_and_vmap():
