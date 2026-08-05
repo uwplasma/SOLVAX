@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.13.0 - 2026-08-04
 
 ### Reusable block-Thomas factors without the off-diagonal bands
 
@@ -13,9 +13,11 @@
 - Reusable factors nominally hold three `(N, m, m)` arrays; only the Schur LU
   is irrecoverable. Dropping the other two cuts retained state to a third, and
   to a sixth against float64 bands when `factor_dtype=jnp.float32` puts the LU
-  in single precision — the two options compose. Measured at `N=48`, `m=24`:
-  0.3368 and 0.1710 of the full-band state, the excess over 1/3 and 1/6 being
-  the pivot indices. On the scale where that decides something: a family of
+  in single precision — the two options compose. Measured at `N=48`, `m=24` as
+  the summed byte count of the factor pytree's leaves: 668160 bytes of stored
+  bands against 225792 and 115200, or 0.3379 and 0.1724 of the full-band state,
+  the excess over 1/3 and 1/6 being the pivot indices, which both policies keep.
+  On the scale where that decides something: a family of
   chains whose three float64 bands come to 53.3 GB retains 17.8 GB as Schur LU
   alone, and 8.9 GB with a float32 LU — the difference between fitting on a
   24 GB device and not.
