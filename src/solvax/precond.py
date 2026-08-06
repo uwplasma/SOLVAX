@@ -1012,3 +1012,53 @@ def nearest_kronecker(
     a = (scale * u[:, 0]).reshape(na, na)
     b = (scale * vt[0]).reshape(nb, nb)
     return a, b
+
+
+def alfven_block(
+    alpha_v: jax.Array,
+    alpha_b: jax.Array,
+    theta: jax.Array,
+) -> Callable[[tuple[jax.Array, jax.Array]], tuple[jax.Array, jax.Array]]:
+    r"""Exact per-mode inverse of the implicit Alfvén wave block.
+
+    An implicit step of linearized incompressible MHD about a uniform
+    guide field couples each Fourier mode of the velocity and magnetic
+    fields through the 2x2 system
+
+    .. math::
+
+        \begin{pmatrix} \alpha_v & -i\theta \\
+                        -i\theta & \alpha_b \end{pmatrix}
+        \begin{pmatrix} \hat v \\ \hat b \end{pmatrix}
+        =
+        \begin{pmatrix} r_v \\ r_b \end{pmatrix},
+
+    with :math:`\alpha_{v,b} = 1 + \{\nu,\eta\} k^2 \Delta t` and
+    :math:`\theta = k_\parallel v_A \Delta t`. Because the determinant
+    :math:`\alpha_v \alpha_b + \theta^2` is real and positive, the block
+    inverts exactly and elementwise. Used as ``precond=`` for
+    :func:`solvax.krylov.gmres`, it makes the iteration count of the
+    linearized system independent of :math:`B_0 \Delta t k_\parallel`,
+    which is the regime where a diffusion-only diagonal preconditioner
+    degrades (Chacón, Phys. Plasmas 15, 056103, 2008, specialized to the
+    Fourier setting where the Schur solve is exact).
+
+    Args:
+        alpha_v: velocity diagonal ``1 + nu k^2 dt``, any broadcastable
+            shape.
+        alpha_b: magnetic diagonal ``1 + eta k^2 dt``, same shape.
+        theta: wave coupling ``k_parallel v_A dt``, same shape.
+
+    Returns:
+        A callable mapping the residual pair ``(r_v, r_b)`` to the exact
+        block solve, preserving shapes and complex dtypes.
+    """
+    determinant = alpha_v * alpha_b + theta * theta
+
+    def apply(residual: tuple[jax.Array, jax.Array]) -> tuple[jax.Array, jax.Array]:
+        r_v, r_b = residual
+        v = (alpha_b * r_v + 1j * theta * r_b) / determinant
+        b = (1j * theta * r_v + alpha_v * r_b) / determinant
+        return v, b
+
+    return apply
