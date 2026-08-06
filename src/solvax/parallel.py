@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TypeVar
 
+import jax
+import jax.numpy as jnp
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
@@ -77,3 +79,36 @@ def shard_batch(
         in_specs=input_spec,
         out_specs=output_spec,
     )
+
+
+def axis_inner_product(axis_name: str):
+    """Inner product for Krylov solves running inside ``shard_map``.
+
+    Inside a ``shard_map`` region every operand leaf is a local shard, so
+    the default inner product would return a partial sum. This helper
+    computes the local Hermitian product and completes it with
+    ``lax.psum`` over ``axis_name``, which makes :func:`solvax.gmres`,
+    :func:`solvax.gcrot`, and :func:`solvax.newton_krylov` correct
+    per-shard: pass it as ``inner_product=``.
+
+    Args:
+        axis_name: The mesh axis the caller's ``shard_map`` binds.
+
+    Note:
+        Call ``shard_map`` with ``check_vma=False`` around a solver using
+        this inner product: the Krylov basis carry starts replicated and
+        becomes shard-varying inside the iteration, which the
+        varying-axis type checker rejects even though the computation is
+        correct.
+
+    Returns:
+        A callable ``inner(left, right) -> scalar`` with the global value
+        on every shard.
+    """
+
+    def inner(left, right):
+        products = jax.tree.leaves(jax.tree.map(jnp.vdot, left, right))
+        local = sum(products[1:], products[0])
+        return jax.lax.psum(local, axis_name)
+
+    return inner

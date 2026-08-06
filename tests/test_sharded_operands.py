@@ -98,3 +98,83 @@ def test_sharded_krylov_contract() -> None:
     )
     assert result.returncode == 0, result.stderr[-3000:]
     assert "SHARDED-OK" in result.stdout
+
+
+IN_SHARD_MAP_SCRIPT = """
+import jax
+import jax.numpy as jnp
+
+jax.config.update("jax_enable_x64", True)
+
+from jax.sharding import Mesh, PartitionSpec
+
+import solvax
+
+assert jax.device_count() == 4, jax.devices()
+mesh = Mesh(jax.devices(), axis_names=("m",))
+
+modes = 128
+key = jax.random.PRNGKey(2)
+key_a, key_t, key_r = jax.random.split(key, 3)
+alpha = 1.0 + jax.random.uniform(key_a, (modes,))
+theta = 3.0 * jax.random.uniform(key_t, (modes,))
+rhs = jax.random.normal(key_r, (modes,)) + 1j * jax.random.normal(key_a, (modes,))
+
+
+def global_matvec(x):
+    return alpha * x - 1j * theta * jnp.roll(x, 1)
+
+
+reference = solvax.gmres(global_matvec, rhs, rtol=1.0e-12, max_restarts=200)
+assert bool(reference.converged)
+
+# The same solve inside shard_map: the operator communicates through a
+# permute, and the inner product completes through psum.
+inner = solvax.axis_inner_product("m")
+
+
+def sharded_solve(alpha_local, theta_local, rhs_local):
+    def matvec(x):
+        rolled = jax.lax.ppermute(
+            x, "m", perm=[(i, (i + 1) % 4) for i in range(4)]
+        )
+        neighbor = jnp.roll(x, 1).at[0].set(rolled[-1])
+        return alpha_local * x - 1j * theta_local * neighbor
+
+    solution = solvax.gmres(
+        matvec, rhs_local, rtol=1.0e-12, max_restarts=200, inner_product=inner
+    )
+    return solution.x, solution.residual_norm
+
+# check_vma off: the Krylov basis carry starts replicated (zeros) and
+# becomes shard-varying inside the loop, which the varying-axis type
+# checker rejects even though the computation is correct.
+x_sharded, residual = jax.shard_map(
+    sharded_solve,
+    mesh=mesh,
+    in_specs=(PartitionSpec("m"), PartitionSpec("m"), PartitionSpec("m")),
+    out_specs=(PartitionSpec("m"), PartitionSpec()),
+    check_vma=False,
+)(alpha, theta, rhs)
+
+gap = float(jnp.max(jnp.abs(x_sharded - reference.x)))
+scale = float(jnp.max(jnp.abs(reference.x)))
+assert gap < 1.0e-10 * max(scale, 1.0), gap
+print("INNER-OK")
+"""
+
+
+def test_gmres_inside_shard_map_with_axis_inner_product() -> None:
+    env = dict(os.environ)
+    env["XLA_FLAGS"] = "--xla_force_host_platform_device_count=4"
+    env["JAX_PLATFORM_NAME"] = "cpu"
+    result = subprocess.run(
+        [sys.executable, "-c", IN_SHARD_MAP_SCRIPT],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert result.returncode == 0, result.stderr[-3000:]
+    assert "INNER-OK" in result.stdout

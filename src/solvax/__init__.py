@@ -81,7 +81,7 @@ from solvax.operators import (
     SumOperator,
     schur_projected_precond,
 )
-from solvax.parallel import shard_batch
+from solvax.parallel import axis_inner_product, shard_batch
 from solvax.pcg import PCGDiagnostics, PCGSolution, pcg, pcg_linear_solve, status_name
 from solvax.precond import (
     MultigridHierarchy,
@@ -222,6 +222,7 @@ __all__ = [
     "shard_batch",
     "additive_preconditioner",
     "alfven_block",
+    "axis_inner_product",
     "additive_tridiagonal_line_preconditioner",
     "jacobi",
     "block_jacobi",
