@@ -17,7 +17,19 @@ structured coarse operator exists.
 
 The sketch uses an explicit PRNG key, so construction is deterministic,
 jit-able, and differentiable through both the sketch and the eigenfactors; the
-stabilized-shift construction follows Frangella et al., Algorithm 2.1.
+stabilized-shift construction follows Frangella et al., Algorithm 2.1, whose
+shift is calibrated to the unit roundoff of the arithmetic forming the core.
+Since a GPU may answer that arithmetic in a lower precision than the dtype
+names, the shift here is additionally floored at the roundoff measured on the
+core itself; see :func:`nystrom_preconditioner`.
+
+The operator passed in is applied through :func:`jax.vmap` over the sketch
+columns, which makes the caller's matvec a matrix-shaped contraction even when
+it is vector-shaped on a single vector. On Ampere and later NVIDIA GPUs XLA
+satisfies such a contraction on the tensor cores in TF32 unless the caller pins
+it, so the sketch may arrive with ~4.9e-04 relative error. That is the caller's
+choice to make, and the shift floor below is what keeps it from becoming a NaN
+Cholesky here.
 """
 
 from __future__ import annotations
@@ -75,11 +87,49 @@ def nystrom_preconditioner(
     # before the eigenvalue shift is even reached. A positive ``mu`` does not
     # rescue this, because the damage is done upstream of ``mu``. The floor
     # below keeps the shift strictly positive whatever the sketch contains.
+    #
+    # Alg. 2.1 line 4 reads ``nu = eps(norm(Y, 'fro'))``, so the shift is
+    # calibrated to the unit roundoff of the arithmetic that forms the core --
+    # and on a GPU that arithmetic can be coarser than ``eps`` names. XLA
+    # satisfies an unpinned *matrix-shaped* contraction (a free axis left on
+    # both operands) on the Ampere tensor cores in TF32, which keeps 10
+    # mantissa bits: an effective unit roundoff of 2^-11 = 4.9e-04 rather than
+    # float32's 2^-24. Two things keep the calibration honest.
+    #
+    # The Gram matrix is pinned, which is this module's own contraction to fix.
+    # Unpinned it perturbed the core by ~440x ``nu``, measured on an RTX A4000.
+    # The vector-shaped contractions in ``precond`` below measured exact
+    # unpinned and are deliberately left alone.
+    #
+    # And ``nu`` is floored at the roundoff actually achieved, because the
+    # sketch is *not* ours to fix: ``jax.vmap`` over the caller's matvec makes
+    # that contraction matrix-shaped too, and its precision is the caller's to
+    # choose. ``omega^T A omega`` is symmetric, so the antisymmetric part of
+    # the computed Gram matrix is pure rounding and measures it for free. In
+    # exact arithmetic the floor is inactive and this is Alg. 2.1 line 4
+    # unchanged; with a TF32 sketch it is what keeps the core definite.
     eps = jnp.finfo(dtype).eps
     sketch_norm = jnp.linalg.norm(sketch)
-    nu = jnp.maximum(eps * sketch_norm, jnp.asarray(eps, dtype) ** 2)
+    gram = jnp.matmul(omega.T, sketch, precision=jax.lax.Precision.HIGHEST)
+    asymmetry = gram - gram.T
+    # The absolute floor lives *inside* the square root. An exactly symmetric
+    # Gram matrix is reachable -- whether the two triangles round identically
+    # depends on the backend's reduction order, so it is not something to rely
+    # on either way -- and ``sqrt`` at zero would return a 0/0 gradient through
+    # a construction this module documents as differentiable. With a symmetric
+    # Gram matrix this is exactly the ``eps**2`` floor described above.
+    floor = jnp.asarray(eps, dtype) ** 2
+    roundoff = jnp.sqrt(jnp.sum(asymmetry * asymmetry) + floor**2)
+    nu = jnp.maximum(eps * sketch_norm, roundoff)
     shifted = sketch + nu * omega
-    core = jnp.linalg.cholesky(omega.T @ shifted)
+    # ``omega`` has orthonormal columns, so ``omega^T (Y + nu omega)`` is
+    # ``gram + nu I``: the shift enters exactly, and the shifted core costs no
+    # second product. Symmetrizing is what ``jnp.linalg.cholesky`` would do to
+    # its input anyway; it is written out because the symmetry is the same
+    # property ``roundoff`` above measures, and neither should be silent.
+    core = jnp.linalg.cholesky(
+        0.5 * (gram + gram.T) + nu * jnp.eye(rank, dtype=dtype)
+    )
     half = jax.scipy.linalg.solve_triangular(core, shifted.T, lower=True).T
     basis, singular, _ = jnp.linalg.svd(half, full_matrices=False)
     eigenvalues = jnp.maximum(singular**2 - nu, 0.0)

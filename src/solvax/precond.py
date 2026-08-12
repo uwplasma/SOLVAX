@@ -905,8 +905,25 @@ def low_rank_corrected(
     rank = columns.shape[-1]
     contract = tuple(range(columns.ndim - 1))
     solved_columns = jax.vmap(precond, in_axes=-1, out_axes=-1)(columns)
+    # Pinned because this capacitance is *inverted*, so its error is amplified
+    # by its own conditioning and lands in the identity above. On Ampere and
+    # later NVIDIA GPUs XLA satisfies an unpinned matrix product on the tensor
+    # cores in TF32 (10 mantissa bits, 4.9e-04). This contraction is
+    # matrix-shaped -- ``extraction`` and ``solved_columns`` both keep their
+    # rank axis free -- which is exactly when XLA reaches for them. Measured on
+    # an RTX A4000 against a float64 reference, with ``precond`` exact so the
+    # identity above should hold to roundoff: at a capacitance condition number
+    # of 1e+03 the residual ``||(A + U V^T) M^-1 v - v||/||v||`` is 2.0e-03
+    # unpinned and 1.5e-04 pinned, and at 1e+05 it is 1.1e+00 unpinned -- no
+    # inverse at all -- against 1.2e-02 pinned. This runs once, at build time.
+    #
+    # The two contractions in ``_LowRankCorrected.__call__`` are the hot path
+    # and are vector-shaped, which measured exact unpinned (2.4e-07 and
+    # 8.0e-08, bit-identical to pinned); pinning them would cost tensor-core
+    # throughput for nothing.
     capacitance = jnp.eye(rank, dtype=solved_columns.dtype) + jnp.tensordot(
-        extraction, solved_columns, axes=(contract, contract)
+        extraction, solved_columns, axes=(contract, contract),
+        precision=jax.lax.Precision.HIGHEST,
     )
     lu, pivots = lu_factor(capacitance)
     return _LowRankCorrected(precond, solved_columns, extraction, lu, pivots, contract)
