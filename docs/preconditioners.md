@@ -292,6 +292,17 @@ decaying-spectrum SPD operator with a flat tail the test suite pins at least a
 2x PCG iteration reduction; the target regime is fast spectral decay ahead of
 a regularization shift.
 
+The sketch applies `matvec` through `jax.vmap` over `rank` columns at once, so
+the caller's operator is evaluated as a matrix product even when it is a plain
+matvec on a single vector. On Ampere and later NVIDIA GPUs XLA satisfies an
+unpinned matrix product on the tensor cores in TF32, which keeps 10 mantissa
+bits, so the sketch can arrive with ~5e-04 relative error unless the operator
+pins its own contractions with `precision=jax.lax.Precision.HIGHEST`. The
+stabilizing shift is floored at the rounding actually measured on the core, so
+a low-precision sketch costs approximation quality rather than producing a NaN
+factorization — but it does cost it, and eigenvalues below that error level are
+not resolvable. Pin the operator when the retained spectrum matters.
+
 ### Choosing the rank
 
 The bound is stated in terms of the $\mu$-effective dimension, which a caller
