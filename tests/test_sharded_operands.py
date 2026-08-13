@@ -101,12 +101,29 @@ def test_sharded_krylov_contract() -> None:
 
 
 IN_SHARD_MAP_SCRIPT = """
+import inspect
+
 import jax
 import jax.numpy as jnp
 
 jax.config.update("jax_enable_x64", True)
 
 from jax.sharding import Mesh, PartitionSpec
+
+# The same compatibility import solvax.parallel uses: shard_map is a
+# top-level export on current JAX and lives in jax.experimental on 0.4.
+try:
+    from jax import shard_map
+except ImportError:  # JAX 0.4
+    from jax.experimental.shard_map import shard_map
+
+# The flag that turns the varying-axis check off was renamed check_rep
+# -> check_vma in the same promotion. Ask the resolved function which
+# name it takes: a version comparison would encode the release the
+# rename landed in, which is a second fact to keep correct.
+_parameters = inspect.signature(shard_map).parameters
+_check_flag = "check_vma" if "check_vma" in _parameters else "check_rep"
+check_off = {_check_flag: False}
 
 import solvax
 
@@ -146,15 +163,15 @@ def sharded_solve(alpha_local, theta_local, rhs_local):
     )
     return solution.x, solution.residual_norm
 
-# check_vma off: the Krylov basis carry starts replicated (zeros) and
-# becomes shard-varying inside the loop, which the varying-axis type
-# checker rejects even though the computation is correct.
-x_sharded, residual = jax.shard_map(
+# The varying-axis check is off: the Krylov basis carry starts
+# replicated (zeros) and becomes shard-varying inside the loop, which
+# that type checker rejects even though the computation is correct.
+x_sharded, residual = shard_map(
     sharded_solve,
     mesh=mesh,
     in_specs=(PartitionSpec("m"), PartitionSpec("m"), PartitionSpec("m")),
     out_specs=(PartitionSpec("m"), PartitionSpec()),
-    check_vma=False,
+    **check_off,
 )(alpha, theta, rhs)
 
 gap = float(jnp.max(jnp.abs(x_sharded - reference.x)))

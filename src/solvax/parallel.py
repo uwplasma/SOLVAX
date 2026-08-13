@@ -96,10 +96,10 @@ def axis_inner_product(axis_name: str):
 
     Note:
         Call ``shard_map`` with ``check_vma=False`` around a solver using
-        this inner product: the Krylov basis carry starts replicated and
-        becomes shard-varying inside the iteration, which the
-        varying-axis type checker rejects even though the computation is
-        correct.
+        this inner product (the flag is spelled ``check_rep`` on JAX
+        0.4): the Krylov basis carry starts replicated and becomes
+        shard-varying inside the iteration, which the varying-axis type
+        checker rejects even though the computation is correct.
 
     Returns:
         A callable ``inner(left, right) -> scalar`` with the global value
