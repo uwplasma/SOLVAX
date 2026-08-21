@@ -12,9 +12,9 @@ $$
 r(x)=G(x)-x.
 $$
 
-SOLVAX provides safeguarded vector Aitken relaxation, a bounded-history
-Anderson mixing primitive, a complete Aitken fixed-point loop, and matrix-free
-FGMRES for affine maps.
+SOLVAX provides plain and Aitken fixed-point loops, safeguarded vector Aitken
+relaxation, bounded-history Anderson mixing, and matrix-free FGMRES for affine
+maps.
 
 ## Affine fixed points with FGMRES
 
@@ -50,6 +50,25 @@ $$
 
 $\omega_k<1$ under-relaxes unstable coupling; $\omega_k>1$ extrapolates when
 the map is safely contractive.
+
+`fixed_point_iteration` owns this reusable loop while allowing an application
+to provide its physical residual norm:
+
+```python
+solution = sx.fixed_point_iteration(
+    mapping,
+    x0,
+    residual_norm=physical_residual_norm,
+    relaxation=0.8,
+    rtol=0.0,
+    atol=1e-8,
+    max_steps=100,
+)
+```
+
+Use `fixed_steps=True` when an unrolled differentiable algorithm must execute
+exactly `max_steps`. Otherwise the loop stops on the declared tolerance and
+returns the same `FixedPointSolution` schema as `aitken_fixed_point`.
 
 ## Vector Aitken relaxation
 

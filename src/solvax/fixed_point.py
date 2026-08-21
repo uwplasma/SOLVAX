@@ -215,6 +215,123 @@ def affine_fixed_point_gmres(
     )
 
 
+def fixed_point_iteration(
+    mapping: Callable[[jax.Array], jax.Array],
+    x0: jax.Array,
+    *,
+    residual_norm: Callable[[jax.Array], jax.Array] | None = None,
+    relaxation: float = 1.0,
+    rtol: float = 1.0e-8,
+    atol: float = 0.0,
+    max_steps: int = 100,
+    fixed_steps: bool = False,
+) -> FixedPointSolution:
+    """Run a relaxed fixed-point iteration with an optional physical norm.
+
+    This is the unaccelerated counterpart to :func:`aitken_fixed_point`. It
+    owns the reusable loop and stopping state while allowing applications to
+    supply a residual norm with their physical scaling or conservation gate.
+    Set ``fixed_steps=True`` for differentiable unrolled algorithms that must
+    execute the declared number of updates even after reaching tolerance.
+
+    Args:
+        mapping: Fixed-point map ``x -> G(x)``.
+        x0: Initial array.
+        residual_norm: Optional scalar callable evaluated on each iterate.
+            Defaults to ``norm(mapping(x) - x)``.
+        relaxation: Constant relaxation factor in
+            ``x <- x + relaxation * (G(x) - x)``.
+        rtol: Relative tolerance scaled by ``max(norm(x0), 1)``.
+        atol: Absolute tolerance.
+        max_steps: Maximum number of fixed-point updates.
+        fixed_steps: Execute exactly ``max_steps`` updates when true.
+
+    Returns:
+        Final iterate, measured residual norm, iteration count, convergence
+        flag, and the constant relaxation factor.
+    """
+
+    if max_steps < 0:
+        raise ValueError("max_steps must be non-negative")
+    if rtol < 0.0 or atol < 0.0:
+        raise ValueError("rtol and atol must be non-negative")
+    if relaxation <= 0.0:
+        raise ValueError("relaxation must be positive")
+
+    x0 = jnp.asarray(x0)
+    real_dtype = jnp.real(x0).dtype
+    omega = jnp.asarray(relaxation, dtype=real_dtype)
+    tolerance = jnp.maximum(
+        jnp.asarray(atol, dtype=real_dtype),
+        jnp.asarray(rtol, dtype=real_dtype)
+        * jnp.maximum(jnp.linalg.norm(x0), jnp.asarray(1.0, dtype=real_dtype)),
+    )
+
+    if fixed_steps:
+        def update(_, x):
+            mapped = mapping(x)
+            return x + omega * (mapped - x)
+
+        x = lax.fori_loop(0, max_steps, update, x0)
+        final_norm = (
+            jnp.linalg.norm(mapping(x) - x)
+            if residual_norm is None
+            else jnp.asarray(residual_norm(x), dtype=real_dtype)
+        )
+        return FixedPointSolution(
+            x=x,
+            residual_norm=final_norm,
+            iterations=jnp.int32(max_steps),
+            converged=final_norm <= tolerance,
+            relaxation=omega,
+        )
+
+    def continue_iteration(iterations, norm):
+        return (iterations < max_steps) & (norm > tolerance)
+
+    if residual_norm is None:
+        mapped0 = mapping(x0)
+        norm0 = jnp.linalg.norm(mapped0 - x0)
+
+        def condition(state):
+            _, _, norm, iterations = state
+            return continue_iteration(iterations, norm)
+
+        def body(state):
+            x, mapped, _, iterations = state
+            next_x = x + omega * (mapped - x)
+            next_mapped = mapping(next_x)
+            next_norm = jnp.linalg.norm(next_mapped - next_x)
+            return next_x, next_mapped, next_norm, iterations + 1
+
+        initial = (x0, mapped0, norm0, jnp.int32(0))
+        x, _, final_norm, iterations = lax.while_loop(condition, body, initial)
+    else:
+        norm0 = jnp.asarray(residual_norm(x0), dtype=real_dtype)
+
+        def condition(state):
+            _, norm, iterations = state
+            return continue_iteration(iterations, norm)
+
+        def body(state):
+            x, _, iterations = state
+            mapped = mapping(x)
+            next_x = x + omega * (mapped - x)
+            next_norm = jnp.asarray(residual_norm(next_x), dtype=real_dtype)
+            return next_x, next_norm, iterations + 1
+
+        initial = (x0, norm0, jnp.int32(0))
+        x, final_norm, iterations = lax.while_loop(condition, body, initial)
+
+    return FixedPointSolution(
+        x=x,
+        residual_norm=final_norm,
+        iterations=iterations,
+        converged=final_norm <= tolerance,
+        relaxation=omega,
+    )
+
+
 def aitken_fixed_point(
     mapping: Callable[[jax.Array], jax.Array],
     x0: jax.Array,
