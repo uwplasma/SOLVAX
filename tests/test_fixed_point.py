@@ -11,10 +11,98 @@ from solvax.fixed_point import (
     aitken_fixed_point,
     aitken_relaxation,
     anderson_mixing,
+    fixed_point_iteration,
 )
 from solvax.implicit import root_solve
 
 jax.config.update("jax_enable_x64", True)
+
+
+def test_fixed_point_iteration_supports_a_physical_residual_norm():
+    target = jnp.asarray([1.0, -2.0, 0.5])
+    solution = fixed_point_iteration(
+        lambda x: 0.5 * (x + target),
+        jnp.zeros_like(target),
+        residual_norm=lambda x: jnp.max(jnp.abs(x - target)),
+        rtol=0.0,
+        atol=1.0e-8,
+        max_steps=40,
+    )
+
+    assert solution.converged
+    assert solution.iterations < 40
+    assert solution.residual_norm <= 1.0e-8
+    assert solution.x == pytest.approx(target, abs=1.0e-8)
+
+    default_norm = fixed_point_iteration(
+        lambda x: 0.5 * (x + target),
+        jnp.zeros_like(target),
+        rtol=0.0,
+        atol=1.0e-8,
+        max_steps=40,
+    )
+    assert default_norm.converged
+    assert default_norm.x == pytest.approx(target, abs=2.0e-8)
+
+
+def test_fixed_point_iteration_can_run_exactly_the_declared_steps():
+    target = jnp.asarray([1.0, -1.0])
+    solution = fixed_point_iteration(
+        lambda x: target,
+        jnp.zeros_like(target),
+        residual_norm=lambda x: jnp.max(jnp.abs(x - target)),
+        max_steps=4,
+        fixed_steps=True,
+    )
+
+    assert solution.iterations == 4
+    assert solution.converged
+    assert solution.x == pytest.approx(target)
+
+
+def test_fixed_point_iteration_reports_a_bounded_nonconverged_solve():
+    solution = fixed_point_iteration(
+        lambda x: x + 1.0,
+        jnp.asarray(0.0),
+        relaxation=0.25,
+        rtol=0.0,
+        atol=1.0e-12,
+        max_steps=3,
+    )
+
+    assert not solution.converged
+    assert solution.iterations == 3
+    assert solution.residual_norm == pytest.approx(1.0)
+    assert solution.relaxation == pytest.approx(0.25)
+    assert solution.x == pytest.approx(0.75)
+
+
+def test_fixed_point_iteration_is_jittable_and_differentiable():
+    def solve(target):
+        return fixed_point_iteration(
+            lambda x: 0.5 * (x + target),
+            jnp.asarray(0.0),
+            max_steps=5,
+            fixed_steps=True,
+        ).x
+
+    target = jnp.asarray(2.0)
+    assert jax.jit(solve)(target) == pytest.approx((1.0 - 0.5**5) * target)
+    assert jax.grad(solve)(target) == pytest.approx(1.0 - 0.5**5)
+
+
+@pytest.mark.parametrize(
+    "kwargs,message",
+    [
+        ({"max_steps": -1}, "max_steps"),
+        ({"rtol": -1.0}, "non-negative"),
+        ({"atol": -1.0}, "non-negative"),
+        ({"relaxation": 0.0}, "positive"),
+    ],
+)
+def test_fixed_point_iteration_rejects_invalid_controls(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        fixed_point_iteration(lambda x: x, jnp.asarray(0.0), **kwargs)
 
 
 def test_aitken_fixed_point_accelerates_slow_affine_vector_map():

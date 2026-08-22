@@ -57,6 +57,11 @@ assert solution.converged
 # Solve an expensive affine coupling map without assembling its Jacobian
 coupled = sx.affine_fixed_point_gmres(coupling_sweep, initial_state)
 
+# Run a relaxed nonlinear coupling sweep with explicit stopping diagnostics
+fixed = sx.fixed_point_iteration(
+    coupling_sweep, initial_state, relaxation=0.8, atol=1e-8
+)
+
 # Same diagnostics, but gradients use an implicit primal/transpose solve
 implicit_solution = sx.pcg_linear_solve(matvec, rhs, precond=preconditioner)
 
@@ -204,7 +209,7 @@ within an order of magnitude of the limit as unconfirmed.
 | `solvax.propagator` | Residual-certified RK4 and nested exponential-Arnoldi eigenmode extraction without materializing the operator |
 | `solvax.eigen` | Solver-independent implicit reverse derivatives for externally certified eigenpairs, including eigenvector observables and exceptional-point guards |
 | `solvax.pcg` | Matrix-free pytree PCG with preconditioning, fixed-shape residual history, and explicit convergence/breakdown status |
-| `solvax.fixed_point` | Safeguarded Aitken, bounded-memory (condition-filtered) Anderson, and matrix-free affine fixed-point FGMRES |
+| `solvax.fixed_point` | Plain and Aitken fixed-point loops, bounded-memory (condition-filtered) Anderson, and matrix-free affine fixed-point FGMRES |
 | `solvax.implicit` | Matrix-free `newton_krylov` (JFNK) plus implicit-function-theorem `linear_solve` and `root_solve` — gradients cost one extra (transposed) solve |
 | `solvax.autodiff` | Bounded-memory chunked forward/reverse Jacobians (`chunked_jacfwd`/`jacrev`/`jacobian`) with automatic chunk sizing |
 | `solvax.refine` | Mixed-precision iterative refinement (float32 factor, float64 residuals) |

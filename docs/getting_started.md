@@ -130,8 +130,8 @@ name with `status_name` outside a JAX trace.
 
 ### Fixed-point results
 
-`aitken_fixed_point` returns the iterate, true residual norm, iteration count,
-convergence flag, and final relaxation parameter.
+`fixed_point_iteration` and `aitken_fixed_point` return the iterate, measured
+residual norm, iteration count, convergence flag, and relaxation parameter.
 
 ### Newton--Krylov results
 

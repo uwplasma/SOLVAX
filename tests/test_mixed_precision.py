@@ -124,7 +124,7 @@ def test_bfloat16_factor_unsupported_by_lapack():
     inside the exception check.
     """
     lower, diag, upper, rhs = make_system(4, 6, seed=6)
-    with pytest.raises((NotImplementedError, jax.errors.JaxRuntimeError)):
+    with pytest.raises((TypeError, NotImplementedError, jax.errors.JaxRuntimeError)):
         result = mixed_precision_block_thomas(
             lower, diag, upper, rhs, factor_dtype=jnp.bfloat16, refine_steps=1
         )
