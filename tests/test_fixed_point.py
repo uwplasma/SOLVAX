@@ -60,6 +60,23 @@ def test_fixed_point_iteration_can_run_exactly_the_declared_steps():
     assert solution.x == pytest.approx(target)
 
 
+def test_fixed_point_iteration_reports_a_bounded_nonconverged_solve():
+    solution = fixed_point_iteration(
+        lambda x: x + 1.0,
+        jnp.asarray(0.0),
+        relaxation=0.25,
+        rtol=0.0,
+        atol=1.0e-12,
+        max_steps=3,
+    )
+
+    assert not solution.converged
+    assert solution.iterations == 3
+    assert solution.residual_norm == pytest.approx(1.0)
+    assert solution.relaxation == pytest.approx(0.25)
+    assert solution.x == pytest.approx(0.75)
+
+
 def test_fixed_point_iteration_is_jittable_and_differentiable():
     def solve(target):
         return fixed_point_iteration(

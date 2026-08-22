@@ -207,6 +207,7 @@ $f(x)=G(x)-x$ and wrap the primal solver with
 
 ## API summary
 
+- {func}`solvax.fixed_point.fixed_point_iteration`
 - {func}`solvax.fixed_point.aitken_relaxation`
 - {func}`solvax.fixed_point.anderson_weights`
 - {func}`solvax.fixed_point.anderson_mixing`
