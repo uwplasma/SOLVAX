@@ -1,4 +1,27 @@
-# Spectral Fourier--Helmholtz elliptic solve
+# Spectral periodic Poisson and Fourier--Helmholtz solves
+
+For a fully periodic N-dimensional grid, SOLVAX directly inverts
+$-\nabla^2\phi=\rho$ with a Fourier collocation symbol. The zero mode of the
+right-hand side is projected out and `mean` fixes the solution gauge:
+
+```python
+phi = sx.solve_periodic_poisson(rho, spacing=(dx, dy), mean=0.0)
+```
+
+When a timestep already stores Fourier coefficients, build the nonnegative
+$|\mathbf{k}|^2$ symbol once and avoid redundant transforms:
+
+```python
+eigenvalues = sx.periodic_poisson_eigenvalues(rho.shape, (dx, dy))
+phi_hat = sx.solve_periodic_poisson_spectral(rho_hat, eigenvalues=eigenvalues)
+```
+
+Both forms support real or complex data and compose with `jit`, `vmap`, and
+automatic differentiation. Each periodic axis needs at least two points and
+one positive spacing. The spectral API uses the full `fftn` layout so its
+coefficient shape is identical to the physical grid.
+
+## Periodic-by-bounded formulation
 
 `solvax.elliptic` inverts a separable elliptic operator of Helmholtz type on a
 tensor-product grid with one periodic axis ($z$) and one bounded axis ($x$):
@@ -87,6 +110,9 @@ FFTs and the tridiagonal sweep with `jax.grad` — so the geometry weights
 
 ## API summary
 
+- {func}`solvax.elliptic.periodic_poisson_eigenvalues`
+- {func}`solvax.elliptic.solve_periodic_poisson_spectral`
+- {func}`solvax.elliptic.solve_periodic_poisson`
 - {func}`solvax.elliptic.build_fourier_helmholtz_operator`
 - {func}`solvax.elliptic.solve_fourier_helmholtz`
 - {class}`solvax.elliptic.FourierHelmholtzOperator`

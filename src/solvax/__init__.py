@@ -49,7 +49,10 @@ from solvax.eigen import eigenpair_reverse
 from solvax.elliptic import (
     FourierHelmholtzOperator,
     build_fourier_helmholtz_operator,
+    periodic_poisson_eigenvalues,
     solve_fourier_helmholtz,
+    solve_periodic_poisson,
+    solve_periodic_poisson_spectral,
 )
 from solvax.fixed_point import (
     FixedPointSolution,
@@ -189,7 +192,10 @@ __all__ = [
     "mixed_precision_block_thomas",
     "FourierHelmholtzOperator",
     "build_fourier_helmholtz_operator",
+    "periodic_poisson_eigenvalues",
     "solve_fourier_helmholtz",
+    "solve_periodic_poisson",
+    "solve_periodic_poisson_spectral",
     "tridiagonal_solve",
     "tridiagonal_solve_checked",
     "TridiagonalSolveDiagnostics",

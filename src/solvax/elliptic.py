@@ -1,4 +1,4 @@
-"""Spectral Fourier--Helmholtz elliptic solve.
+"""Spectral periodic-Poisson and Fourier--Helmholtz elliptic solves.
 
 Solves a separable elliptic problem of Helmholtz type on a periodic ``z`` axis
 and a bounded ``x`` axis by Fourier-transforming in ``z`` (turning the periodic
@@ -26,8 +26,83 @@ from solvax.tridiagonal import tridiagonal_solve
 __all__ = [
     "FourierHelmholtzOperator",
     "build_fourier_helmholtz_operator",
+    "periodic_poisson_eigenvalues",
     "solve_fourier_helmholtz",
+    "solve_periodic_poisson",
+    "solve_periodic_poisson_spectral",
 ]
+
+
+def periodic_poisson_eigenvalues(
+    shape: tuple[int, ...], spacing: float | tuple[float, ...] = 1.0
+) -> jax.Array:
+    """Return the nonnegative Fourier eigenvalues of ``-laplacian``.
+
+    ``shape`` and ``spacing`` describe every periodic axis. The returned array
+    broadcasts directly against :func:`jax.numpy.fft.fftn` output and can be
+    reused across timesteps or right-hand sides.
+    """
+
+    shape = tuple(int(size) for size in shape)
+    if not shape or any(size < 2 for size in shape):
+        raise ValueError("periodic Poisson axes must each contain at least two points")
+    spacings = (
+        (float(spacing),) * len(shape) if isinstance(spacing, (int, float)) else tuple(spacing)
+    )
+    if len(spacings) != len(shape) or any(value <= 0.0 for value in spacings):
+        raise ValueError("spacing must contain one positive value per periodic axis")
+
+    dtype = jnp.result_type(*(jnp.asarray(value) for value in spacings))
+    eigenvalues = jnp.zeros(shape, dtype=dtype)
+    for axis, (size, step) in enumerate(zip(shape, spacings, strict=True)):
+        frequency = 2.0 * jnp.pi * jnp.fft.fftfreq(size, d=step)
+        reshape = [1] * len(shape)
+        reshape[axis] = size
+        eigenvalues = eigenvalues + jnp.square(frequency.reshape(reshape))
+    return eigenvalues
+
+
+def solve_periodic_poisson_spectral(
+    rhs_hat: jax.Array,
+    *,
+    eigenvalues: jax.Array,
+    mean: float | complex | jax.Array = 0.0,
+) -> jax.Array:
+    """Solve ``-laplacian(solution) = rhs`` from full Fourier coefficients.
+
+    The incompatible constant component of ``rhs`` is projected out. ``mean``
+    fixes the solution nullspace and defaults to the zero-mean gauge.
+    """
+
+    rhs_hat, eigenvalues = jnp.asarray(rhs_hat), jnp.asarray(eigenvalues)
+    if rhs_hat.shape != eigenvalues.shape:
+        raise ValueError("rhs_hat and eigenvalues must have identical shapes")
+    safe = jnp.where(eigenvalues > 0.0, eigenvalues, 1.0)
+    solution_hat = jnp.where(eigenvalues > 0.0, rhs_hat / safe, 0.0)
+    zero_mode = (0,) * rhs_hat.ndim
+    return solution_hat.at[zero_mode].set(jnp.asarray(mean) * rhs_hat.size)
+
+
+def solve_periodic_poisson(
+    rhs: jax.Array,
+    *,
+    spacing: float | tuple[float, ...] = 1.0,
+    mean: float | complex | jax.Array = 0.0,
+) -> jax.Array:
+    """Solve ``-laplacian(solution) = rhs`` on an N-dimensional periodic grid.
+
+    This continuous-Fourier collocation inverse accepts real or complex arrays.
+    Build :func:`periodic_poisson_eigenvalues` once and use
+    :func:`solve_periodic_poisson_spectral` when the caller already owns the
+    Fourier transform.
+    """
+
+    rhs = jnp.asarray(rhs)
+    eigenvalues = periodic_poisson_eigenvalues(rhs.shape, spacing)
+    solution = jnp.fft.ifftn(
+        solve_periodic_poisson_spectral(jnp.fft.fftn(rhs), eigenvalues=eigenvalues, mean=mean)
+    )
+    return solution.real.astype(rhs.dtype) if jnp.issubdtype(rhs.dtype, jnp.floating) else solution
 
 
 @dataclass(frozen=True)
@@ -71,13 +146,14 @@ def build_fourier_helmholtz_operator(
     # each other keeps mixed float32/float64 geometry working and leaves the
     # decision where it belongs.
     real_dtype = jnp.result_type(
-        jnp.asarray(dx), jnp.asarray(dz), jnp.asarray(g11),
-        jnp.asarray(g33), jnp.asarray(rhs_scale),
+        jnp.asarray(dx),
+        jnp.asarray(dz),
+        jnp.asarray(g11),
+        jnp.asarray(g33),
+        jnp.asarray(rhs_scale),
     )
     if not jnp.issubdtype(real_dtype, jnp.floating):
-        raise TypeError(
-            f"the Fourier-Helmholtz geometry must be real; got {real_dtype}"
-        )
+        raise TypeError(f"the Fourier-Helmholtz geometry must be real; got {real_dtype}")
     complex_dtype = jnp.result_type(real_dtype, jnp.complex64)
 
     dx = jnp.asarray(dx, dtype=real_dtype)

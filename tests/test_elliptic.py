@@ -12,7 +12,10 @@ import pytest
 
 from solvax import (
     build_fourier_helmholtz_operator,
+    periodic_poisson_eigenvalues,
     solve_fourier_helmholtz,
+    solve_periodic_poisson,
+    solve_periodic_poisson_spectral,
 )
 
 jax.config.update("jax_enable_x64", True)
@@ -104,10 +107,8 @@ def test_manufactured_cell_centered_dirichlet_mode():
     solution = jnp.sin(bounded_mode * jnp.pi * x[:, None] / length_x) * jnp.cos(
         2.0 * jnp.pi * periodic_mode * z[None, :] / length_z
     )
-    bounded_eigenvalue = -4.0 * jnp.sin(
-        bounded_mode * jnp.pi / (2.0 * nx)
-    ) ** 2 / dx_value**2
-    periodic_eigenvalue = -(2.0 * jnp.pi * periodic_mode / length_z) ** 2
+    bounded_eigenvalue = -4.0 * jnp.sin(bounded_mode * jnp.pi / (2.0 * nx)) ** 2 / dx_value**2
+    periodic_eigenvalue = -((2.0 * jnp.pi * periodic_mode / length_z) ** 2)
     rhs = (bounded_eigenvalue + periodic_eigenvalue) * solution
 
     recovered = solve_fourier_helmholtz(rhs, operator=operator)
@@ -138,3 +139,72 @@ def test_solve_is_jit_and_grad_transparent():
     perturbed = rhs.at[idx].add(step)
     fd = (float(objective(perturbed)) - float(objective(rhs.at[idx].add(-step)))) / (2 * step)
     assert float(grad[idx]) == pytest.approx(fd, rel=1e-5, abs=1e-8)
+
+
+@pytest.mark.parametrize(
+    "shape, spacing, mode", [((18,), 0.2, (3,)), ((12, 16), (0.3, 0.2), (2, 3))]
+)
+def test_periodic_poisson_recovers_fourier_mode(shape, spacing, mode):
+    spacings = (spacing,) * len(shape) if isinstance(spacing, float) else spacing
+    coordinates = [jnp.arange(size) * step for size, step in zip(shape, spacings, strict=True)]
+    grids = jnp.meshgrid(*coordinates, indexing="ij")
+    solution = jnp.ones(shape)
+    eigenvalue = 0.0
+    for grid, size, step, number in zip(grids, shape, spacings, mode, strict=True):
+        wave_number = 2.0 * jnp.pi * number / (size * step)
+        solution = solution * jnp.cos(wave_number * grid)
+        eigenvalue += wave_number**2
+
+    recovered = solve_periodic_poisson(eigenvalue * solution, spacing=spacing)
+
+    assert recovered == pytest.approx(solution, rel=1.0e-11, abs=1.0e-11)
+
+
+def test_periodic_poisson_projects_rhs_mean_and_sets_solution_mean():
+    rhs = jnp.arange(35.0).reshape(5, 7)
+    solution = solve_periodic_poisson(rhs, spacing=(0.2, 0.4), mean=2.5)
+    zero_mean_solution = solution - jnp.mean(solution)
+    symbol = periodic_poisson_eigenvalues(rhs.shape, (0.2, 0.4))
+    applied = jnp.fft.ifftn(symbol * jnp.fft.fftn(zero_mean_solution)).real
+
+    assert jnp.mean(solution) == pytest.approx(2.5)
+    assert applied == pytest.approx(rhs - jnp.mean(rhs), rel=1.0e-10, abs=1.0e-10)
+
+
+def test_periodic_poisson_spectral_api_is_complex_jit_and_grad_transparent():
+    rhs = jnp.sin(jnp.arange(24.0).reshape(4, 6)) + 1j * jnp.cos(jnp.arange(24.0).reshape(4, 6))
+    symbol = periodic_poisson_eigenvalues(rhs.shape, (0.5, 0.25))
+    solve_hat = jax.jit(
+        lambda values: solve_periodic_poisson_spectral(
+            jnp.fft.fftn(values), eigenvalues=symbol, mean=1.0 - 0.5j
+        )
+    )
+    spectrum = solve_hat(rhs)
+    physical = jnp.fft.ifftn(spectrum)
+
+    assert jnp.mean(physical) == pytest.approx(1.0 - 0.5j)
+    assert physical == pytest.approx(
+        solve_periodic_poisson(rhs, spacing=(0.5, 0.25), mean=1.0 - 0.5j)
+    )
+    gradient = jax.grad(lambda values: jnp.sum(solve_periodic_poisson(values) ** 2))(rhs.real)
+    assert jnp.all(jnp.isfinite(gradient))
+
+
+@pytest.mark.parametrize(
+    "action, message",
+    [
+        (lambda: periodic_poisson_eigenvalues((), 1.0), "at least two"),
+        (lambda: periodic_poisson_eigenvalues((4, 1), 1.0), "at least two"),
+        (lambda: periodic_poisson_eigenvalues((4, 5), (1.0,)), "one positive"),
+        (lambda: periodic_poisson_eigenvalues((4,), 0.0), "one positive"),
+        (
+            lambda: solve_periodic_poisson_spectral(
+                jnp.zeros((3, 4)), eigenvalues=jnp.zeros((4, 3))
+            ),
+            "identical shapes",
+        ),
+    ],
+)
+def test_periodic_poisson_rejects_invalid_geometry(action, message):
+    with pytest.raises(ValueError, match=message):
+        action()
