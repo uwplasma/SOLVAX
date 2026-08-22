@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.17.0 - 2026-08-22
+
+### Implicit affine fixed-point derivatives
+
+- Upgraded `affine_fixed_point_gmres` in place to use
+  `jax.lax.custom_linear_solve`. JVPs and VJPs now require one tangent or
+  transposed FGMRES solve and never record the primal Krylov iterations.
+- Added independent transpose preconditioner, tolerance, and restart controls
+  while retaining the existing matrix-free affine-map API, PyTree support,
+  diagnostics, and result type.
+- Verified analytical parameter gradients, explicit implicit-solve structure,
+  and reverse temporary memory independent of the maximum restart count. A
+  representative 8,192-unknown primal remains within 1.3% of the previous warm
+  runtime.
+
 ## 0.16.0 - 2026-08-22
 
 ### Memory-bounded recurrence adjoints
