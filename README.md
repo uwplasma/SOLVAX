@@ -21,11 +21,12 @@ converged linear and nonlinear solves,
 checkpointed long recurrences, and memory-chunked Jacobians — traceable under
 `jit`, `vmap` and `grad`, on CPU and GPU.
 
-Derivative semantics are explicit. Use `pcg_linear_solve`, `linear_solve`, or
-`root_solve` for a converged-equation derivative that does not tape iterations;
-raw PCG, Krylov, fixed-point, and Newton routines are primal algorithms. Direct
-and truncated structured solvers document whether their derivative is taped,
-implicit, exact-window, or reverse-only.
+Derivative semantics are explicit. Use `pcg_linear_solve`, `linear_solve`,
+`affine_fixed_point_gmres`, or `root_solve` for a converged-equation derivative
+that does not tape iterations. Raw PCG/GMRES/GCROT, relaxed/Aitken iterations,
+and Newton--Krylov are primal algorithms. Direct and truncated structured
+solvers document whether their derivative is taped, implicit, exact-window, or
+reverse-only.
 
 Three documented exceptions, because "transparent to every transform" would
 not be true: the exact-window reverse rule is a `custom_vjp`, so `jax.jacfwd`

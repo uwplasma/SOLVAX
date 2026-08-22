@@ -27,6 +27,9 @@ $$
 `affine_fixed_point_gmres` applies this operator through map evaluations, so no
 matrix or Jacobian is assembled. Array and PyTree states, custom inner
 products, and right preconditioners use the same contracts as `gmres`.
+`jax.lax.custom_linear_solve` gives the converged fixed point an implicit
+derivative: a JVP or VJP runs one tangent or transposed FGMRES solve and never
+records the primal Krylov iterations.
 
 ```python
 solution = sx.affine_fixed_point_gmres(
@@ -34,8 +37,15 @@ solution = sx.affine_fixed_point_gmres(
     x0,
     restart=20,
     rtol=1e-8,
+    transpose_rtol=1e-9,
 )
 ```
+
+`transpose_precond`, `transpose_rtol`, `transpose_atol`, and
+`transpose_max_restarts` control the adjoint independently. The primal
+preconditioner and tolerances are the defaults when these are omitted. The
+returned residual and convergence flag always describe the primal fixed-point
+equation.
 
 The affine contract is deliberate. For a genuinely nonlinear map, use a
 globalized nonlinear primal solver and `root_solve` for implicit derivatives.
