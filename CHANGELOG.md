@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.14.0 - 2026-08-21
+
+### Stationary fixed-point iteration
+
+- Added `fixed_point_iteration`, a JAX-native relaxed iteration with one map
+  evaluation per update, optional application-defined residual norm, explicit
+  convergence diagnostics, and either tolerance-based stopping or a static
+  step count for differentiable unrolled algorithms.
+- Documented the selection boundary among plain iteration, Aitken, Anderson,
+  affine-map FGMRES, and implicit differentiation in the README and solver
+  guide.
+- Verified the release on Python 3.10 and 3.12, current/minimum/optional JAX
+  stacks, Linux and macOS, with 98.16% combined coverage.
+
 ## 0.13.0 - 2026-08-04
 
 ### Reusable block-Thomas factors without the off-diagonal bands
