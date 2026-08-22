@@ -19,7 +19,7 @@ requirements. No solver is uniformly best.
 | A few eigenvalues far from the bulk | GCROT with harmonic deflation | FGMRES with a spectral preconditioner | small dense eigensolve per cycle, CPU-lowered |
 | Structured grid, directional coupling | semicoarsened `multigrid` with a matching smoother | FGMRES + line preconditioner | smoother and coarsening must be complementary; measure the smoothing factor |
 | Contractive nonlinear partitioned map | `fixed_point_iteration` | Aitken or Anderson mixing | none makes a noncontractive map globally convergent |
-| Affine (linearized) fixed-point map | `affine_fixed_point_gmres` | Anderson mixing | mapping must be affine over the trial space |
+| Affine (linearized) fixed-point map | `affine_fixed_point_gmres` | Anderson mixing | mapping must be affine; derivatives use one tangent/transposed FGMRES solve |
 | Large nonlinear implicit system | `newton_krylov` | Anderson mixing | Jacobian-free, but needs a good Jacobian preconditioner for mesh independence |
 | General sparse CPU solve outside JAX | native SuperLU | FGMRES | no `jit`, `vmap`, or `grad` |
 

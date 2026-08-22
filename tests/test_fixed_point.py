@@ -304,6 +304,47 @@ def test_affine_fixed_point_gmres_solves_a_slow_multimode_map():
     assert solution.x == pytest.approx(target, rel=2.0e-5, abs=2.0e-5)
 
 
+def test_affine_fixed_point_gmres_uses_an_implicit_accurate_derivative():
+    parameters = jnp.asarray([0.2, 0.6, 0.85, 0.1, -0.3, 0.2])
+    weights = jnp.asarray([0.7, -0.2, 1.1])
+
+    def objective(values, max_restarts=2):
+        diagonal, source = values[:3], values[3:]
+        solution = affine_fixed_point_gmres(
+            lambda x: diagonal * x + source,
+            jnp.zeros_like(source),
+            restart=3,
+            rtol=1.0e-12,
+            max_restarts=max_restarts,
+            transpose_precond=lambda residual: residual,
+            transpose_rtol=1.0e-12,
+            transpose_atol=0.0,
+            transpose_max_restarts=max_restarts,
+        )
+        return jnp.vdot(weights, solution.x**2).real
+
+    def exact(values):
+        diagonal, source = values[:3], values[3:]
+        return jnp.vdot(weights, (source / (1.0 - diagonal)) ** 2).real
+
+    value, gradient = jax.jit(jax.value_and_grad(objective))(parameters)
+    expected_value, expected_gradient = jax.value_and_grad(exact)(parameters)
+    assert value == pytest.approx(expected_value, rel=2.0e-10)
+    assert gradient == pytest.approx(expected_gradient, rel=2.0e-9, abs=2.0e-10)
+    assert "custom_linear_solve" in str(jax.make_jaxpr(jax.grad(objective))(parameters))
+    reverse_memory = {
+        restarts: jax.jit(
+            jax.value_and_grad(lambda value, count=restarts: objective(value, count))
+        )
+        .lower(parameters)
+        .compile()
+        .memory_analysis()
+        .temp_size_in_bytes
+        for restarts in (2, 20)
+    }
+    assert reverse_memory[20] == reverse_memory[2]
+
+
 def test_affine_fixed_point_gmres_supports_pytrees_and_custom_inner_products():
     target = {"flow": jnp.asarray([1.0, -1.0]), "potential": jnp.asarray(0.5)}
 

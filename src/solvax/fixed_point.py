@@ -149,19 +149,28 @@ def affine_fixed_point_gmres(
     x0: PyTree,
     *,
     precond: Callable[[PyTree], PyTree] | None = None,
+    transpose_precond: Callable[[PyTree], PyTree] | None = None,
     inner_product: Callable[[PyTree, PyTree], jax.Array] | None = None,
     restart: int = 30,
     rtol: float = 1.0e-8,
     atol: float = 0.0,
     max_restarts: int = 50,
+    transpose_rtol: float | None = None,
+    transpose_atol: float | None = None,
+    transpose_max_restarts: int | None = None,
 ) -> KrylovSolution:
-    """Solve an affine fixed-point map with matrix-free FGMRES.
+    """Solve an affine fixed-point map with implicit matrix-free FGMRES.
 
     For ``G(x) = L x + c``, this solves ``(I - L) delta = G(x0) - x0``
     and returns ``x0 + delta``. Each Krylov operator application evaluates
     ``mapping`` once; no explicit matrix or Jacobian is formed. The mapping
     must be affine over the trial space. Use :func:`root_solve` with a
     nonlinear primal solver for a genuinely nonlinear map.
+
+    :func:`jax.lax.custom_linear_solve` differentiates the fixed point through
+    one tangent or transposed FGMRES solve. The Krylov iterations are never
+    recorded by reverse mode; the optional transpose controls set the adjoint
+    preconditioner and accuracy independently of the primal.
     """
 
     x0 = jax.tree.map(jnp.asarray, x0)
@@ -181,16 +190,40 @@ def affine_fixed_point_gmres(
         mapped_trial = mapping(tree_add(x0, delta))
         return tree_sub(delta, tree_sub(mapped_trial, mapped0))
 
-    correction = gmres(
+    def solver(solve_precond, solve_rtol, solve_atol, solve_restarts):
+        def solve(linear_operator, rhs):
+            solution = gmres(
+                linear_operator,
+                rhs,
+                precond=solve_precond,
+                inner_product=inner_product,
+                restart=restart,
+                rtol=solve_rtol,
+                atol=solve_atol,
+                max_restarts=solve_restarts,
+            )
+            return solution.x, solution[1:]
+
+        return solve
+
+    adjoint_precond = precond if transpose_precond is None else transpose_precond
+    adjoint_rtol = rtol if transpose_rtol is None else transpose_rtol
+    adjoint_atol = atol if transpose_atol is None else transpose_atol
+    adjoint_restarts = max_restarts if transpose_max_restarts is None else transpose_max_restarts
+
+    correction_x, correction_diagnostics = jax.lax.custom_linear_solve(
         operator,
         residual0,
-        precond=precond,
-        inner_product=inner_product,
-        restart=restart,
-        rtol=rtol,
-        atol=atol,
-        max_restarts=max_restarts,
+        solve=solver(precond, rtol, atol, max_restarts),
+        transpose_solve=solver(
+            adjoint_precond,
+            adjoint_rtol,
+            adjoint_atol,
+            adjoint_restarts,
+        ),
+        has_aux=True,
     )
+    correction = KrylovSolution(correction_x, *correction_diagnostics)
     x = tree_add(x0, correction.x)
     residual = tree_sub(mapping(x), x)
     if inner_product is None:
