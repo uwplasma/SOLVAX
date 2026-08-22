@@ -190,6 +190,20 @@ def test_periodic_poisson_spectral_api_is_complex_jit_and_grad_transparent():
     assert jnp.all(jnp.isfinite(gradient))
 
 
+def test_periodic_poisson_spacing_is_differentiable_under_jit():
+    size, mode = 24, 3
+    rhs = jnp.sin(2.0 * jnp.pi * mode * jnp.arange(size) / size)
+
+    def objective(spacing):
+        return jnp.sum(solve_periodic_poisson(rhs, spacing=spacing) ** 2)
+
+    spacing = jnp.asarray(0.2)
+    value, derivative = jax.jit(jax.value_and_grad(objective))(spacing)
+    assert derivative == pytest.approx(4.0 * value / spacing, rel=2.0e-12)
+    invalid = jax.jit(periodic_poisson_eigenvalues, static_argnums=0)((size,), -spacing)
+    assert jnp.isnan(invalid).all()
+
+
 @pytest.mark.parametrize(
     "action, message",
     [

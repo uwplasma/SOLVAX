@@ -17,9 +17,12 @@ phi_hat = sx.solve_periodic_poisson_spectral(rho_hat, eigenvalues=eigenvalues)
 ```
 
 Both forms support real or complex data and compose with `jit`, `vmap`, and
-automatic differentiation. Each periodic axis needs at least two points and
-one positive spacing. The spectral API uses the full `fftn` layout so its
-coefficient shape is identical to the physical grid.
+automatic differentiation, including a spacing parameter traced inside
+`jit(value_and_grad)`. Each periodic axis needs at least two points and one
+positive spacing. Invalid eager spacing raises; invalid traced spacing produces
+a nonfinite symbol so downstream finite-state gates fail closed. The spectral
+API uses the full `fftn` layout so its coefficient shape is identical to the
+physical grid.
 
 ## Periodic-by-bounded formulation
 

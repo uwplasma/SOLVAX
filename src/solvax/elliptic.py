@@ -34,22 +34,29 @@ __all__ = [
 
 
 def periodic_poisson_eigenvalues(
-    shape: tuple[int, ...], spacing: float | tuple[float, ...] = 1.0
+    shape: tuple[int, ...],
+    spacing: float | jax.Array | tuple[float | jax.Array, ...] = 1.0,
 ) -> jax.Array:
     """Return the nonnegative Fourier eigenvalues of ``-laplacian``.
 
-    ``shape`` and ``spacing`` describe every periodic axis. The returned array
-    broadcasts directly against :func:`jax.numpy.fft.fftn` output and can be
-    reused across timesteps or right-hand sides.
+    ``shape`` and ``spacing`` describe every periodic axis. Spacing values are
+    differentiable under ``jit``; eager nonpositive inputs raise, while traced
+    nonpositive inputs produce a nonfinite symbol. The returned array broadcasts
+    directly against :func:`jax.numpy.fft.fftn` output and can be reused across
+    timesteps or right-hand sides.
     """
 
     shape = tuple(int(size) for size in shape)
     if not shape or any(size < 2 for size in shape):
         raise ValueError("periodic Poisson axes must each contain at least two points")
-    spacings = (
-        (float(spacing),) * len(shape) if isinstance(spacing, (int, float)) else tuple(spacing)
-    )
-    if len(spacings) != len(shape) or any(value <= 0.0 for value in spacings):
+    spacings = spacing if isinstance(spacing, tuple) else (spacing,) * len(shape)
+    if len(spacings) != len(shape):
+        raise ValueError("spacing must contain one positive value per periodic axis")
+    try:
+        nonpositive = any(bool(jnp.asarray(value) <= 0.0) for value in spacings)
+    except jax.errors.ConcretizationTypeError:
+        nonpositive = False
+    if nonpositive:
         raise ValueError("spacing must contain one positive value per periodic axis")
 
     dtype = jnp.result_type(*(jnp.asarray(value) for value in spacings))
@@ -58,7 +65,11 @@ def periodic_poisson_eigenvalues(
         frequency = 2.0 * jnp.pi * jnp.fft.fftfreq(size, d=step)
         reshape = [1] * len(shape)
         reshape[axis] = size
-        eigenvalues = eigenvalues + jnp.square(frequency.reshape(reshape))
+        eigenvalues = eigenvalues + jnp.where(
+            jnp.asarray(step) > 0.0,
+            jnp.square(frequency.reshape(reshape)),
+            jnp.nan,
+        )
     return eigenvalues
 
 
@@ -86,7 +97,7 @@ def solve_periodic_poisson_spectral(
 def solve_periodic_poisson(
     rhs: jax.Array,
     *,
-    spacing: float | tuple[float, ...] = 1.0,
+    spacing: float | jax.Array | tuple[float | jax.Array, ...] = 1.0,
     mean: float | complex | jax.Array = 0.0,
 ) -> jax.Array:
     """Solve ``-laplacian(solution) = rhs`` on an N-dimensional periodic grid.

@@ -16,8 +16,16 @@ Schur elimination with truncated storage), preconditioned and recycled Krylov
 methods, physics-agnostic preconditioners (coarse-operator LU, semicoarsened
 geometric and p-multigrid, Kronecker approximations, symmetric additive and
 line smoothers),
-mixed-precision iterative refinement, and implicit differentiation of every solve —
-traceable under `jit`, `vmap` and `grad`, on CPU and GPU.
+mixed-precision iterative refinement, implicit differentiation wrappers for
+converged linear and nonlinear solves,
+checkpointed long recurrences, and memory-chunked Jacobians — traceable under
+`jit`, `vmap` and `grad`, on CPU and GPU.
+
+Derivative semantics are explicit. Use `pcg_linear_solve`, `linear_solve`, or
+`root_solve` for a converged-equation derivative that does not tape iterations;
+raw PCG, Krylov, fixed-point, and Newton routines are primal algorithms. Direct
+and truncated structured solvers document whether their derivative is taped,
+implicit, exact-window, or reverse-only.
 
 Three documented exceptions, because "transparent to every transform" would
 not be true: the exact-window reverse rule is a `custom_vjp`, so `jax.jacfwd`
@@ -73,6 +81,13 @@ phi_hat = sx.solve_periodic_poisson_spectral(rho_hat, eigenvalues=poisson_symbol
 
 # Same diagnostics, but gradients use an implicit primal/transpose solve
 implicit_solution = sx.pcg_linear_solve(matvec, rhs, precond=preconditioner)
+
+# Exact discrete gradient of a long recurrence with O(sqrt(steps)) retained state
+def advance(_index, state):
+    return coupling_sweep(state)
+
+
+final_state = sx.checkpointed_fori_loop(0, 8, advance, initial_state)
 
 # Reuse one elimination across many right-hand sides
 factors = sx.block_thomas_factor(lower, diag, upper)
@@ -220,7 +235,7 @@ within an order of magnitude of the limit as unconfirmed.
 | `solvax.pcg` | Matrix-free pytree PCG with preconditioning, fixed-shape residual history, and explicit convergence/breakdown status |
 | `solvax.fixed_point` | Plain and Aitken fixed-point loops, bounded-memory (condition-filtered) Anderson, and matrix-free affine fixed-point FGMRES |
 | `solvax.implicit` | Matrix-free `newton_krylov` (JFNK) plus implicit-function-theorem `linear_solve` and `root_solve` — gradients cost one extra (transposed) solve |
-| `solvax.autodiff` | Bounded-memory chunked forward/reverse Jacobians (`chunked_jacfwd`/`jacrev`/`jacobian`) with automatic chunk sizing |
+| `solvax.autodiff` | Exact checkpointed recurrences plus bounded-memory chunked forward/reverse Jacobians with automatic sizing |
 | `solvax.refine` | Mixed-precision iterative refinement (float32 factor, float64 residuals) |
 | `solvax.native` / `native_eigen` | Host-side SuperLU and sparse shift-invert eigenpairs; eager primals compose with implicit eigenpair AD |
 

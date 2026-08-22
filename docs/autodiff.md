@@ -1,4 +1,49 @@
-# Memory-bounded Jacobians
+# Memory-efficient autodiff
+
+Reverse mode can exhaust memory in two different ways: a long recurrence can
+retain every state, and a dense Jacobian can batch too many cotangent
+directions. SOLVAX provides separate controls for both cases.
+
+## Checkpointed recurrences
+
+Use `checkpointed_fori_loop` for a fixed-length, JAX-traceable recurrence when
+you need the exact derivative of the finite algorithm:
+
+```python
+def step(index, state):
+    return advance_one_timestep(state, parameters, index)
+
+final_state = sx.checkpointed_fori_loop(0, steps, step, initial_state)
+loss = objective(final_state)
+gradient = jax.grad(run)(parameters)
+```
+
+For $N$ steps and checkpoint width $C$, the reverse pass retains state at the
+segment boundaries and replays one segment at a time. Recurrence-state storage
+therefore scales as
+
+$$
+M(C)=O(N/C+C),
+$$
+
+instead of $O(N)$. The default $C=\lceil\sqrt{N}\rceil$ balances the two
+terms; pass `checkpoint_size=` to select another static memory/recomputation
+trade-off. The primal, JVP, and VJP are unchanged to floating-point precision.
+Only reverse mode performs the replay.
+
+This is a deliberately simple two-level schedule built from `jax.checkpoint`
+and static `jax.lax.fori_loop` bounds. More elaborate binomial schedules can
+reduce recomputation under a hard checkpoint budget {cite}`griewank2000`;
+the explicit width here keeps compilation, cost, and retained state easy to
+predict. Use implicit differentiation for a converged equilibrium or linear
+solve: replaying its iterations computes the derivative of the stopping
+algorithm and wastes both time and memory.
+
+Discrete loop counts and checkpoint widths are static configuration. Gradients
+flow through array/pytree state and differentiable values closed over by
+`body_fun`; they do not flow through those discrete controls.
+
+## Chunked Jacobians
 
 `jax.jacfwd` and `jax.jacrev` batch all basis directions by default. If a
 single derivative evaluation has large intermediates, full batching can exceed
@@ -153,6 +198,7 @@ not a portable guarantee.
 
 | Strategy | Saves memory by | Trade-off |
 |---|---|---|
+| checkpointed recurrence | storing segment boundaries and replaying one segment | additional transition evaluations in reverse mode |
 | chunked Jacobian | reducing simultaneous derivative directions | more sequential chunks |
 | matrix-free JVP/VJP | never materializing the Jacobian | only operator actions are available |
 | rematerialization/checkpointing | recomputing primal intermediates | extra primal work |
@@ -174,6 +220,7 @@ a direct factorization, export, or dense diagnostic.
 
 ## API summary
 
+- {func}`solvax.autodiff.checkpointed_fori_loop`
 - {func}`solvax.autodiff.chunk_map`
 - {func}`solvax.autodiff.auto_chunk_size`
 - {func}`solvax.autodiff.chunked_jacfwd`
