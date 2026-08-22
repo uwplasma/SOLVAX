@@ -62,6 +62,15 @@ fixed = sx.fixed_point_iteration(
     coupling_sweep, initial_state, relaxation=0.8, atol=1e-8
 )
 
+# Periodic Poisson solve; reuse the symbol when the timestep owns the FFT
+grid = 2.0 * jnp.pi * jnp.arange(16) / 16
+rho = jnp.sin(grid[:, None]) * jnp.sin(grid[None, :])
+dx = dy = 2.0 * jnp.pi / 16
+rho_hat = jnp.fft.fftn(rho)
+phi = sx.solve_periodic_poisson(rho, spacing=(dx, dy))
+poisson_symbol = sx.periodic_poisson_eigenvalues(rho.shape, (dx, dy))
+phi_hat = sx.solve_periodic_poisson_spectral(rho_hat, eigenvalues=poisson_symbol)
+
 # Same diagnostics, but gradients use an implicit primal/transpose solve
 implicit_solution = sx.pcg_linear_solve(matvec, rhs, precond=preconditioner)
 
@@ -204,7 +213,7 @@ within an order of magnitude of the limit as unconfirmed.
 | `solvax.direct` | Block-tridiagonal Schur elimination (block Thomas): full, factor/solve split, selected-head (truncated-storage) mode, exact-window localized adjoint, per-row localization profile and window advisor |
 | `solvax.banded` | Non-pivoted banded LU with row equilibration + static pivoting; periodic variant via the Woodbury capacitance trick |
 | `solvax.tridiagonal` | Batched scalar tridiagonal solve (reproducible Thomas / fused cuSPARSE backend) and periodic (cyclic) systems via a Sherman--Morrison correction |
-| `solvax.elliptic` | Spectral Fourier--Helmholtz solve for separable periodic-by-bounded elliptic problems — the drift-plane / vorticity `lap phi = rhs` inversion, one FFT + one batched tridiagonal sweep |
+| `solvax.elliptic` | N-D fully periodic Poisson inversion and periodic-by-bounded Fourier--Helmholtz solves, with reusable spectral symbols for timestep loops |
 | `solvax.krylov` | Flexible restarted GMRES (CGS2 + Givens) over arrays, scalars and arbitrary pytrees with optional custom inner products, and GCROT Krylov subspace recycling with FIFO or harmonic-Ritz (GCRO-DR) deflated restarting |
 | `solvax.propagator` | Residual-certified RK4 and nested exponential-Arnoldi eigenmode extraction without materializing the operator |
 | `solvax.eigen` | Solver-independent implicit reverse derivatives for externally certified eigenpairs, including eigenvector observables and exceptional-point guards |

@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Fully periodic Poisson inversion
+
+- Added an N-dimensional Fourier Poisson solve with explicit zero-mode
+  projection, selectable solution mean, real/complex support, and separate
+  reusable-symbol and spectral-coefficient entry points for timestep loops.
+- Verified manufactured modes, nullspace handling, shape contracts, JIT, and
+  reverse-mode differentiation. The README and elliptic guide document both
+  the direct and transform-reuse APIs.
+
 ## 0.14.0 - 2026-08-21
 
 ### Stationary fixed-point iteration
