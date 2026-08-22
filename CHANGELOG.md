@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.16.0 - 2026-08-22
+
+### Memory-bounded recurrence adjoints
+
+- Added `checkpointed_fori_loop`, an exact finite-recurrence JVP/VJP with a
+  two-level `O(N / C + C)` retained-state bound and a square-root default.
+  It accepts array or pytree state and keeps loop bounds and checkpoint width
+  explicit static controls.
+- Verified primal, JVP, and VJP equality to the uncheckpointed recurrence and
+  compiled reverse temporary memory below half of a full recurrence tape.
+- Made periodic-Poisson spacing traceable so compiled geometry derivatives can
+  use the reusable Fourier symbol while eager invalid spacing still fails
+  clearly.
+- Documented the derivative policy for raw iterative primals, implicit solves,
+  checkpointed recurrences, localized rules, and reverse-only APIs.
+
 ## 0.15.0 - 2026-08-22
 
 ### Fully periodic Poisson inversion
