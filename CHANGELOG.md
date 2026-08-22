@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.15.0 - 2026-08-22
 
 ### Fully periodic Poisson inversion
 
