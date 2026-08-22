@@ -63,6 +63,10 @@ fixed = sx.fixed_point_iteration(
 )
 
 # Periodic Poisson solve; reuse the symbol when the timestep owns the FFT
+grid = 2.0 * jnp.pi * jnp.arange(16) / 16
+rho = jnp.sin(grid[:, None]) * jnp.sin(grid[None, :])
+dx = dy = 2.0 * jnp.pi / 16
+rho_hat = jnp.fft.fftn(rho)
 phi = sx.solve_periodic_poisson(rho, spacing=(dx, dy))
 poisson_symbol = sx.periodic_poisson_eigenvalues(rho.shape, (dx, dy))
 phi_hat = sx.solve_periodic_poisson_spectral(rho_hat, eigenvalues=poisson_symbol)
