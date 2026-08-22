@@ -1,13 +1,15 @@
 """solvax: differentiable structured linear solvers and matrix-free methods in JAX.
 
 Generic solver infrastructure for kinetic and PDE codes: batched structured
-direct solves, preconditioned/recycled Krylov methods, memory-chunked
-autodiff, and implicit differentiation — everything jit/vmap/grad-transparent
-unless explicitly marked as a host-side native bridge.
+direct solves, preconditioned/recycled Krylov methods, checkpointed recurrences,
+memory-chunked autodiff, and implicit differentiation. Primal kernels compose
+with JAX transformations; derivative entry points state whether they use a
+taped, implicit, checkpointed, localized, or reverse-only rule.
 """
 
 from solvax.autodiff import (
     auto_chunk_size,
+    checkpointed_fori_loop,
     chunk_map,
     chunked_jacfwd,
     chunked_jacobian,
@@ -270,6 +272,7 @@ __all__ = [
     "as_low_precision",
     "chunk_map",
     "auto_chunk_size",
+    "checkpointed_fori_loop",
     "chunked_jacfwd",
     "chunked_jacrev",
     "chunked_jacobian",

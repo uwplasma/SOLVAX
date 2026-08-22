@@ -102,6 +102,7 @@ $\max(\lVert x_0\rVert_2,1)$.
 | `gmres`, `pcg` | array or arbitrary matching pytree |
 | `gcrot` | flat `(n,)` vector |
 | `anderson_mixing` | history on axis 0 |
+| `checkpointed_fori_loop` | arbitrary matching pytree state; static bounds |
 | `chunked_jacfwd/rev` | same output layout as the corresponding JAX transform |
 
 For block tridiagonal storage, `lower[0]` and `upper[-1]` are unused but must be

@@ -1,4 +1,25 @@
-r"""Memory-chunked Jacobian construction (the ``jac_chunk_size`` knob).
+r"""Memory-bounded reverse-mode loops and chunked Jacobian construction.
+
+Long recurrences and dense Jacobians create two distinct reverse-mode memory
+problems. :func:`checkpointed_fori_loop` stores periodic recurrence states and
+replays one segment at a time, while the chunked Jacobian builders bound the
+number of simultaneous JVPs or VJPs. Both expose one static memory/work knob
+without changing the differentiated finite algorithm.
+
+Checkpointed recurrences
+------------------------
+For ``N`` applications of a state transition and a checkpoint size ``C``, a
+plain reverse pass can retain state proportional to ``N``. The two-level
+schedule in :func:`checkpointed_fori_loop` retains the outer checkpoints plus
+one replayed segment,
+
+    state memory ~ O(N / C + C),
+
+and defaults to ``C = ceil(sqrt(N))``. It computes the exact JVP/VJP of the
+finite recurrence; the price is recomputing transitions during reverse mode.
+
+Chunked Jacobians
+-----------------
 
 The dense Jacobian of ``f : R^n -> R^m`` is assembled column by column
 (forward mode: one JVP against each input basis vector) or row by row
@@ -65,6 +86,7 @@ References
 from __future__ import annotations
 
 import math
+import operator
 import os
 from collections.abc import Callable
 from typing import Literal
@@ -73,6 +95,7 @@ import jax
 import jax.numpy as jnp
 
 __all__ = [
+    "checkpointed_fori_loop",
     "chunk_map",
     "auto_chunk_size",
     "chunked_jacfwd",
@@ -125,10 +148,7 @@ def _resolve_backend(backend: Backend | None) -> str:
     if name == "auto":
         return available_backends()[0]
     if name not in ("native", "adv"):
-        raise ValueError(
-            f"unknown chunking backend {name!r}; expected "
-            "'native', 'adv', or 'auto'"
-        )
+        raise ValueError(f"unknown chunking backend {name!r}; expected 'native', 'adv', or 'auto'")
     return name
 
 
@@ -141,6 +161,77 @@ def _reject_adv_only(kwargs: dict, where: str) -> None:
             "backend; pass backend='adv' (and `pip install solvax[adv]`) to "
             "use them."
         )
+
+
+def checkpointed_fori_loop(
+    lower: int,
+    upper: int,
+    body_fun: Callable,
+    init_val,
+    *,
+    checkpoint_size: int | None = None,
+):
+    r"""Run a static recurrence with an exact, memory-bounded reverse pass.
+
+    This has the same ``body_fun(index, value) -> value`` contract as
+    :func:`jax.lax.fori_loop`. The loop is divided into fixed-size segments;
+    reverse mode retains the state at segment boundaries and rematerializes one
+    segment at a time. For ``N = upper - lower`` steps and segment width ``C``,
+    retained recurrence state scales as ``O(N / C + C)`` instead of ``O(N)``.
+    The default ``ceil(sqrt(N))`` balances the two terms.
+
+    The returned value and its JVP/VJP are those of the finite recurrence, not
+    a continuous-time adjoint. Checkpointing changes only saved intermediates.
+    It is therefore suitable for long explicit timesteppers and optimization
+    loops where exact discrete gradients matter. Steady converged equations
+    should generally use :func:`solvax.implicit.root_solve` or
+    :func:`solvax.implicit.linear_solve` instead of replaying iterations.
+
+    Args:
+        lower: static inclusive lower bound.
+        upper: static exclusive upper bound, no smaller than ``lower``.
+        body_fun: pure JAX-traceable recurrence ``(index, value) -> value``.
+        init_val: initial array or pytree state.
+        checkpoint_size: static segment width. ``None`` chooses
+            ``ceil(sqrt(upper - lower))``; an explicit value is clamped to the
+            number of steps.
+
+    Returns:
+        Final recurrence state, compatible with ``jit``, ``jvp``, ``vjp``, and
+        ``grad``.
+    """
+    lower = operator.index(lower)
+    upper = operator.index(upper)
+    steps = upper - lower
+    if steps < 0:
+        raise ValueError("upper must be greater than or equal to lower")
+    if steps == 0:
+        return init_val
+    if checkpoint_size is None:
+        checkpoint_size = math.isqrt(steps - 1) + 1
+    else:
+        checkpoint_size = operator.index(checkpoint_size)
+        if checkpoint_size < 1:
+            raise ValueError("checkpoint_size must be positive")
+        checkpoint_size = min(checkpoint_size, steps)
+    segments = (steps + checkpoint_size - 1) // checkpoint_size
+
+    @jax.checkpoint
+    def replay_segment(segment_index, value):
+        start = lower + segment_index * checkpoint_size
+
+        def replay(local_index, current):
+            index = start + local_index
+            return jax.lax.cond(
+                index < upper,
+                lambda state: body_fun(index, state),
+                lambda state: state,
+                current,
+            )
+
+        return jax.lax.fori_loop(0, checkpoint_size, replay, value)
+
+    return jax.lax.fori_loop(0, segments, replay_segment, init_val)
 
 
 def chunk_map(
@@ -242,9 +333,7 @@ def _resolve_chunk(chunk_size, dim: int, output_size: int) -> int | None:
         return None
     if isinstance(chunk_size, str):
         if chunk_size != "auto":
-            raise ValueError(
-                f"chunk_size string must be 'auto', got {chunk_size!r}"
-            )
+            raise ValueError(f"chunk_size string must be 'auto', got {chunk_size!r}")
         return auto_chunk_size(dim, output_size)
     chunk = int(chunk_size)
     if chunk < 1:
@@ -298,15 +387,11 @@ def chunked_jacfwd(
         out_size = int(jax.eval_shape(single, x).size)
         chunk = _resolve_chunk(chunk_size, n, out_size)
         if _resolve_backend(backend) == "adv":
-            return _adv().batch_jacfwd(
-                single, 0, batch_size=chunk, **kwargs
-            )(x)
+            return _adv().batch_jacfwd(single, 0, batch_size=chunk, **kwargs)(x)
         _reject_adv_only(kwargs, "chunked_jacfwd")
         cols = chunk_map(column, basis, chunk_size=chunk)
         # cols: (n, *out_shape) -> (*out_shape, *in_shape) to match jacfwd.
-        return jax.tree.map(
-            lambda c: jnp.moveaxis(c, 0, -1).reshape(c.shape[1:] + in_shape), cols
-        )
+        return jax.tree.map(lambda c: jnp.moveaxis(c, 0, -1).reshape(c.shape[1:] + in_shape), cols)
 
     return jacfun
 
@@ -357,9 +442,7 @@ def chunked_jacrev(
 
         chunk = _resolve_chunk(chunk_size, m, x.size)
         if _resolve_backend(backend) == "adv":
-            return _adv().batch_jacrev(
-                single, 0, batch_size=chunk, **kwargs
-            )(x)
+            return _adv().batch_jacrev(single, 0, batch_size=chunk, **kwargs)(x)
         _reject_adv_only(kwargs, "chunked_jacrev")
         rows = chunk_map(row, basis, chunk_size=chunk)
         # rows: (m, *in_shape) -> (*out_shape, *in_shape) to match jacrev.
@@ -394,11 +477,9 @@ def chunked_jacobian(
         ``output_shape + input_shape``.
     """
     if mode == "fwd":
-        return chunked_jacfwd(fun, argnums, chunk_size=chunk_size,
-                                  backend=backend, **kwargs)
+        return chunked_jacfwd(fun, argnums, chunk_size=chunk_size, backend=backend, **kwargs)
     if mode == "rev":
-        return chunked_jacrev(fun, argnums, chunk_size=chunk_size,
-                                  backend=backend, **kwargs)
+        return chunked_jacrev(fun, argnums, chunk_size=chunk_size, backend=backend, **kwargs)
     if mode != "auto":
         raise ValueError(f"mode must be 'fwd', 'rev' or 'auto', got {mode!r}")
 
@@ -406,7 +487,6 @@ def chunked_jacobian(
         x = jnp.asarray(args[argnums])
         out = jax.eval_shape(lambda a: fun(*_sub(args, argnums, a)), x)
         builder = chunked_jacfwd if x.size <= out.size else chunked_jacrev
-        return builder(fun, argnums, chunk_size=chunk_size,
-                       backend=backend, **kwargs)(*args)
+        return builder(fun, argnums, chunk_size=chunk_size, backend=backend, **kwargs)(*args)
 
     return jacfun

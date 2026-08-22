@@ -7,6 +7,7 @@ import pytest
 
 from solvax import (
     auto_chunk_size,
+    checkpointed_fori_loop,
     chunk_map,
     chunked_jacfwd,
     chunked_jacobian,
@@ -14,6 +15,67 @@ from solvax import (
 )
 
 jax.config.update("jax_enable_x64", True)
+
+
+def test_checkpointed_loop_matches_plain_primal_jvp_vjp_and_bounds_memory():
+    """Checkpointing must preserve the finite recurrence and reduce its tape."""
+
+    def evaluate(scale, checkpointed):
+        def body(index, state):
+            value, total = state
+            value = jnp.sin(scale * value + 1.0e-4 * index)
+            return value, total + jnp.mean(value**2)
+
+        initial = (jnp.linspace(0.1, 0.9, 512), jnp.asarray(0.0))
+        loop = checkpointed_fori_loop if checkpointed else jax.lax.fori_loop
+        value, total = loop(3, 131, body, initial)
+        return jnp.mean(value) + 1.0e-3 * total
+
+    scale = jnp.asarray(0.83)
+
+    def plain(value):
+        return evaluate(value, False)
+
+    def bounded(value):
+        return evaluate(value, True)
+
+    np.testing.assert_allclose(bounded(scale), plain(scale), rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(
+        jax.jvp(bounded, (scale,), (jnp.ones_like(scale),)),
+        jax.jvp(plain, (scale,), (jnp.ones_like(scale),)),
+        rtol=2.0e-14,
+        atol=2.0e-14,
+    )
+    np.testing.assert_allclose(jax.grad(bounded)(scale), jax.grad(plain)(scale), rtol=2.0e-14)
+
+    initial = jnp.ones((1024,), dtype=jnp.float32)
+
+    def reverse(loop):
+        def objective(value):
+            def body(index, state):
+                return jnp.sin(state) + jnp.float32(index) * 1.0e-4
+
+            return jnp.sum(loop(0, 256, body, value) ** 2)
+
+        return jax.jit(jax.grad(objective)).lower(initial).compile()
+
+    plain_bytes = reverse(jax.lax.fori_loop).memory_analysis().temp_size_in_bytes
+    bounded_bytes = reverse(checkpointed_fori_loop).memory_analysis().temp_size_in_bytes
+    assert bounded_bytes < 0.5 * plain_bytes
+
+
+def test_checkpointed_loop_validates_static_bounds_and_handles_empty_range():
+    def body(_index, value):
+        return value + 1
+
+    assert checkpointed_fori_loop(2, 2, body, 7) == 7
+    assert checkpointed_fori_loop(0, 3, body, 0, checkpoint_size=99) == 3
+    with pytest.raises(ValueError, match="upper must"):
+        checkpointed_fori_loop(2, 1, body, 0)
+    with pytest.raises(ValueError, match="checkpoint_size"):
+        checkpointed_fori_loop(0, 1, body, 0, checkpoint_size=0)
+    with pytest.raises(TypeError):
+        checkpointed_fori_loop(0.0, 1, body, 0)
 
 
 def vector_fun(x):
@@ -147,8 +209,10 @@ def test_second_order_grad_through_chunked_jacobian():
 @pytest.mark.parametrize("chunk_size", [None, 1, 2, 3, 4, 10])
 def test_chunk_map_matches_vmap(chunk_size):
     xs = jnp.asarray(np.random.default_rng(7).standard_normal((7, 3)))
+
     def fun(row):
         return jnp.sum(row**2)
+
     got = chunk_map(fun, xs, chunk_size=chunk_size)
     assert np.allclose(np.asarray(got), np.asarray(jax.vmap(fun)(xs)), atol=1e-12)
 
