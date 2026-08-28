@@ -12,6 +12,7 @@ from solvax import (
     newton_krylov,
     recycled_linear_solve,
     root_solve,
+    tridiagonal_solve,
 )
 
 jax.config.update("jax_enable_x64", True)
@@ -503,3 +504,125 @@ def test_newton_krylov_supports_pytree_preconditioner_and_inner_product():
     assert np.asarray(solution.x[0]) == pytest.approx([1.0, -2.0])
     assert float(solution.x[1]) == pytest.approx(3.0)
     assert int(solution.linear_iterations) == 1
+
+
+def test_newton_krylov_constant_forcing_is_the_default():
+    kwargs = dict(
+        rtol=0.0,
+        atol=1e-12,
+        max_steps=8,
+        linear_restart=1,
+        linear_rtol=1e-10,
+        linear_max_restarts=2,
+    )
+    default = newton_krylov(lambda x: x**2 - 2.0, jnp.array(1.0), **kwargs)
+    explicit = newton_krylov(
+        lambda x: x**2 - 2.0,
+        jnp.array(1.0),
+        forcing="constant",
+        **kwargs,
+    )
+
+    assert all(
+        bool(equal)
+        for equal in jax.tree.leaves(
+            jax.tree.map(
+                lambda left, right: jnp.array_equal(left, right), default, explicit
+            )
+        )
+    )
+
+
+def test_newton_krylov_eisenstat_walker_reduces_inner_work_quadratically():
+    n = 32
+    h = 1.0 / (n + 1)
+    source = jnp.full(n, 10.0)
+    off_diagonal = jnp.full(n, -1.0 / h**2)
+    diagonal = jnp.full(n, 2.0 / h**2)
+
+    def residual(u):
+        laplacian = (-2.0 * u).at[:-1].add(u[1:]).at[1:].add(u[:-1]) / h**2
+        return -laplacian + u**3 - source
+
+    def preconditioner(value):
+        return tridiagonal_solve(
+            off_diagonal, diagonal, off_diagonal, value, method="thomas"
+        )
+
+    common = dict(
+        precond=preconditioner,
+        rtol=0.0,
+        atol=1e-10,
+        max_steps=6,
+        linear_restart=30,
+        linear_max_restarts=10,
+    )
+    initial = jnp.zeros(n)
+    fixed = jax.jit(
+        lambda value: newton_krylov(
+            residual, value, linear_rtol=1e-10, forcing="constant", **common
+        )
+    )(initial)
+    adaptive = jax.jit(
+        lambda value: newton_krylov(
+            residual,
+            value,
+            linear_rtol=0.5,
+            forcing="eisenstat_walker",
+            **common,
+        )
+    )(initial)
+
+    assert bool(fixed.converged and fixed.linear_converged)
+    assert bool(adaptive.converged and adaptive.linear_converged)
+    assert int(adaptive.linear_iterations) < int(fixed.linear_iterations)
+    assert int(adaptive.newton_iterations) == int(fixed.newton_iterations)
+    assert float(adaptive.residual_norm) <= 1e-10
+    assert np.asarray(adaptive.x) == pytest.approx(np.asarray(fixed.x), abs=2e-11)
+
+    terminal_residuals = []
+    for max_steps in (2, 3, 4):
+        partial = newton_krylov(
+            residual,
+            initial,
+            precond=preconditioner,
+            rtol=0.0,
+            atol=0.0,
+            max_steps=max_steps,
+            linear_restart=30,
+            linear_rtol=0.5,
+            linear_max_restarts=10,
+            forcing="eisenstat_walker",
+        )
+        terminal_residuals.append(float(partial.residual_norm))
+
+    penultimate, terminal = terminal_residuals[-2:]
+    assert terminal < penultimate
+    assert terminal / penultimate**2 < 1e-2
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"forcing": "unknown"}, "forcing must be"),
+        (
+            {"forcing": "eisenstat_walker", "linear_rtol": 1.0},
+            "linear_rtol",
+        ),
+        (
+            {"forcing": "eisenstat_walker", "forcing_gamma": 1.0},
+            "forcing_gamma",
+        ),
+        (
+            {"forcing": "eisenstat_walker", "forcing_alpha": 1.0},
+            "forcing_alpha",
+        ),
+        (
+            {"forcing": "eisenstat_walker", "forcing_max": 1.0},
+            "forcing_max",
+        ),
+    ],
+)
+def test_newton_krylov_rejects_invalid_forcing_parameters(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        newton_krylov(lambda x: x - 1.0, jnp.array(0.0), **kwargs)

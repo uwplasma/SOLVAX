@@ -16,6 +16,8 @@ solution = sx.newton_krylov(
     rtol=1e-8,
     max_steps=10,
     linear_restart=20,
+    linear_rtol=0.5,
+    forcing="eisenstat_walker",
 )
 ```
 
@@ -25,6 +27,14 @@ well as `newton_iterations`, `linear_iterations`, and `residual_norm`.
 `inner_product=` controls GMRES orthogonalization and supports weighted or
 distributed reductions; `norm=` may independently define the nonlinear
 residual norm.
+
+The default `forcing="constant"` passes `linear_rtol` to every inner GMRES
+solve. Opt-in `forcing="eisenstat_walker"` treats `linear_rtol` as the initial
+forcing term and uses the safeguarded Eisenstat--Walker choice 2 residual ratio
+for later Newton steps {cite}`eisenstat1996`. This avoids solving early Newton
+systems to terminal accuracy while tightening the inner tolerance as the
+nonlinear residual contracts. `forcing_gamma`, `forcing_alpha`, and
+`forcing_max` control the choice-2 formula; the maximum must remain below one.
 
 For large PDE or kinetic systems, `precond=` should approximate the inverse
 Jacobian action using inexpensive problem structure. Jacobian-free products
