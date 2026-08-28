@@ -15,6 +15,8 @@ requirements. No solver is uniformly best.
 | Narrow periodic band | periodic banded LU | GMRES with core inverse | low-rank corner model must match the operator |
 | General Hermitian positive definite | PCG | FGMRES | PCG fails explicitly on nonpositive curvature |
 | General nonsymmetric or indefinite | FGMRES | native SuperLU on CPU | memory grows with restart size |
+| Difficult nonlinear root with hard physical bounds | pseudo-transient continuation | undamped Newton--Krylov | metric and admissibility predicate must represent the physics |
+| Root family ending near a fold | adaptive continuation, then pseudo-arclength | independent cold roots | branch tangent and bordered preconditioner need validation |
 | Slowly varying sequence | GCROT | warm-started FGMRES | recycle storage and startup QR cost |
 | A few eigenvalues far from the bulk | GCROT with harmonic deflation | FGMRES with a spectral preconditioner | small dense eigensolve per cycle, CPU-lowered |
 | Structured grid, directional coupling | semicoarsened `multigrid` with a matching smoother | FGMRES + line preconditioner | smoother and coarsening must be complementary; measure the smoothing factor |

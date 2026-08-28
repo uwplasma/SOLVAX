@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Globalized nonlinear continuation
+
+- Added JIT-able pseudo-transient JFNK with a user metric, shifted
+  preconditioner, hard admissibility/backtracking gates, switched-evolution
+  pseudo-time updates, and safeguarded Eisenstat--Walker forcing.
+- Shared the public forcing primitive with adaptive ordinary Newton--Krylov.
+- Added fixed-size true-residual histories and explicit accepted/rejected,
+  nonlinear-evaluation, linear-failure, and Krylov-work diagnostics.
+- Added host-orchestrated adaptive branch continuation with complete stage
+  records and square pseudo-arclength bordered residual/corrector helpers.
+
 ## 0.17.0 - 2026-08-22
 
 ### Implicit affine fixed-point derivatives

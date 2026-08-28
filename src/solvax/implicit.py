@@ -50,6 +50,7 @@ import jax
 import jax.numpy as jnp
 
 from solvax.krylov import gmres
+from solvax.nonlinear import eisenstat_walker_forcing
 
 PyTree = Any
 InnerProduct = Callable[[PyTree, PyTree], jax.Array]
@@ -74,32 +75,6 @@ def _tree_dot(left: PyTree, right: PyTree) -> jax.Array:
 
 def _tree_norm(value: PyTree, inner_product: InnerProduct) -> jax.Array:
     return jnp.sqrt(jnp.maximum(jnp.real(inner_product(value, value)), 0.0))
-
-
-def _eisenstat_walker_choice_2(
-    residual_norm: jax.Array,
-    previous_residual_norm: jax.Array,
-    previous_forcing: jax.Array,
-    *,
-    gamma: float,
-    alpha: float,
-    maximum: float,
-) -> jax.Array:
-    """Return the safeguarded Eisenstat--Walker choice 2 forcing term."""
-    dtype = residual_norm.dtype
-    safe_denominator = jnp.maximum(
-        previous_residual_norm, jnp.finfo(dtype).tiny
-    )
-    ratio = residual_norm / safe_denominator
-    candidate = gamma * ratio**alpha
-    safeguard = gamma * previous_forcing**alpha
-    candidate = jnp.where(
-        safeguard > 0.1, jnp.maximum(candidate, safeguard), candidate
-    )
-    candidate = jnp.nan_to_num(
-        candidate, nan=maximum, posinf=maximum, neginf=0.0
-    )
-    return jnp.clip(candidate, 0.0, maximum)
 
 
 def newton_krylov(
@@ -204,13 +179,14 @@ def newton_krylov(
 
         def update_fn(_):
             if forcing == "eisenstat_walker":
-                adaptive_forcing = _eisenstat_walker_choice_2(
+                adaptive_forcing = eisenstat_walker_forcing(
                     residual_norm,
                     previous_residual_norm,
                     previous_forcing,
                     gamma=forcing_gamma,
-                    alpha=forcing_alpha,
-                    maximum=forcing_max,
+                    power=forcing_alpha,
+                    eta_min=0.0,
+                    eta_max=forcing_max,
                 )
                 current_forcing = jnp.where(
                     newton_iterations == 0,

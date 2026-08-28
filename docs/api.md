@@ -15,6 +15,7 @@ api/eigen
 api/propagator
 api/pcg
 api/fixed_point
+api/nonlinear
 api/preconditioners
 api/implicit
 api/autodiff

@@ -236,6 +236,7 @@ within an order of magnitude of the limit as unconfirmed.
 | `solvax.pcg` | Matrix-free pytree PCG with preconditioning, fixed-shape residual history, and explicit convergence/breakdown status |
 | `solvax.fixed_point` | Plain and Aitken fixed-point loops, bounded-memory (condition-filtered) Anderson, and matrix-free affine fixed-point FGMRES |
 | `solvax.implicit` | Matrix-free `newton_krylov` (JFNK) plus implicit-function-theorem `linear_solve` and `root_solve` — gradients cost one extra (transposed) solve |
+| `solvax.nonlinear` | Pseudo-transient JFNK with Eisenstat--Walker forcing and hard admissibility backtracking, adaptive branch continuation, and pseudo-arclength bordered correction |
 | `solvax.autodiff` | Exact checkpointed recurrences plus bounded-memory chunked forward/reverse Jacobians with automatic sizing |
 | `solvax.refine` | Mixed-precision iterative refinement (float32 factor, float64 residuals) |
 | `solvax.native` / `native_eigen` | Host-side SuperLU and sparse shift-invert eigenpairs; eager primals compose with implicit eigenpair AD |
@@ -253,6 +254,12 @@ sol2 = sx.gcrot(matvec2, b2, precond=coarse_inverse, recycle=sol.recycle)
 # Matrix-free Newton-Krylov (JFNK): Jacobian-vector products via jax.linearize,
 # each correction solved by FGMRES over an array or structured pytree state.
 root = sx.newton_krylov(residual_fn, x0, precond=approx_inverse, rtol=1e-8)
+
+# Globalized root continuation with a pseudo-time metric and hard bounds.
+root = sx.pseudo_transient_continuation(
+    residual_fn, x0, mass=lambda state, value: value,
+    admissible=lambda x: jnp.all(jnp.isfinite(x)),
+)
 
 # Weakly contractive affine coupling map G(x) = L x + c, solved as (I - L) x = c:
 fixed = sx.affine_fixed_point_gmres(coupling_map, x0, restart=20)

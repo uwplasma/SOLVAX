@@ -80,6 +80,7 @@ solvers/elliptic
 solvers/krylov
 solvers/pcg
 solvers/fixed_point
+solvers/nonlinear
 ```
 
 ```{toctree}
