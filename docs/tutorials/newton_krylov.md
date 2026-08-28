@@ -98,7 +98,34 @@ the two flags together certify the result.
 `linear_rtol` sets how tightly each Newton correction is solved. A loose inner
 tolerance early (inexact Newton) avoids over-solving corrections far from the
 root; tightening it near convergence preserves the asymptotic Newton rate
-{cite}`knoll2004`. Because `max_steps`, `linear_restart`, and
+{cite}`knoll2004`. Select Eisenstat--Walker choice 2 to do that tightening from
+the observed nonlinear residuals {cite}`eisenstat1996`:
+
+$$
+\eta_k = \gamma
+\left(\frac{\lVert F(x_k)\rVert}{\lVert F(x_{k-1})\rVert}\right)^\alpha.
+$$
+
+```python
+adaptive = sx.newton_krylov(
+    residual,
+    u0,
+    precond=line_preconditioner,
+    rtol=1e-10,
+    linear_rtol=0.5,              # eta_0
+    forcing="eisenstat_walker",
+    forcing_gamma=0.9,
+    forcing_alpha=2.0,
+    forcing_max=0.9,
+)
+```
+
+SOLVAX applies the paper's safeguard
+$\eta_k\leftarrow\max(\eta_k,\gamma\eta_{k-1}^{\alpha})$ when the safeguard
+exceeds 0.1, then caps the result with `forcing_max < 1`. `linear_rtol` remains
+the tolerance for every step when `forcing="constant"` (the default), and is
+the first-step tolerance $\eta_0$ for the adaptive policy. Because `max_steps`,
+`linear_restart`, and
 `linear_max_restarts` are static, the whole solve compiles to a fixed shape and
 is safe under `jax.jit` and `jax.vmap`.
 

@@ -44,7 +44,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from functools import partial
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -53,6 +53,7 @@ from solvax.krylov import gmres
 
 PyTree = Any
 InnerProduct = Callable[[PyTree, PyTree], jax.Array]
+ForcingPolicy = Literal["constant", "eisenstat_walker"]
 
 
 class NewtonKrylovSolution(NamedTuple):
@@ -75,6 +76,32 @@ def _tree_norm(value: PyTree, inner_product: InnerProduct) -> jax.Array:
     return jnp.sqrt(jnp.maximum(jnp.real(inner_product(value, value)), 0.0))
 
 
+def _eisenstat_walker_choice_2(
+    residual_norm: jax.Array,
+    previous_residual_norm: jax.Array,
+    previous_forcing: jax.Array,
+    *,
+    gamma: float,
+    alpha: float,
+    maximum: float,
+) -> jax.Array:
+    """Return the safeguarded Eisenstat--Walker choice 2 forcing term."""
+    dtype = residual_norm.dtype
+    safe_denominator = jnp.maximum(
+        previous_residual_norm, jnp.finfo(dtype).tiny
+    )
+    ratio = residual_norm / safe_denominator
+    candidate = gamma * ratio**alpha
+    safeguard = gamma * previous_forcing**alpha
+    candidate = jnp.where(
+        safeguard > 0.1, jnp.maximum(candidate, safeguard), candidate
+    )
+    candidate = jnp.nan_to_num(
+        candidate, nan=maximum, posinf=maximum, neginf=0.0
+    )
+    return jnp.clip(candidate, 0.0, maximum)
+
+
 def newton_krylov(
     residual_fn: Callable[[PyTree], PyTree],
     x0: PyTree,
@@ -89,6 +116,10 @@ def newton_krylov(
     linear_rtol: float = 0.1,
     linear_atol: float = 0.0,
     linear_max_restarts: int = 10,
+    forcing: ForcingPolicy = "constant",
+    forcing_gamma: float = 0.9,
+    forcing_alpha: float = 2.0,
+    forcing_max: float = 0.9,
 ) -> NewtonKrylovSolution:
     """Solve a nonlinear system with matrix-free Newton--GMRES.
 
@@ -112,10 +143,37 @@ def newton_krylov(
         linear_rtol: GMRES relative residual tolerance for each Newton update.
         linear_atol: GMRES absolute residual tolerance.
         linear_max_restarts: maximum GMRES restart cycles per Newton update.
+        forcing: inner-tolerance policy. ``"constant"`` uses ``linear_rtol``
+            for every Newton update. ``"eisenstat_walker"`` uses
+            ``linear_rtol`` for the first update and safeguarded
+            Eisenstat--Walker choice 2 thereafter.
+        forcing_gamma: residual-ratio scale for Eisenstat--Walker choice 2.
+        forcing_alpha: residual-ratio exponent for Eisenstat--Walker choice 2.
+        forcing_max: strict upper bound on the adaptive forcing term.
 
     Returns:
         A :class:`NewtonKrylovSolution` with the final iterate and diagnostics.
+
+    References:
+        S. C. Eisenstat and H. F. Walker, "Choosing the Forcing Terms in an
+        Inexact Newton Method", SIAM J. Sci. Comput. 17, 16--32 (1996),
+        https://doi.org/10.1137/0917003.
     """
+    if forcing not in ("constant", "eisenstat_walker"):
+        raise ValueError(
+            "forcing must be 'constant' or 'eisenstat_walker', "
+            f"got {forcing!r}"
+        )
+    if forcing == "eisenstat_walker":
+        if not 0.0 <= linear_rtol < 1.0:
+            raise ValueError("linear_rtol must lie in [0, 1) for adaptive forcing")
+        if not 0.0 <= forcing_gamma < 1.0:
+            raise ValueError("forcing_gamma must lie in [0, 1)")
+        if not 1.0 < forcing_alpha <= 2.0:
+            raise ValueError("forcing_alpha must lie in (1, 2]")
+        if not 0.0 < forcing_max < 1.0:
+            raise ValueError("forcing_max must lie in (0, 1)")
+
     x0 = jax.tree.map(jnp.asarray, x0)
     inner_product = _tree_dot if inner_product is None else inner_product
     norm = (lambda value: _tree_norm(value, inner_product)) if norm is None else norm
@@ -127,7 +185,15 @@ def newton_krylov(
         return ~state[-1]
 
     def body_fun(state):
-        x, _, newton_iterations, linear_iterations, linear_converged, _ = state
+        (
+            x,
+            previous_residual_norm,
+            previous_forcing,
+            newton_iterations,
+            linear_iterations,
+            linear_converged,
+            _,
+        ) = state
         residual, jvp = jax.linearize(residual_fn, x)
         residual_norm = norm(residual)
         update = (
@@ -137,13 +203,30 @@ def newton_krylov(
         )
 
         def update_fn(_):
+            if forcing == "eisenstat_walker":
+                adaptive_forcing = _eisenstat_walker_choice_2(
+                    residual_norm,
+                    previous_residual_norm,
+                    previous_forcing,
+                    gamma=forcing_gamma,
+                    alpha=forcing_alpha,
+                    maximum=forcing_max,
+                )
+                current_forcing = jnp.where(
+                    newton_iterations == 0,
+                    jnp.asarray(linear_rtol, residual_norm.dtype),
+                    adaptive_forcing,
+                )
+            else:
+                current_forcing = jnp.asarray(linear_rtol, residual_norm.dtype)
+
             linear_solution = gmres(
                 jvp,
                 jax.tree.map(jnp.negative, residual),
                 precond=precond,
                 inner_product=inner_product,
                 restart=linear_restart,
-                rtol=linear_rtol,
+                rtol=current_forcing,
                 atol=linear_atol,
                 max_restarts=linear_max_restarts,
             )
@@ -152,7 +235,8 @@ def newton_krylov(
             )
             return (
                 next_x,
-                jnp.asarray(jnp.inf, residual_norm.dtype),
+                residual_norm,
+                current_forcing,
                 newton_iterations + 1,
                 linear_iterations + linear_solution.iterations,
                 linear_converged & linear_solution.converged,
@@ -163,6 +247,7 @@ def newton_krylov(
             return (
                 x,
                 residual_norm,
+                previous_forcing,
                 newton_iterations,
                 linear_iterations,
                 linear_converged,
@@ -175,14 +260,21 @@ def newton_krylov(
     initial = (
         x0,
         residual_norm0,
+        jnp.asarray(linear_rtol, residual_norm0.dtype),
         jnp.int32(0),
         jnp.int32(0),
         jnp.array(True),
         finished0,
     )
-    x, residual_norm, newton_iterations, linear_iterations, linear_converged, _ = (
-        jax.lax.while_loop(cond_fun, body_fun, initial)
-    )
+    (
+        x,
+        residual_norm,
+        _,
+        newton_iterations,
+        linear_iterations,
+        linear_converged,
+        _,
+    ) = jax.lax.while_loop(cond_fun, body_fun, initial)
     return NewtonKrylovSolution(
         x,
         residual_norm,
