@@ -280,7 +280,6 @@ def test_continuation_supports_descending_parameter_branches():
         lambda x, alpha: x - alpha,
         jnp.asarray([1.0]),
         alpha0=1.0,
-        nonlinear_config=_scalar_config(initial_dt=1.0),
         continuation_config=ContinuationConfig(target=-1.0, initial_step=0.5),
     )
     assert solution.converged

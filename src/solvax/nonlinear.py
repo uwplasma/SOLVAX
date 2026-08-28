@@ -46,7 +46,7 @@ class PseudoTransientConfig:
     rtol: float = 1.0e-8
     atol: float = 0.0
     max_steps: int = 40
-    initial_dt: float = 1.0e-2
+    initial_dt: float = 1.0
     min_dt: float = 1.0e-12
     max_dt: float = 1.0e12
     dt_growth: float = 5.0
