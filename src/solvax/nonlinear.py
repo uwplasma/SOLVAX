@@ -18,6 +18,7 @@ References
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, NamedTuple
@@ -29,6 +30,13 @@ from solvax.krylov import gmres
 
 PyTree = Any
 InnerProduct = Callable[[PyTree, PyTree], jax.Array]
+MassOperator = Callable[[PyTree, PyTree], PyTree]
+ShiftedPreconditioner = Callable[[PyTree, PyTree, jax.Array], PyTree]
+
+
+def _require_finite(name: str, *values: float) -> None:
+    if not all(map(math.isfinite, values)):
+        raise ValueError(f"{name} controls must be finite")
 
 
 @dataclass(frozen=True)
@@ -56,6 +64,24 @@ class PseudoTransientConfig:
     linear_max_restarts: int = 10
 
     def __post_init__(self) -> None:
+        _require_finite(
+            "solver",
+            self.rtol,
+            self.atol,
+            self.initial_dt,
+            self.min_dt,
+            self.max_dt,
+            self.dt_growth,
+            self.dt_shrink,
+            self.newton_switch,
+            self.armijo,
+            self.backtrack_factor,
+            self.eta_initial,
+            self.eta_min,
+            self.eta_max,
+            self.eta_gamma,
+            self.eta_power,
+        )
         if self.rtol < 0.0 or self.atol < 0.0:
             raise ValueError("nonlinear tolerances must be nonnegative")
         if self.max_steps < 0 or self.max_backtracks < 0:
@@ -121,8 +147,15 @@ class ContinuationConfig:
     max_stages: int = 100
 
     def __post_init__(self) -> None:
-        if self.target <= 0.0:
-            raise ValueError("target must be positive")
+        _require_finite(
+            "continuation",
+            self.target,
+            self.initial_step,
+            self.min_step,
+            self.max_step,
+            self.growth,
+            self.shrink,
+        )
         if not 0.0 < self.min_step <= self.initial_step <= self.max_step:
             raise ValueError("require 0 < min_step <= initial_step <= max_step")
         if self.growth <= 1.0 or not 0.0 < self.shrink < 1.0:
@@ -229,8 +262,8 @@ def pseudo_transient_continuation(
     residual_fn: Callable[[PyTree], PyTree],
     x0: PyTree,
     *,
-    mass: Callable[[PyTree], PyTree] | None = None,
-    precond: Callable[[PyTree, jax.Array], PyTree] | None = None,
+    mass: MassOperator | None = None,
+    precond: ShiftedPreconditioner | None = None,
     admissible: Callable[[PyTree], jax.Array] | None = None,
     inner_product: InnerProduct | None = None,
     norm: Callable[[PyTree], jax.Array] | None = None,
@@ -238,12 +271,12 @@ def pseudo_transient_continuation(
 ) -> PseudoTransientSolution:
     """Solve ``residual_fn(x)=0`` with globalized pseudo-transient JFNK.
 
-    ``mass`` applies the positive pseudo-time metric ``M`` (identity by
-    default).  ``precond(rhs, dtau)`` may use the current pseudo-time shift to
-    form a consistent right preconditioner.  ``admissible(candidate)`` is a
-    hard scalar predicate for physical conditions such as finite values,
-    positive Jacobian, bounds, or nestedness; a rejected candidate is
-    backtracked and never contaminates the iterate.
+    ``mass(x, vector)`` applies the positive pseudo-time metric ``M(x)``
+    (identity by default). ``precond(x, rhs, dtau)`` may use the current state
+    and pseudo-time shift to form a consistent right preconditioner.
+    ``admissible(candidate)`` is a hard scalar predicate for physical
+    conditions such as finite values, positive Jacobian, bounds, or nestedness;
+    a rejected candidate is backtracked and never contaminates the iterate.
 
     All nonlinear and linear limits are static, so the iteration is compatible
     with ``jax.jit`` and arbitrary matching pytrees.
@@ -251,7 +284,7 @@ def pseudo_transient_continuation(
 
     config = PseudoTransientConfig() if config is None else config
     x0 = jax.tree.map(jnp.asarray, x0)
-    mass = (lambda value: value) if mass is None else mass
+    mass = (lambda _state, value: value) if mass is None else mass
     inner_product = _tree_dot if inner_product is None else inner_product
     norm = (lambda value: _tree_norm(value, inner_product)) if norm is None else norm
     admissible = (lambda value: jnp.asarray(True)) if admissible is None else admissible
@@ -273,9 +306,8 @@ def pseudo_transient_continuation(
 
     initial = (
         x0,
-        residual0,
         residual_norm0,
-        residual_norm0,
+        jnp.asarray(False),
         jnp.asarray(float(config.eta_initial), dtype=real_dtype),
         jnp.asarray(float(config.initial_dt), dtype=real_dtype),
         jnp.int32(0),
@@ -293,17 +325,14 @@ def pseudo_transient_continuation(
     )
 
     def continue_iteration(state):
-        residual_norm, dt, steps = state[2], state[5], state[6]
-        at_minimum_dt = dt <= float(config.min_dt) * (1.0 + 4.0 * jnp.finfo(real_dtype).eps)
-        repeated_linear_failure = at_minimum_dt & (state[10] > 0)
-        return (steps < config.max_steps) & (residual_norm > tolerance) & ~repeated_linear_failure
+        residual_norm, terminal_linear_failure, steps = state[1], state[2], state[5]
+        return (steps < config.max_steps) & (residual_norm > tolerance) & ~terminal_linear_failure
 
     def iteration(state):
         (
             x,
-            residual,
             residual_norm,
-            previous_norm,
+            _,
             eta,
             dt,
             steps,
@@ -319,15 +348,15 @@ def pseudo_transient_continuation(
             accepted_history,
             linear_history,
         ) = state
-        _, jvp = jax.linearize(residual_fn, x)
+        linearized_residual, jvp = jax.linearize(residual_fn, x)
 
         def shifted_jacobian(value):
-            return jax.tree.map(lambda m, j: m / dt + j, mass(value), jvp(value))
+            return jax.tree.map(lambda m, j: m / dt + j, mass(x, value), jvp(value))
 
-        right_precond = None if precond is None else lambda value: precond(value, dt)
+        right_precond = None if precond is None else lambda value: precond(x, value, dt)
         linear = gmres(
             shifted_jacobian,
-            jax.tree.map(jnp.negative, residual),
+            jax.tree.map(jnp.negative, linearized_residual),
             precond=right_precond,
             inner_product=inner_product,
             restart=config.linear_restart,
@@ -337,13 +366,11 @@ def pseudo_transient_continuation(
         )
 
         def backtrack_condition(backtrack_state):
-            iteration_index, _, _, _, accepted, _ = backtrack_state
-            return (iteration_index <= config.max_backtracks) & ~accepted
+            iteration_index, _, _, accepted, _ = backtrack_state
+            return (iteration_index <= config.max_backtracks) & ~accepted & linear.converged
 
         def backtrack(backtrack_state):
-            iteration_index, best_x, best_residual, best_norm, accepted, step_length = (
-                backtrack_state
-            )
+            iteration_index, best_x, best_norm, accepted, step_length = backtrack_state
             candidate = _tree_add_scaled(x, linear.x, step_length)
             candidate_residual = residual_fn(candidate)
             candidate_norm = norm(candidate_residual)
@@ -361,7 +388,6 @@ def pseudo_transient_continuation(
             return (
                 iteration_index + 1,
                 _tree_select(take, candidate, best_x),
-                _tree_select(take, candidate_residual, best_residual),
                 jnp.where(take, candidate_norm, best_norm),
                 accepted | valid,
                 step_length * float(config.backtrack_factor),
@@ -370,22 +396,18 @@ def pseudo_transient_continuation(
         backtrack_initial = (
             jnp.int32(0),
             x,
-            residual,
             residual_norm,
             jnp.asarray(False),
             jnp.asarray(1.0, dtype=real_dtype),
         )
         backtrack_result = jax.lax.while_loop(backtrack_condition, backtrack, backtrack_initial)
-        attempts, candidate_x, candidate_residual, candidate_norm, accepted, next_trial_length = (
-            backtrack_result
-        )
+        attempts, candidate_x, candidate_norm, accepted, next_trial_length = backtrack_result
         used_length = jnp.where(
             accepted,
             next_trial_length / float(config.backtrack_factor),
             jnp.asarray(0.0, dtype=real_dtype),
         )
         next_x = _tree_select(accepted, candidate_x, x)
-        next_residual = _tree_select(accepted, candidate_residual, residual)
         next_norm = jnp.where(accepted, candidate_norm, residual_norm)
         ratio = residual_norm / jnp.maximum(candidate_norm, jnp.finfo(real_dtype).tiny)
         ser_factor = jnp.clip(ratio, float(config.dt_shrink), float(config.dt_growth))
@@ -411,6 +433,8 @@ def pseudo_transient_continuation(
             jnp.minimum(float(config.eta_max), jnp.maximum(eta, float(config.eta_initial))),
         )
         next_step = steps + 1
+        at_minimum_dt = dt <= float(config.min_dt) * (1.0 + 4.0 * jnp.finfo(real_dtype).eps)
+        terminal_linear_failure = at_minimum_dt & ~linear.converged
         residual_history = residual_history.at[next_step].set(next_norm)
         dt_history = dt_history.at[next_step].set(next_dt)
         eta_history = eta_history.at[next_step].set(next_eta)
@@ -419,9 +443,8 @@ def pseudo_transient_continuation(
         linear_history = linear_history.at[next_step].set(linear.iterations)
         return (
             next_x,
-            next_residual,
             next_norm,
-            jnp.where(accepted, residual_norm, previous_norm),
+            terminal_linear_failure,
             next_eta,
             next_dt,
             next_step,
@@ -441,9 +464,8 @@ def pseudo_transient_continuation(
     final = jax.lax.while_loop(continue_iteration, iteration, initial)
     (
         x,
-        _,
         residual_norm,
-        _,
+        terminal_linear_failure,
         eta,
         dt,
         steps,
@@ -460,9 +482,6 @@ def pseudo_transient_continuation(
         linear_history,
     ) = final
     converged = residual_norm <= tolerance
-    minimum_dt_failure = (dt <= float(config.min_dt) * (1.0 + 4.0 * jnp.finfo(real_dtype).eps)) & (
-        linear_failures > 0
-    )
     return PseudoTransientSolution(
         x=x,
         residual_norm=residual_norm,
@@ -473,7 +492,7 @@ def pseudo_transient_continuation(
         linear_failures=linear_failures,
         residual_evaluations=residual_evaluations,
         converged=converged,
-        linear_converged=~minimum_dt_failure,
+        linear_converged=~terminal_linear_failure,
         pseudo_dt=dt,
         eta=eta,
         history=PseudoTransientHistory(
@@ -494,8 +513,8 @@ def adaptive_continuation(
     alpha0: float = 0.0,
     nonlinear_config: PseudoTransientConfig | None = None,
     continuation_config: ContinuationConfig | None = None,
-    mass: Callable[[PyTree], PyTree] | None = None,
-    precond: Callable[[PyTree, jax.Array], PyTree] | None = None,
+    mass: MassOperator | None = None,
+    precond: ShiftedPreconditioner | None = None,
     admissible: Callable[[PyTree, float], jax.Array] | None = None,
     accept_stage: Callable[[PyTree, float, PseudoTransientSolution], bool] | None = None,
     inner_product: InnerProduct | None = None,
@@ -514,17 +533,18 @@ def adaptive_continuation(
         ContinuationConfig() if continuation_config is None else continuation_config
     )
     alpha = float(alpha0)
-    if not 0.0 <= alpha <= continuation_config.target:
-        raise ValueError("alpha0 must lie between zero and the continuation target")
+    if not math.isfinite(alpha):
+        raise ValueError("alpha0 must be finite")
+    direction = 1.0 if continuation_config.target >= alpha else -1.0
     x = x0
     step_size = float(continuation_config.initial_step)
     records: list[ContinuationStep] = []
     last_solution: PseudoTransientSolution | None = None
 
     for _ in range(continuation_config.max_stages):
-        if alpha >= continuation_config.target:
+        if direction * (continuation_config.target - alpha) <= 0.0:
             break
-        trial_alpha = min(continuation_config.target, alpha + step_size)
+        trial_alpha = alpha + direction * min(abs(continuation_config.target - alpha), step_size)
 
         def stage_residual(candidate, alpha: float = trial_alpha):
             return residual_fn(candidate, alpha)
@@ -579,7 +599,7 @@ def adaptive_continuation(
     return ContinuationSolution(
         x=x,
         alpha=alpha,
-        converged=alpha >= continuation_config.target,
+        converged=direction * (continuation_config.target - alpha) <= 0.0,
         steps=tuple(records),
         last_nonlinear=last_solution,
     )

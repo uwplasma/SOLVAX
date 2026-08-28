@@ -31,8 +31,8 @@ config = sx.PseudoTransientConfig(
 solution = sx.pseudo_transient_continuation(
     residual,
     initial,
-    mass=mass_action,
-    precond=lambda rhs, dt: shifted_preconditioner(rhs, dt),
+    mass=lambda x, vector: mass_action(x, vector),
+    precond=lambda x, rhs, dt: shifted_preconditioner(x, rhs, dt),
     admissible=lambda x: jnp.all(jnp.isfinite(x)) & (minimum_jacobian(x) > 0),
     config=config,
 )
@@ -49,6 +49,11 @@ residual evaluations, total Krylov work, the final pseudo-time and forcing
 term, and fixed-size histories of residual, pseudo-time, forcing, step length,
 acceptance, and Krylov iterations. Inspect `converged` and `linear_converged`;
 neither is inferred from a stale model residual.
+
+Both the mass action and right preconditioner receive the current nonlinear
+state. They may therefore update a matrix-free metric or low-order shifted
+factor without global mutable state. The pseudo-time step is also passed to the
+preconditioner so its shift matches the Krylov operator.
 
 ## Inexact Newton forcing
 
@@ -93,6 +98,10 @@ rejection leaves `(x, alpha)` unchanged and shrinks it. Every attempt is a
 linear work, final residual, and minimum pseudo-time. If the step crosses
 `min_step`, the driver returns an unconverged result rather than changing
 solver families or silently accepting a branch jump.
+
+`target` may lie on either side of `alpha0`; step-size controls are positive
+magnitudes, while each recorded `ContinuationStep.step_size` carries the
+signed direction of travel.
 
 This orchestration is deliberately host-side because `accept_stage` may read a
 separate de-aliased certificate or other application diagnostics. The stage

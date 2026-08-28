@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -97,10 +99,12 @@ def test_pytree_mass_preconditioner_and_custom_norm():
             "v": 2.0 * state["v"] - rhs["v"],
         }
 
-    def mass(value):
+    def mass(state, value):
+        del state
         return {"u": 2.0 * value["u"], "v": 0.5 * value["v"]}
 
-    def precond(value, dt):
+    def precond(state, value, dt):
+        del state
         return {
             "u": value["u"] / (4.0 + 2.0 / dt),
             "v": value["v"] / (2.0 + 0.5 / dt),
@@ -123,7 +127,7 @@ def test_pytree_mass_preconditioner_and_custom_norm():
 
 
 def test_linear_failure_at_minimum_dt_is_reported_without_false_convergence():
-    zero_mass = lambda value: jax.tree.map(jnp.zeros_like, value)  # noqa: E731
+    zero_mass = lambda state, value: jax.tree.map(jnp.zeros_like, value)  # noqa: E731
     solution = pseudo_transient_continuation(
         lambda x: jnp.ones_like(x),
         jnp.asarray([0.0, 0.0]),
@@ -141,6 +145,29 @@ def test_linear_failure_at_minimum_dt_is_reported_without_false_convergence():
     assert not bool(solution.linear_converged)
     assert int(solution.linear_failures) == 1
     assert int(solution.rejected_steps) == 1
+    assert int(solution.residual_evaluations) == 2
+
+
+def test_recovered_linear_failure_does_not_poison_later_steps(monkeypatch):
+    def staged_gmres(operator, rhs, **kwargs):
+        del kwargs
+        scale = operator(jnp.ones_like(rhs))[0]
+        return SimpleNamespace(
+            x=rhs / scale,
+            converged=scale > 3.0,
+            iterations=jnp.int32(1),
+        )
+
+    monkeypatch.setattr(nonlinear_module, "gmres", staged_gmres)
+    solution = pseudo_transient_continuation(
+        lambda x: x - 1.0,
+        jnp.asarray([0.0]),
+        config=_scalar_config(rtol=1.0e-2, initial_dt=1.0, min_dt=0.25, dt_shrink=0.25),
+    )
+    assert bool(solution.converged)
+    assert bool(solution.linear_converged)
+    assert int(solution.linear_failures) > 0
+    assert int(solution.accepted_steps) > 0
 
 
 def test_zero_residual_and_zero_step_budget_finish_without_linear_work():
@@ -248,6 +275,20 @@ def test_continuation_stops_when_rejections_cross_minimum_step():
     assert len(solution.steps) == 3
 
 
+def test_continuation_supports_descending_parameter_branches():
+    solution = adaptive_continuation(
+        lambda x, alpha: x - alpha,
+        jnp.asarray([1.0]),
+        alpha0=1.0,
+        nonlinear_config=_scalar_config(initial_dt=1.0),
+        continuation_config=ContinuationConfig(target=-1.0, initial_step=0.5),
+    )
+    assert solution.converged
+    assert solution.alpha == pytest.approx(-1.0)
+    np.testing.assert_allclose(solution.x, -1.0, atol=2e-10)
+    assert all(step.step_size < 0.0 for step in solution.steps)
+
+
 def test_pseudo_arclength_bordered_residual_and_corrector():
     residual = lambda x, alpha: jnp.asarray([x[0] ** 2 + alpha - 1.0])  # noqa: E731
     # The sign of a branch tangent is arbitrary; this orientation gives the
@@ -276,6 +317,7 @@ def test_pseudo_arclength_bordered_residual_and_corrector():
 @pytest.mark.parametrize(
     "updates,match",
     [
+        ({"rtol": float("nan")}, "finite"),
         ({"rtol": -1.0}, "tolerances"),
         ({"max_steps": -1}, "iteration limits"),
         ({"min_dt": 2.0}, "min_dt"),
@@ -296,7 +338,7 @@ def test_pseudo_transient_config_validation(updates, match):
 @pytest.mark.parametrize(
     "updates,match",
     [
-        ({"target": 0.0}, "target"),
+        ({"target": float("nan")}, "finite"),
         ({"min_step": 0.2}, "min_step"),
         ({"growth": 1.0}, "growth"),
         ({"max_stages": 0}, "stage limits"),
@@ -314,5 +356,5 @@ def test_invalid_structures_empty_trees_and_alpha_are_rejected():
         pseudo_transient_continuation(lambda x: x, {})
     with pytest.raises(ValueError, match="at least one"):
         nonlinear_module._tree_finite({})
-    with pytest.raises(ValueError, match="alpha0"):
-        adaptive_continuation(lambda x, alpha: x, jnp.ones(1), alpha0=2.0)
+    with pytest.raises(ValueError, match="finite"):
+        adaptive_continuation(lambda x, alpha: x, jnp.ones(1), alpha0=float("nan"))
