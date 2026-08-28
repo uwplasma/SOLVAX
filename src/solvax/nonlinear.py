@@ -174,6 +174,7 @@ class ContinuationStep:
     accepted: bool
     nonlinear_steps: int
     linear_iterations: int
+    residual_evaluations: int
     residual_norm: float
     minimum_pseudo_dt: float
 
@@ -580,6 +581,7 @@ def adaptive_continuation(
                 accepted=accepted,
                 nonlinear_steps=int(solution.steps),
                 linear_iterations=int(solution.linear_iterations),
+                residual_evaluations=int(solution.residual_evaluations),
                 residual_norm=float(solution.residual_norm),
                 minimum_pseudo_dt=minimum_dt,
             )

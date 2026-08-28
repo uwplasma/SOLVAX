@@ -95,7 +95,7 @@ branch = sx.adaptive_continuation(
 Fast stages grow the parameter step; nonlinear failure or a validation-gate
 rejection leaves `(x, alpha)` unchanged and shrinks it. Every attempt is a
 `ContinuationStep` containing the old/new parameter, acceptance, nonlinear and
-linear work, final residual, and minimum pseudo-time. If the step crosses
+linear work, residual evaluations, final residual, and minimum pseudo-time. If the step crosses
 `min_step`, the driver returns an unconverged result rather than changing
 solver families or silently accepting a branch jump.
 

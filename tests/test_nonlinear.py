@@ -252,6 +252,10 @@ def test_adaptive_continuation_records_rejection_then_reaches_target():
     assert not solution.steps[0].accepted
     assert any(step.accepted for step in solution.steps[1:])
     assert solution.steps[1].step_size < solution.steps[0].step_size
+    assert all(
+        step.residual_evaluations >= step.nonlinear_steps + 1
+        for step in solution.steps
+    )
     assert solution.last_nonlinear is not None
 
 
