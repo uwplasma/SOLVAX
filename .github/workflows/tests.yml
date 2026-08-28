@@ -82,16 +82,12 @@ jobs:
             label: ubuntu-3.10-minimum
             suite: compatibility
             coverage: false
-            files: tests
-            pytest_args: -m "not slow_examples"
           - os: macos-latest
             python: "3.12"
             stack: current
             label: macos-3.12-current
             suite: compatibility
             coverage: false
-            files: tests
-            pytest_args: -m "not slow_examples"
           - os: ubuntu-latest
             python: "3.12"
             stack: adv
@@ -103,6 +99,17 @@ jobs:
               tests/test_external_api_contract.py
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
+    env:
+      # Exhaustive tests and exact combined coverage belong to the two current
+      # Linux shards above. Compatibility axes exercise every runtime-facing
+      # solver family and JAX transformation seam without duplicating the
+      # costly property, benchmark, and documentation suites on each platform.
+      COMPATIBILITY_FILES: >-
+        tests/test_packaging.py tests/test_external_api_contract.py
+        tests/test_tridiagonal.py tests/test_direct.py tests/test_krylov.py
+        tests/test_pcg.py tests/test_nonlinear.py tests/test_implicit.py
+        tests/test_autodiff.py tests/test_fixed_point.py tests/test_precond.py
+        tests/test_multigrid.py tests/test_eigen.py tests/test_sharding.py
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -135,7 +142,7 @@ jobs:
             --cov --cov-report= --cov-fail-under=0
       - name: Run compatibility suite
         if: matrix.coverage == false
-        run: pytest -n auto ${{ matrix.files }} ${{ matrix.pytest_args }}
+        run: pytest -n auto $COMPATIBILITY_FILES
       - name: Benchmark problem-suite verification
         if: matrix.suite == 'current-1'
         run: python -m benchmarks.benchmark_sweeps --verify
