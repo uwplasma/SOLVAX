@@ -257,7 +257,7 @@ root = sx.newton_krylov(residual_fn, x0, precond=approx_inverse, rtol=1e-8)
 
 # Globalized root continuation with a pseudo-time metric and hard bounds.
 root = sx.pseudo_transient_continuation(
-    residual_fn, x0, mass=lambda value: value,
+    residual_fn, x0, mass=lambda state, value: value,
     admissible=lambda x: jnp.all(jnp.isfinite(x)),
 )
 
