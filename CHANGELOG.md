@@ -7,6 +7,7 @@
 - Added JIT-able pseudo-transient JFNK with a user metric, shifted
   preconditioner, hard admissibility/backtracking gates, switched-evolution
   pseudo-time updates, and safeguarded Eisenstat--Walker forcing.
+- Shared the public forcing primitive with adaptive ordinary Newton--Krylov.
 - Added fixed-size true-residual histories and explicit accepted/rejected,
   nonlinear-evaluation, linear-failure, and Krylov-work diagnostics.
 - Added host-orchestrated adaptive branch continuation with complete stage

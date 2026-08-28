@@ -199,17 +199,29 @@ def eisenstat_walker_forcing(
     """Safeguarded Eisenstat--Walker forcing term for an inexact Newton step.
 
     The ratio rule tightens the linear tolerance as nonlinear convergence
-    accelerates.  The lower safeguard ``gamma*eta_previous**power`` prevents a
-    single unusually good step from requesting a needlessly exact next solve.
+    accelerates.  Eisenstat--Walker choice 2 applies the published lower
+    safeguard when ``gamma*eta_previous**power > 0.1``.  ``eta_min`` adds an
+    application floor for finite-work pseudo-transient stages.
     """
 
     residual_norm = jnp.asarray(residual_norm)
     previous_residual_norm = jnp.asarray(previous_residual_norm)
     previous_eta = jnp.asarray(previous_eta)
-    safe_previous = jnp.where(previous_residual_norm > 0.0, previous_residual_norm, 1.0)
+    dtype = residual_norm.dtype
+    safe_previous = jnp.maximum(previous_residual_norm, jnp.finfo(dtype).tiny)
     ratio_eta = float(gamma) * (residual_norm / safe_previous) ** float(power)
     safeguard = float(gamma) * previous_eta ** float(power)
-    candidate = jnp.maximum(ratio_eta, safeguard)
+    candidate = jnp.where(
+        safeguard > 0.1,
+        jnp.maximum(ratio_eta, safeguard),
+        ratio_eta,
+    )
+    candidate = jnp.nan_to_num(
+        candidate,
+        nan=float(eta_max),
+        posinf=float(eta_max),
+        neginf=float(eta_min),
+    )
     return jnp.clip(candidate, float(eta_min), float(eta_max))
 
 

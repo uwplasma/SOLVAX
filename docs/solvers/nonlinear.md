@@ -57,9 +57,14 @@ Each correction uses a safeguarded Eisenstat--Walker tolerance
 
 $$
 \eta_{k+1}=\operatorname{clip}\left(
-\max\left[\gamma\left(\frac{\|F_{k+1}\|}{\|F_k\|}\right)^p,
-          \gamma\eta_k^p\right],\eta_{\min},\eta_{\max}\right).
+\widehat\eta_{k+1},\eta_{\min},\eta_{\max}\right),\qquad
+\widehat\eta_{k+1}=\gamma
+\left(\frac{\|F_{k+1}\|}{\|F_k\|}\right)^p,
 $$
+
+with the Eisenstat--Walker choice-2 safeguard
+$\widehat\eta_{k+1}\leftarrow\max(\widehat\eta_{k+1},\gamma\eta_k^p)$
+when $\gamma\eta_k^p>0.1$.
 
 Early linear systems are not solved to the final nonlinear tolerance. The
 history records the forcing term and Krylov iterations, while
