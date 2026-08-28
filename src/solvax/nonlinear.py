@@ -21,6 +21,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, NamedTuple
 
 import jax
@@ -507,6 +508,49 @@ def pseudo_transient_continuation(
     )
 
 
+@partial(
+    jax.jit,
+    static_argnames=(
+        "residual_fn",
+        "mass",
+        "precond",
+        "admissible",
+        "inner_product",
+        "norm",
+        "config",
+    ),
+)
+def _parameterized_pseudo_transient_continuation(
+    residual_fn: Callable[[PyTree, jax.Array], PyTree],
+    x0: PyTree,
+    parameter: jax.Array,
+    *,
+    mass: MassOperator | None,
+    precond: ShiftedPreconditioner | None,
+    admissible: Callable[[PyTree, jax.Array], jax.Array] | None,
+    inner_product: InnerProduct | None,
+    norm: Callable[[PyTree], jax.Array] | None,
+    config: PseudoTransientConfig,
+) -> PseudoTransientSolution:
+    """Compile one reusable nonlinear stage with a dynamic parameter."""
+
+    stage_admissible = (
+        None
+        if admissible is None
+        else lambda candidate: admissible(candidate, parameter)
+    )
+    return pseudo_transient_continuation(
+        lambda candidate: residual_fn(candidate, parameter),
+        x0,
+        mass=mass,
+        precond=precond,
+        admissible=stage_admissible,
+        inner_product=inner_product,
+        norm=norm,
+        config=config,
+    )
+
+
 def adaptive_continuation(
     residual_fn: Callable[[PyTree, float], PyTree],
     x0: PyTree,
@@ -547,22 +591,13 @@ def adaptive_continuation(
             break
         trial_alpha = alpha + direction * min(abs(continuation_config.target - alpha), step_size)
 
-        def stage_residual(candidate, alpha: float = trial_alpha):
-            return residual_fn(candidate, alpha)
-
-        if admissible is None:
-            stage_admissible = None
-        else:
-
-            def stage_admissible(candidate, alpha: float = trial_alpha):
-                return admissible(candidate, alpha)
-
-        solution = pseudo_transient_continuation(
-            stage_residual,
+        solution = _parameterized_pseudo_transient_continuation(
+            residual_fn,
             x,
+            jnp.asarray(trial_alpha),
             mass=mass,
             precond=precond,
-            admissible=stage_admissible,
+            admissible=admissible,
             inner_product=inner_product,
             norm=norm,
             config=nonlinear_config,
