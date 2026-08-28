@@ -107,6 +107,7 @@ pythonpath = ["src"]
 
 [tool.coverage.run]
 source = ["src/solvax"]
+branch = true
 
 [tool.coverage.report]
 fail_under = 95
