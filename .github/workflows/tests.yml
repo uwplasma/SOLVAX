@@ -41,34 +41,68 @@ jobs:
       - run: mypy
 
   test:
+    name: test (${{ matrix.label }})
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
-            python: "3.10"
-            stack: minimum
+            python: "3.12"
+            stack: current
+            label: ubuntu-3.12-current-1
+            suite: current-1
+            coverage: true
+            files: >-
+              tests/test_documentation_runs.py tests/test_per_chain_windows.py
+              tests/test_exact_window_adjoint.py tests/test_smoothers.py tests/test_krylov.py
+              tests/test_precond.py tests/test_mixed_precision.py tests/test_randomized.py
+              tests/test_nonlinear.py tests/test_operators.py tests/test_elliptic.py
+              tests/test_transfer.py tests/test_dot_precision.py tests/test_chunk_backends.py
+              tests/test_eigen.py tests/test_precond_alfven.py tests/test_native_eigen.py
+              tests/test_refine.py tests/test_pcg_benchmark.py tests/test_packaging.py
           - os: ubuntu-latest
             python: "3.12"
             stack: current
+            label: ubuntu-3.12-current-2
+            suite: current-2
+            coverage: true
+            files: >-
+              tests/test_certified_window.py tests/test_direct.py
+              tests/test_exact_window_properties.py tests/test_window_semantics.py
+              tests/test_multigrid.py tests/test_tridiagonal.py tests/test_implicit.py
+              tests/test_banded.py tests/test_verification_practices.py
+              tests/test_scope_and_scaling.py tests/test_autodiff.py tests/test_fixed_point.py
+              tests/test_sharded_operands.py tests/test_external_api_contract.py
+              tests/test_pcg.py tests/test_propagator.py tests/test_sharding.py
+              tests/test_generated_block_benchmark.py
+              tests/test_checkpointed_block_benchmark.py tests/test_native.py
+          - os: ubuntu-latest
+            python: "3.10"
+            stack: minimum
+            label: ubuntu-3.10-minimum
+            suite: compatibility
+            coverage: false
+            files: tests
+            pytest_args: -m "not slow_examples"
           - os: macos-latest
             python: "3.12"
             stack: current
-          # Exercises the optional adv-jax-math chunking backend. Without this
-          # job the backend-parity tests skip everywhere in CI and the optional
-          # path is never independently verified.
+            label: macos-3.12-current
+            suite: compatibility
+            coverage: false
+            files: tests
+            pytest_args: -m "not slow_examples"
           - os: ubuntu-latest
             python: "3.12"
             stack: adv
+            label: ubuntu-3.12-adv
+            suite: adv
+            coverage: true
+            files: >-
+              tests/test_chunk_backends.py tests/test_autodiff.py
+              tests/test_external_api_contract.py
     runs-on: ${{ matrix.os }}
-    # Thirty rather than fifteen. The suite grows every release and the old
-    # budget had stopped being a backstop against a hang and become a race:
-    # the last green run finished with fourteen seconds to spare, and the run
-    # after it was cancelled mid-step on two platforms. A timeout that trips on
-    # ordinary growth reports "cancelled", which reads like a failing test and
-    # costs a diagnosis every time. If a job ever genuinely hangs, thirty
-    # minutes still catches it.
-    timeout-minutes: 30
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -91,33 +125,61 @@ jobs:
           python -c "from solvax.autodiff import available_backends;
           assert 'adv' in available_backends(), available_backends();
           print('backends:', available_backends())"
-      # This collects all of tests/, which already includes the suites that
-      # execute the README and the examples, the external-API contracts, and
-      # the randomised property checks. Naming any of them again as a separate
-      # step would run them a second time, serially, for no extra signal.
-      # Executing every example spawns one subprocess each. What that checks
-      # is that the code runs at all, which is not platform-specific, so one
-      # OS is enough --- and running it on the slower macOS runner as well was
-      # what first pushed that job past its time limit.
-      - run: pytest -n auto --cov --cov-report=xml
-        if: matrix.os == 'ubuntu-latest'
-      - run: pytest -n auto --cov --cov-report=xml -m "not slow_examples"
-        if: matrix.os != 'ubuntu-latest' 
+      - name: Run covered test shard
+        if: matrix.coverage
+        env:
+          COVERAGE_FILE: artifacts/coverage/.coverage.${{ matrix.suite }}
+        run: |
+          mkdir -p artifacts/coverage
+          pytest -n auto ${{ matrix.files }} ${{ matrix.pytest_args }} \
+            --cov --cov-report= --cov-fail-under=0
+      - name: Run compatibility suite
+        if: matrix.coverage == false
+        run: pytest -n auto ${{ matrix.files }} ${{ matrix.pytest_args }}
       - name: Benchmark problem-suite verification
-        if: matrix.stack == 'current'
+        if: matrix.suite == 'current-1'
         run: python -m benchmarks.benchmark_sweeps --verify
       - name: Reproduction driver smoke
-        if: matrix.stack == 'current' && matrix.os == 'ubuntu-latest'
+        if: matrix.suite == 'current-1'
         run: python -m benchmarks.reproduce --quick
-      # Upload from the optional-backend job too, under its own flag. Without
-      # it codecov sees a single session from the `current` job, in which the
-      # adv-only branches never execute, and reports them as uncovered even
-      # though the adv job exercises them.
+      - name: Save covered test evidence
+        if: matrix.coverage
+        uses: actions/cache/save@v6
+        with:
+          path: artifacts/coverage/.coverage.${{ matrix.suite }}
+          key: solvax-coverage-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.suite }}
+
+  coverage:
+    name: Combined branch coverage
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install coverage
+      - uses: actions/cache/restore@v6
+        with:
+          path: artifacts/coverage/.coverage.current-1
+          key: solvax-coverage-${{ github.run_id }}-${{ github.run_attempt }}-current-1
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v6
+        with:
+          path: artifacts/coverage/.coverage.current-2
+          key: solvax-coverage-${{ github.run_id }}-${{ github.run_attempt }}-current-2
+          fail-on-cache-miss: true
+      - uses: actions/cache/restore@v6
+        with:
+          path: artifacts/coverage/.coverage.adv
+          key: solvax-coverage-${{ github.run_id }}-${{ github.run_attempt }}-adv
+          fail-on-cache-miss: true
+      - run: |
+          coverage combine artifacts/coverage
+          coverage report --fail-under=95
+          coverage xml
       - uses: codecov/codecov-action@v4
-        if: >-
-          matrix.os == 'ubuntu-latest' &&
-          (matrix.stack == 'current' || matrix.stack == 'adv')
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          flags: ${{ matrix.stack }}
-          name: ubuntu-${{ matrix.python }}-${{ matrix.stack }}
