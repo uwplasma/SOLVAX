@@ -121,9 +121,10 @@ $$
 solver. `pseudo_arclength_corrector` applies the pseudo-transient solver when
 the chosen tangent orientation gives a stable pseudo-time evolution. Tangent
 sign is mathematically arbitrary but matters to that evolution; reverse it if
-the bordered Jacobian has negative-real modes. Applications with an explicit
-bordered Schur preconditioner may pass the residual directly to their own
-Newton--Krylov corrector.
+the bordered Jacobian has negative-real modes. Applications may pass bordered
+`mass`, `precond`, `inner_product`, and `norm` callables directly; these act on
+the complete `(x, alpha)` state, so a Schur or block elimination can reuse the
+application's physical preconditioner.
 
 ## Selection boundary
 

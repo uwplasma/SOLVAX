@@ -303,6 +303,11 @@ def test_pseudo_arclength_bordered_residual_and_corrector():
         tangent=tangent,
         predictor=predictor,
         admissible=lambda x, alpha: (x[0] >= 0.0) & (alpha >= 0.0),
+        mass=lambda state, vector: vector,
+        precond=lambda state, rhs, dt: rhs,
+        norm=lambda state: jnp.sqrt(
+            jnp.vdot(state[0], state[0]).real + state[1] ** 2
+        ),
         config=_scalar_config(initial_dt=1.0, linear_restart=4),
     )
     assert bool(solution.converged)

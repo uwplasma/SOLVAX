@@ -632,8 +632,30 @@ def pseudo_arclength_corrector(
     predictor: tuple[PyTree, jax.Array],
     config: PseudoTransientConfig | None = None,
     admissible: Callable[[PyTree, jax.Array], jax.Array] | None = None,
+    mass: Callable[
+        [tuple[PyTree, jax.Array], tuple[PyTree, jax.Array]],
+        tuple[PyTree, jax.Array],
+    ]
+    | None = None,
+    precond: Callable[
+        [
+            tuple[PyTree, jax.Array],
+            tuple[PyTree, jax.Array],
+            jax.Array,
+        ],
+        tuple[PyTree, jax.Array],
+    ]
+    | None = None,
+    inner_product: InnerProduct | None = None,
+    norm: Callable[[tuple[PyTree, jax.Array]], jax.Array] | None = None,
 ) -> PseudoTransientSolution:
-    """Correct one predictor on a fold-capable pseudo-arclength branch."""
+    """Correct one predictor on a fold-capable pseudo-arclength branch.
+
+    ``mass(state, vector)`` and ``precond(state, rhs, dtau)`` act on the
+    complete bordered ``(x, alpha)`` state.  This lets applications supply a
+    Schur or block bordered preconditioner without reimplementing the
+    pseudo-transient globalization.
+    """
 
     bordered = lambda state: pseudo_arclength_residual(  # noqa: E731
         residual_fn, state, tangent=tangent, predictor=predictor
@@ -644,7 +666,11 @@ def pseudo_arclength_corrector(
     return pseudo_transient_continuation(
         bordered,
         initial,
+        mass=mass,
+        precond=precond,
         admissible=bordered_admissible,
+        inner_product=inner_product,
+        norm=norm,
         config=config,
     )
 
