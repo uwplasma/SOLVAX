@@ -105,7 +105,12 @@ signed direction of travel.
 
 This orchestration is deliberately host-side because `accept_stage` may read a
 separate de-aliased certificate or other application diagnostics. The stage
-solve itself remains compatible with `jax.jit`.
+solve itself remains compatible with `jax.jit`. SOLVAX keeps the continuation
+parameter dynamic inside one compiled stage executable, so changing `alpha`
+does not force one compilation per attempt. Applications whose approximate
+inverse changes along the branch can supply `parameterized_precond(state,
+rhs, dtau, alpha)`; it is mutually exclusive with the parameter-independent
+`precond` argument.
 
 ## Folds and pseudo-arclength
 

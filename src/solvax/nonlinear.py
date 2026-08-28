@@ -33,6 +33,9 @@ PyTree = Any
 InnerProduct = Callable[[PyTree, PyTree], jax.Array]
 MassOperator = Callable[[PyTree, PyTree], PyTree]
 ShiftedPreconditioner = Callable[[PyTree, PyTree, jax.Array], PyTree]
+ParameterizedPreconditioner = Callable[
+    [PyTree, PyTree, jax.Array, jax.Array], PyTree
+]
 
 
 def _require_finite(name: str, *values: float) -> None:
@@ -514,6 +517,7 @@ def pseudo_transient_continuation(
         "residual_fn",
         "mass",
         "precond",
+        "parameterized_precond",
         "admissible",
         "inner_product",
         "norm",
@@ -527,6 +531,7 @@ def _parameterized_pseudo_transient_continuation(
     *,
     mass: MassOperator | None,
     precond: ShiftedPreconditioner | None,
+    parameterized_precond: ParameterizedPreconditioner | None,
     admissible: Callable[[PyTree, jax.Array], jax.Array] | None,
     inner_product: InnerProduct | None,
     norm: Callable[[PyTree], jax.Array] | None,
@@ -539,11 +544,18 @@ def _parameterized_pseudo_transient_continuation(
         if admissible is None
         else lambda candidate: admissible(candidate, parameter)
     )
+    stage_precond = (
+        precond
+        if parameterized_precond is None
+        else lambda state, rhs, dtau: parameterized_precond(
+            state, rhs, dtau, parameter
+        )
+    )
     return pseudo_transient_continuation(
         lambda candidate: residual_fn(candidate, parameter),
         x0,
         mass=mass,
-        precond=precond,
+        precond=stage_precond,
         admissible=stage_admissible,
         inner_product=inner_product,
         norm=norm,
@@ -560,6 +572,7 @@ def adaptive_continuation(
     continuation_config: ContinuationConfig | None = None,
     mass: MassOperator | None = None,
     precond: ShiftedPreconditioner | None = None,
+    parameterized_precond: ParameterizedPreconditioner | None = None,
     admissible: Callable[[PyTree, float], jax.Array] | None = None,
     accept_stage: Callable[[PyTree, float, PseudoTransientSolution], bool] | None = None,
     inner_product: InnerProduct | None = None,
@@ -580,6 +593,8 @@ def adaptive_continuation(
     alpha = float(alpha0)
     if not math.isfinite(alpha):
         raise ValueError("alpha0 must be finite")
+    if precond is not None and parameterized_precond is not None:
+        raise ValueError("provide precond or parameterized_precond, not both")
     direction = 1.0 if continuation_config.target >= alpha else -1.0
     x = x0
     step_size = float(continuation_config.initial_step)
@@ -597,6 +612,7 @@ def adaptive_continuation(
             jnp.asarray(trial_alpha),
             mass=mass,
             precond=precond,
+            parameterized_precond=parameterized_precond,
             admissible=admissible,
             inner_product=inner_product,
             norm=norm,
