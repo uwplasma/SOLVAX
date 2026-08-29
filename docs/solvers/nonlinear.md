@@ -129,7 +129,12 @@ sign is mathematically arbitrary but matters to that evolution; reverse it if
 the bordered Jacobian has negative-real modes. Applications may pass bordered
 `mass`, `precond`, `inner_product`, and `norm` callables directly; these act on
 the complete `(x, alpha)` state, so a Schur or block elimination can reuse the
-application's physical preconditioner.
+application's physical preconditioner. Repeated correctors compile the bordered
+solve once and pass the tangent and predictor dynamically. If a bordered
+preconditioner depends on that branch data, use
+`parameterized_precond(state, rhs, dtau, tangent, predictor)` instead of
+capturing it in a newly created `precond` closure; the two preconditioner forms
+are mutually exclusive.
 
 ## Selection boundary
 

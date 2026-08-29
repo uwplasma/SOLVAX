@@ -335,6 +335,59 @@ def test_pseudo_arclength_bordered_residual_and_corrector():
     np.testing.assert_allclose(corrected[1], 0.0, atol=2e-11)
 
 
+def test_pseudo_arclength_reuses_compile_for_dynamic_branch_data():
+    traces = 0
+
+    def residual(x, alpha):
+        nonlocal traces
+        traces += 1
+        return jnp.asarray([x[0] ** 2 + alpha - 1.0])
+
+    def precond(state, rhs, dt, tangent, predictor):
+        del state, tangent, predictor
+        return rhs[0] / (1.0 + 1.0 / dt), rhs[1] / (1.0 + 1.0 / dt)
+
+    config = _scalar_config(initial_dt=1.0, linear_restart=4)
+    common = dict(
+        config=config,
+        parameterized_precond=precond,
+        norm=lambda state: jnp.sqrt(
+            jnp.vdot(state[0], state[0]).real + state[1] ** 2
+        ),
+    )
+    first = pseudo_arclength_corrector(
+        residual,
+        (jnp.asarray([0.12]), jnp.asarray(0.97)),
+        tangent=(jnp.asarray([-1.0]), jnp.asarray(0.2)),
+        predictor=(jnp.asarray([0.1]), jnp.asarray(0.98)),
+        **common,
+    )
+    first_traces = traces
+    second = pseudo_arclength_corrector(
+        residual,
+        (jnp.asarray([0.2]), jnp.asarray(0.95)),
+        tangent=(jnp.asarray([-0.9]), jnp.asarray(0.3)),
+        predictor=(jnp.asarray([0.18]), jnp.asarray(0.96)),
+        **common,
+    )
+    assert first_traces > 0
+    assert traces == first_traces
+    assert bool(first.converged)
+    assert bool(second.converged)
+
+
+def test_pseudo_arclength_rejects_two_preconditioners():
+    with pytest.raises(ValueError, match="precond or parameterized_precond"):
+        pseudo_arclength_corrector(
+            lambda x, alpha: x + alpha,
+            (jnp.asarray([0.0]), jnp.asarray(0.0)),
+            tangent=(jnp.asarray([1.0]), jnp.asarray(1.0)),
+            predictor=(jnp.asarray([0.0]), jnp.asarray(0.0)),
+            precond=lambda state, rhs, dt: rhs,
+            parameterized_precond=lambda state, rhs, dt, tangent, predictor: rhs,
+        )
+
+
 @pytest.mark.parametrize(
     "updates,match",
     [
