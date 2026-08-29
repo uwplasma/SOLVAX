@@ -460,12 +460,50 @@ def schur_projected_precond(
     if schur.shape[0] != schur.shape[1]:
         raise ValueError(f"Schur complement must be square; got shape {schur.shape}")
     schur_lu = lu_factor(schur)
+    projected = schur_complement_precond(
+        a_inv,
+        lambda y: b_cols @ y,
+        lambda x: c_rows @ x,
+        lambda rhs: lu_solve(schur_lu, rhs),
+    )
     n = c_rows.shape[1]
 
     def precond(r: jax.Array) -> jax.Array:
-        r_x, r_y = r[:n], r[n:]
-        y = lu_solve(schur_lu, c_rows @ a_inv(r_x) - r_y)
-        x = a_inv(r_x - b_cols @ y)
+        x, y = projected((r[:n], r[n:]))
         return jnp.concatenate([x, y])
+
+    return precond
+
+
+def schur_complement_precond(
+    a_inv: Callable,
+    b: Callable,
+    c: Callable,
+    schur_inv: Callable,
+) -> Callable:
+    r"""Compose a matrix-free Schur block-factorization preconditioner.
+
+    The callables approximate the inverse of ``[[A, B], [C, D]]`` without
+    materializing any block. ``schur_inv`` applies an approximate inverse of
+    ``S = C A^{-1} B - D``. The returned callable maps a residual pair
+    ``(r_x, r_y)`` to
+
+    ``y = S^{-1}(C A^{-1} r_x - r_y)``,
+    ``x = A^{-1}(r_x - B y)``.
+
+    Inputs and outputs may be arbitrary matching JAX pytrees. All four
+    operations must be linear and differentiable; closing over state or a
+    pseudo-time shift makes the result suitable for shifted nonlinear
+    preconditioners without storing a dense Schur complement.
+    """
+
+    def precond(residual):
+        if not isinstance(residual, tuple) or len(residual) != 2:
+            raise ValueError("Schur preconditioner residual must be a pair")
+        r_x, r_y = residual
+        a_rhs = a_inv(r_x)
+        y = schur_inv(jax.tree.map(lambda left, right: left - right, c(a_rhs), r_y))
+        x = a_inv(jax.tree.map(lambda left, right: left - right, r_x, b(y)))
+        return x, y
 
     return precond

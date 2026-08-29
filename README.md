@@ -222,7 +222,7 @@ within an order of magnitude of the limit as unconfirmed.
 
 | Module | Contents |
 |---|---|
-| `solvax.operators` | Matrix-free, sum, Kronecker, block-tridiagonal and bordered (constraint-row) operator containers with closed-form transposes |
+| `solvax.operators` | Matrix-free, sum, Kronecker, block-tridiagonal and bordered operators, plus dense-border and fully matrix-free Schur preconditioners |
 | `solvax.precond` | Jacobi/block-Jacobi, coarse-operator LU, Galerkin-deflation coarse correction, symmetric additive and alternating-direction line composition, V-/W-/F-cycle multigrid over explicit or semicoarsened rediscretized hierarchies, nearest-Kronecker, mixed-precision wrappers |
 | `solvax.transfer` | Separable per-axis restriction/prolongation (full weighting, linear, injection) with periodic, dirichlet and reflective closures, exact variational adjointness, and semicoarsening plans |
 | `solvax.smoothers` | Point/block Jacobi, batched tridiagonal line and exact banded plane relaxation, upwind-ordered sweeps for streaming operators, and a measured smoothing factor |
