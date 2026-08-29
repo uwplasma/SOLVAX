@@ -182,14 +182,16 @@ def _tree_dot(left: PyTree, right: PyTree) -> jax.Array:
 def _tree_norm(value: PyTree, inner_product: InnerProduct) -> jax.Array:
     squared = jnp.maximum(jnp.real(inner_product(value, value)), 0.0)
     positive = squared > 0
-    return jnp.where(positive, jnp.sqrt(jnp.where(positive, squared, 1.0)), 0.0)
+    norm = jnp.where(positive, jnp.sqrt(jnp.where(positive, squared, 1.0)), 0.0)
+    return jnp.where(jnp.isnan(squared), squared, norm)
 
 
 def _array_norm(value: jax.Array) -> jax.Array:
     """Euclidean norm with a finite zero cotangent at the zero vector."""
     squared = jnp.maximum(jnp.real(jnp.vdot(value, value)), 0.0)
     positive = squared > 0
-    return jnp.where(positive, jnp.sqrt(jnp.where(positive, squared, 1.0)), 0.0)
+    norm = jnp.where(positive, jnp.sqrt(jnp.where(positive, squared, 1.0)), 0.0)
+    return jnp.where(jnp.isnan(squared), squared, norm)
 
 
 def _tree_basis(value: PyTree, size: int) -> PyTree:
