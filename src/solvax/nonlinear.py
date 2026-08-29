@@ -21,7 +21,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -32,6 +32,7 @@ PyTree = Any
 InnerProduct = Callable[[PyTree, PyTree], jax.Array]
 MassOperator = Callable[[PyTree, PyTree], PyTree]
 ShiftedPreconditioner = Callable[[PyTree, PyTree, jax.Array], PyTree]
+ExecutionMode = Literal["compiled", "host"]
 
 
 def _require_finite(name: str, *values: float) -> None:
@@ -62,6 +63,7 @@ class PseudoTransientConfig:
     eta_power: float = 2.0
     linear_restart: int = 30
     linear_max_restarts: int = 10
+    execution: ExecutionMode = "compiled"
 
     def __post_init__(self) -> None:
         _require_finite(
@@ -102,6 +104,8 @@ class PseudoTransientConfig:
             raise ValueError("eta_gamma must lie in (0, 1] and eta_power must be positive")
         if self.linear_restart < 1 or self.linear_max_restarts < 1:
             raise ValueError("linear iteration limits must be positive")
+        if self.execution not in {"compiled", "host"}:
+            raise ValueError("execution must be 'compiled' or 'host'")
 
 
 class PseudoTransientHistory(NamedTuple):
@@ -258,6 +262,188 @@ def eisenstat_walker_forcing(
     return jnp.clip(candidate, float(eta_min), float(eta_max))
 
 
+def _pseudo_transient_continuation_host(
+    residual_fn: Callable[[PyTree], PyTree],
+    x0: PyTree,
+    *,
+    mass: MassOperator | None,
+    precond: ShiftedPreconditioner | None,
+    admissible: Callable[[PyTree], jax.Array] | None,
+    inner_product: InnerProduct | None,
+    norm: Callable[[PyTree], jax.Array] | None,
+    config: PseudoTransientConfig,
+) -> PseudoTransientSolution:
+    """Host-orchestrated PTC with compiled array/JVP/Krylov kernels.
+
+    This route avoids staging a large application residual inside nested XLA
+    nonlinear, line-search, and Krylov loops. It has the same acceptance and
+    history contract as the compiled route, but host decisions intentionally
+    synchronize scalar convergence data and are not themselves JIT-able.
+    """
+
+    x = jax.tree.map(jnp.asarray, x0)
+    mass = (lambda _state, value: value) if mass is None else mass
+    inner_product = _tree_dot if inner_product is None else inner_product
+    norm = (lambda value: _tree_norm(value, inner_product)) if norm is None else norm
+    admissible = (lambda value: jnp.asarray(True)) if admissible is None else admissible
+
+    residual0 = residual_fn(x)
+    if jax.tree.structure(residual0) != jax.tree.structure(x):  # type: ignore[operator]
+        raise ValueError("residual_fn must preserve the state pytree structure")
+    residual_norm0 = norm(residual0)
+    tolerance = jnp.maximum(float(config.atol), float(config.rtol) * residual_norm0)
+    history_size = int(config.max_steps) + 1
+    real_dtype = jnp.real(residual_norm0).dtype
+    nan_history = jnp.full((history_size,), jnp.nan, dtype=real_dtype)
+    residual_history = nan_history.at[0].set(residual_norm0)
+    dt_history = nan_history.at[0].set(float(config.initial_dt))
+    eta_history = nan_history.at[0].set(float(config.eta_initial))
+    length_history = nan_history
+    accepted_history = jnp.zeros((history_size,), dtype=bool)
+    linear_history = jnp.zeros((history_size,), dtype=jnp.int32)
+
+    residual_norm = residual_norm0
+    eta = jnp.asarray(float(config.eta_initial), dtype=real_dtype)
+    dt = jnp.asarray(float(config.initial_dt), dtype=real_dtype)
+    steps = 0
+    linear_iterations = 0
+    accepted_steps = 0
+    rejected_steps = 0
+    linear_failures = 0
+    residual_evaluations = 1
+    terminal_linear_failure = False
+
+    while steps < config.max_steps and float(residual_norm) > float(tolerance):
+        linearized_residual, jvp = jax.linearize(residual_fn, x)
+
+        def shifted_jacobian(value, state=x, current_dt=dt, jvp_fn=jvp):
+            return jax.tree.map(
+                lambda m, j: m / current_dt + j,
+                mass(state, value),
+                jvp_fn(value),
+            )
+
+        right_precond = (
+            None
+            if precond is None
+            else lambda value, state=x, current_dt=dt: precond(state, value, current_dt)
+        )
+        linear = gmres(
+            shifted_jacobian,
+            jax.tree.map(jnp.negative, linearized_residual),
+            precond=right_precond,
+            inner_product=inner_product,
+            restart=config.linear_restart,
+            rtol=cast(float, eta),
+            atol=0.0,
+            max_restarts=config.linear_max_restarts,
+        )
+        linear_ok = bool(linear.converged)
+        linear_iterations += int(linear.iterations)
+        linear_failures += int(not linear_ok)
+
+        candidate_x = x
+        candidate_norm = residual_norm
+        accepted = False
+        used_length = 0.0
+        attempts = 0
+        if linear_ok:
+            trial_length = 1.0
+            for _ in range(config.max_backtracks + 1):
+                attempts += 1
+                trial_x = _tree_add_scaled(x, linear.x, jnp.asarray(trial_length))
+                trial_residual = residual_fn(trial_x)
+                trial_norm = norm(trial_residual)
+                sufficient_decrease = float(trial_norm) <= (
+                    1.0 - float(config.armijo) * trial_length
+                ) * float(residual_norm)
+                valid = (
+                    bool(_tree_finite(trial_x))
+                    and bool(_tree_finite(trial_residual))
+                    and bool(admissible(trial_x))
+                    and sufficient_decrease
+                )
+                if valid:
+                    candidate_x = trial_x
+                    candidate_norm = trial_norm
+                    accepted = True
+                    used_length = trial_length
+                    break
+                trial_length *= float(config.backtrack_factor)
+
+        residual_evaluations += attempts + 1
+        ratio = float(residual_norm) / max(float(candidate_norm), float(jnp.finfo(real_dtype).tiny))
+        ser_factor = min(float(config.dt_growth), max(float(config.dt_shrink), ratio))
+        accepted_dt = min(
+            float(config.max_dt),
+            max(float(config.min_dt), float(dt) * ser_factor),
+        )
+        if float(candidate_norm) <= float(config.newton_switch) * float(residual_norm0):
+            accepted_dt = float(config.max_dt)
+        rejected_dt = max(float(config.min_dt), float(dt) * float(config.dt_shrink))
+        previous_dt = float(dt)
+        if accepted:
+            x = candidate_x
+            next_norm = candidate_norm
+            dt = jnp.asarray(accepted_dt, dtype=real_dtype)
+            eta = eisenstat_walker_forcing(
+                candidate_norm,
+                residual_norm,
+                eta,
+                eta_min=config.eta_min,
+                eta_max=config.eta_max,
+                gamma=config.eta_gamma,
+                power=config.eta_power,
+            )
+            accepted_steps += 1
+        else:
+            next_norm = residual_norm
+            dt = jnp.asarray(rejected_dt, dtype=real_dtype)
+            eta = jnp.asarray(
+                min(float(config.eta_max), max(float(eta), float(config.eta_initial))),
+                dtype=real_dtype,
+            )
+            rejected_steps += 1
+        residual_norm = next_norm
+        steps += 1
+        terminal_linear_failure = (
+            previous_dt <= float(config.min_dt) * (1.0 + 4.0 * float(jnp.finfo(real_dtype).eps))
+            and not linear_ok
+        )
+        residual_history = residual_history.at[steps].set(residual_norm)
+        dt_history = dt_history.at[steps].set(dt)
+        eta_history = eta_history.at[steps].set(eta)
+        length_history = length_history.at[steps].set(used_length)
+        accepted_history = accepted_history.at[steps].set(accepted)
+        linear_history = linear_history.at[steps].set(linear.iterations)
+        if terminal_linear_failure:
+            break
+
+    converged = float(residual_norm) <= float(tolerance)
+    return PseudoTransientSolution(
+        x=x,
+        residual_norm=residual_norm,
+        steps=jnp.int32(steps),
+        linear_iterations=jnp.int32(linear_iterations),
+        accepted_steps=jnp.int32(accepted_steps),
+        rejected_steps=jnp.int32(rejected_steps),
+        linear_failures=jnp.int32(linear_failures),
+        residual_evaluations=jnp.int32(residual_evaluations),
+        converged=jnp.asarray(converged),
+        linear_converged=jnp.asarray(not terminal_linear_failure),
+        pseudo_dt=dt,
+        eta=eta,
+        history=PseudoTransientHistory(
+            residual_history,
+            dt_history,
+            eta_history,
+            length_history,
+            accepted_history,
+            linear_history,
+        ),
+    )
+
+
 def pseudo_transient_continuation(
     residual_fn: Callable[[PyTree], PyTree],
     x0: PyTree,
@@ -278,11 +464,24 @@ def pseudo_transient_continuation(
     conditions such as finite values, positive Jacobian, bounds, or nestedness;
     a rejected candidate is backtracked and never contaminates the iterate.
 
-    All nonlinear and linear limits are static, so the iteration is compatible
-    with ``jax.jit`` and arbitrary matching pytrees.
+    With ``execution="compiled"`` (the default), all nonlinear and linear
+    limits are static, so the iteration is compatible with ``jax.jit`` and
+    arbitrary matching pytrees. ``execution="host"`` intentionally
+    synchronizes scalar control decisions and cannot itself be JIT-compiled.
     """
 
     config = PseudoTransientConfig() if config is None else config
+    if config.execution == "host":
+        return _pseudo_transient_continuation_host(
+            residual_fn,
+            x0,
+            mass=mass,
+            precond=precond,
+            admissible=admissible,
+            inner_product=inner_product,
+            norm=norm,
+            config=config,
+        )
     x0 = jax.tree.map(jnp.asarray, x0)
     mass = (lambda _state, value: value) if mass is None else mass
     inner_product = _tree_dot if inner_product is None else inner_product

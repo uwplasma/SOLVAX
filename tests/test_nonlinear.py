@@ -69,7 +69,35 @@ def test_pseudo_transient_converges_under_jit_and_records_true_history():
     assert np.all(np.isnan(np.asarray(solution.history.residual_norm[int(solution.steps) + 1 :])))
 
 
-def test_backtracking_enforces_hard_admissibility_and_recovers():
+def test_host_execution_matches_compiled_solution_and_history_contract():
+    residual = lambda x: jnp.asarray([x[0] ** 2 - 2.0])  # noqa: E731
+    compiled = pseudo_transient_continuation(
+        residual,
+        jnp.asarray([10.0]),
+        config=_scalar_config(),
+    )
+    host = pseudo_transient_continuation(
+        residual,
+        jnp.asarray([10.0]),
+        config=_scalar_config(execution="host"),
+    )
+    assert bool(host.converged) and bool(host.linear_converged)
+    np.testing.assert_allclose(host.x, compiled.x, rtol=2.0e-12, atol=2.0e-12)
+    assert int(host.steps) == int(compiled.steps)
+    assert int(host.linear_iterations) == int(compiled.linear_iterations)
+    assert int(host.residual_evaluations) == int(compiled.residual_evaluations)
+    used = slice(0, int(host.steps) + 1)
+    np.testing.assert_allclose(
+        host.history.residual_norm[used],
+        compiled.history.residual_norm[used],
+        rtol=2.0e-12,
+        atol=2.0e-12,
+    )
+    assert np.all(np.isnan(np.asarray(host.history.residual_norm[int(host.steps) + 1 :])))
+
+
+@pytest.mark.parametrize("execution", ["compiled", "host"])
+def test_backtracking_enforces_hard_admissibility_and_recovers(execution):
     residual = lambda x: jnp.asarray([jnp.arctan(x[0])])  # noqa: E731
     solution = pseudo_transient_continuation(
         residual,
@@ -80,6 +108,7 @@ def test_backtracking_enforces_hard_admissibility_and_recovers():
             min_dt=1.0e-12,
             max_dt=1.0e8,
             max_backtracks=8,
+            execution=execution,
         ),
     )
     assert bool(solution.converged)
@@ -89,7 +118,8 @@ def test_backtracking_enforces_hard_admissibility_and_recovers():
     assert int(solution.residual_evaluations) > 1 + 2 * int(solution.steps)
 
 
-def test_pytree_mass_preconditioner_and_custom_norm():
+@pytest.mark.parametrize("execution", ["compiled", "host"])
+def test_pytree_mass_preconditioner_and_custom_norm(execution):
     matrix = jnp.asarray([[4.0, 1.0], [1.0, 3.0]])
     rhs = {"u": jnp.asarray([1.0, 2.0]), "v": jnp.asarray([-1.0])}
 
@@ -119,14 +149,19 @@ def test_pytree_mass_preconditioner_and_custom_norm():
         mass=mass,
         precond=precond,
         norm=maximum_norm,
-        config=_scalar_config(initial_dt=0.1, linear_restart=6),
+        config=_scalar_config(
+            initial_dt=0.1,
+            linear_restart=6,
+            execution=execution,
+        ),
     )
     assert bool(solution.converged)
     np.testing.assert_allclose(solution.x["u"], jnp.linalg.solve(matrix, rhs["u"]), rtol=2e-10)
     np.testing.assert_allclose(solution.x["v"], rhs["v"] / 2.0, rtol=2e-10)
 
 
-def test_linear_failure_at_minimum_dt_is_reported_without_false_convergence():
+@pytest.mark.parametrize("execution", ["compiled", "host"])
+def test_linear_failure_at_minimum_dt_is_reported_without_false_convergence(execution):
     zero_mass = lambda state, value: jax.tree.map(jnp.zeros_like, value)  # noqa: E731
     solution = pseudo_transient_continuation(
         lambda x: jnp.ones_like(x),
@@ -139,6 +174,7 @@ def test_linear_failure_at_minimum_dt_is_reported_without_false_convergence():
             max_steps=5,
             linear_restart=2,
             linear_max_restarts=1,
+            execution=execution,
         ),
     )
     assert not bool(solution.converged)
@@ -148,7 +184,8 @@ def test_linear_failure_at_minimum_dt_is_reported_without_false_convergence():
     assert int(solution.residual_evaluations) == 2
 
 
-def test_recovered_linear_failure_does_not_poison_later_steps(monkeypatch):
+@pytest.mark.parametrize("execution", ["compiled", "host"])
+def test_recovered_linear_failure_does_not_poison_later_steps(monkeypatch, execution):
     def staged_gmres(operator, rhs, **kwargs):
         del kwargs
         scale = operator(jnp.ones_like(rhs))[0]
@@ -162,7 +199,13 @@ def test_recovered_linear_failure_does_not_poison_later_steps(monkeypatch):
     solution = pseudo_transient_continuation(
         lambda x: x - 1.0,
         jnp.asarray([0.0]),
-        config=_scalar_config(rtol=1.0e-2, initial_dt=1.0, min_dt=0.25, dt_shrink=0.25),
+        config=_scalar_config(
+            rtol=1.0e-2,
+            initial_dt=1.0,
+            min_dt=0.25,
+            dt_shrink=0.25,
+            execution=execution,
+        ),
     )
     assert bool(solution.converged)
     assert bool(solution.linear_converged)
@@ -181,6 +224,21 @@ def test_zero_residual_and_zero_step_budget_finish_without_linear_work():
     assert int(solved.steps) == 0
     assert not bool(budgeted.converged)
     assert int(budgeted.steps) == 0
+
+    host_solved = pseudo_transient_continuation(
+        lambda x: x,
+        jnp.zeros(2),
+        config=_scalar_config(execution="host"),
+    )
+    host_budgeted = pseudo_transient_continuation(
+        lambda x: x - 1.0,
+        jnp.zeros(2),
+        config=_scalar_config(max_steps=0, execution="host"),
+    )
+    assert bool(host_solved.converged)
+    assert int(host_solved.steps) == 0
+    assert not bool(host_budgeted.converged)
+    assert int(host_budgeted.steps) == 0
 
 
 def test_inexact_forcing_saves_krylov_work_against_fixed_tight_tolerance():
@@ -327,6 +385,7 @@ def test_pseudo_arclength_bordered_residual_and_corrector():
         ({"eta_initial": 0.95}, "eta_min"),
         ({"eta_gamma": 0.0}, "eta_gamma"),
         ({"linear_restart": 0}, "linear iteration"),
+        ({"execution": "other"}, "execution"),
     ],
 )
 def test_pseudo_transient_config_validation(updates, match):

@@ -55,6 +55,30 @@ state. They may therefore update a matrix-free metric or low-order shifted
 factor without global mutable state. The pseudo-time step is also passed to the
 preconditioner so its shift matches the Krylov operator.
 
+### Large residual traces
+
+The default `execution="compiled"` stages the complete nonlinear loop in XLA
+and remains the fastest route for compact residuals. For application residuals
+whose differentiated program is itself very large, nesting that program inside
+the nonlinear, line-search, and Krylov loops can make cold compilation and
+compiler memory dominate the solve. Select host orchestration explicitly:
+
+```python
+config = sx.PseudoTransientConfig(
+    execution="host",
+    rtol=1e-8,
+    linear_restart=20,
+)
+```
+
+This mode preserves the equations, shifted operator, acceptance tests,
+Eisenstat--Walker policy, counters, and fixed-size history contract. Array,
+JVP, and Krylov kernels still execute through JAX, while scalar nonlinear and
+backtracking decisions run on the host. Those decisions synchronize by design,
+and a host-mode solve cannot be wrapped in `jax.jit`. Choose it from measured
+cold compile/runtime/memory evidence; it is not an automatic fallback and does
+not change the default.
+
 ## Inexact Newton forcing
 
 Each correction uses a safeguarded Eisenstat--Walker tolerance
@@ -104,8 +128,9 @@ magnitudes, while each recorded `ContinuationStep.step_size` carries the
 signed direction of travel.
 
 This orchestration is deliberately host-side because `accept_stage` may read a
-separate de-aliased certificate or other application diagnostics. The stage
-solve itself remains compatible with `jax.jit`.
+separate de-aliased certificate or other application diagnostics. A compiled
+stage solve remains compatible with `jax.jit`; a stage configured with
+`execution="host"` uses the explicitly synchronized route described above.
 
 ## Folds and pseudo-arclength
 
