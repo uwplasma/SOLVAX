@@ -164,6 +164,7 @@ def test_exported_surface_is_stable():
         "block_thomas_factor",
         "block_thomas_factor_fn",
         "block_thomas_solve",
+        "block_thomas_selected_tail_fn",
         "block_thomas_truncated",
         "block_thomas_truncated_fn",
         "block_thomas_truncated_fn_with_residual",
