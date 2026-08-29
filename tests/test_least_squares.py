@@ -95,10 +95,14 @@ def test_implicit_least_squares_uses_stationary_point_derivative() -> None:
 @pytest.mark.parametrize(
     ("keyword", "value", "message"),
     [
+        ("rtol", float("inf"), "finite"),
+        ("rtol", -1.0, "nonnegative"),
         ("initial_damping", 0.0, "minimum_damping"),
         ("damping_decrease", 1.0, "damping_decrease"),
         ("damping_increase", 1.0, "damping_increase"),
         ("acceptance_ratio", 0.5, "acceptance_ratio"),
+        ("good_ratio", 0.1, "poor_ratio"),
+        ("linear_rtol", -1.0, "linear tolerances"),
         ("linear_max_steps", 0, "iteration limits"),
     ],
 )
