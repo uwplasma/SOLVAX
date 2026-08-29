@@ -15,6 +15,7 @@ from solvax import (
     block_thomas_factor,
     block_thomas_solve,
     gmres,
+    schur_complement_precond,
     schur_projected_precond,
 )
 
@@ -253,6 +254,29 @@ def test_schur_projected_precond_exact_inverse():
     assert int(sol.iterations) <= 3
     err = np.linalg.norm(np.asarray(sol.x) - x_ref) / np.linalg.norm(x_ref)
     assert err <= 1e-10
+
+
+def test_matrix_free_schur_preconditioner_is_exact_and_differentiable():
+    a = jnp.asarray([[3.0, -0.2], [0.4, 2.0]])
+    b = jnp.asarray([[1.0], [-0.5]])
+    c = jnp.asarray([[0.3, 1.2]])
+    d = jnp.asarray([[0.1]])
+    a_inv = jnp.linalg.inv(a)
+    schur_inv = jnp.linalg.inv(c @ a_inv @ b - d)
+    apply = schur_complement_precond(
+        lambda value: a_inv @ value,
+        lambda value: b @ value,
+        lambda value: c @ value,
+        lambda value: schur_inv @ value,
+    )
+    rhs = (jnp.asarray([0.7, -1.1]), jnp.asarray([0.4]))
+    solved = jax.jit(apply)(rhs)
+    expected = jnp.linalg.solve(jnp.block([[a, b], [c, d]]), jnp.concatenate(rhs))
+    assert jnp.concatenate(solved) == pytest.approx(expected)
+    _, tangent = jax.jvp(apply, (rhs,), (rhs,))
+    assert jnp.concatenate(tangent) == pytest.approx(expected)
+    with pytest.raises(ValueError, match="residual must be a pair"):
+        apply(jnp.ones(3))
 
 
 def test_schur_projected_precond_approximate_inverse():

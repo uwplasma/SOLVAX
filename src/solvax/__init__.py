@@ -98,6 +98,7 @@ from solvax.operators import (
     KroneckerOperator,
     MatrixFreeOperator,
     SumOperator,
+    schur_complement_precond,
     schur_projected_precond,
 )
 from solvax.parallel import axis_inner_product, shard_batch
@@ -252,6 +253,7 @@ __all__ = [
     "KroneckerOperator",
     "BlockTridiagonalOperator",
     "BorderedOperator",
+    "schur_complement_precond",
     "schur_projected_precond",
     "shard_batch",
     "additive_preconditioner",

@@ -127,6 +127,19 @@ precond = sx.schur_projected_precond(a_inv, b_columns, c_rows)
 solution = sx.gmres(K, rhs, precond=precond)
 ```
 
+When the constraint block is itself a distributed field, keep every block
+matrix-free and provide its own Schur inverse:
+
+```python
+precond = sx.schur_complement_precond(a_inv, apply_b, apply_c, schur_inv)
+x, y = precond((residual_x, residual_y))
+```
+
+This form accepts matching JAX pytrees and does not assemble or retain the
+Schur complement. Closing the four operations over the current state and
+pseudo-time shift supplies the `precond(state, rhs, dtau)` contract used by
+`pseudo_transient_continuation`.
+
 For a general bordered matrix $[[A,B],[C,D]]$ whose border unknowns couple to
 themselves (e.g. a quasineutrality or potential border), pass the small dense
 block as `d_block=`; the Schur complement becomes $S=C\widetilde A^{-1}B-D$
@@ -153,6 +166,7 @@ for saddle-point systems {cite}`benzi2005`.
 - {class}`solvax.operators.KroneckerOperator`
 - {class}`solvax.operators.BlockTridiagonalOperator`
 - {class}`solvax.operators.BorderedOperator`
+- {func}`solvax.operators.schur_complement_precond`
 - {func}`solvax.operators.schur_projected_precond`
 
 Runnable counterparts: `examples/11_kronecker.py` and
