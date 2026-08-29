@@ -15,6 +15,7 @@ x_tail = sx.block_thomas_selected_tail_fn(
     n_blocks=N,
     rhs_low=rhs_low,
     keep_highest=2,
+    solution_low=x_low,  # optional reuse of an exact selected head
 )
 ```
 

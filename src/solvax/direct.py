@@ -1804,16 +1804,19 @@ def block_thomas_selected_tail_fn(
     n_blocks: int,
     rhs_low: jax.Array,
     keep_highest: int,
+    *,
+    solution_low: jax.Array | None = None,
 ) -> jax.Array:
     """Exact highest blocks of a generated block-tridiagonal solve.
 
     This is the tail counterpart to :func:`block_thomas_truncated_fn`.  The
     right-hand side must vanish above its supplied ``rhs_low`` prefix, while
     the returned state contains the highest ``keep_highest`` blocks of the
-    full solution.  The selected-head solve first obtains the exact final
-    supplied source block using the library's high-to-low Schur orientation.
-    A second high-to-low sweep composes only the transfer maps from that block
-    to the requested tail. Dense primal workspace is therefore
+    full solution. Unless an exact ``solution_low`` is supplied, a
+    selected-head solve first obtains the exact final source block using the
+    library's high-to-low Schur orientation. A high-to-low sweep then composes
+    only the transfer maps from that block to the requested tail. Dense primal
+    workspace is therefore
     ``O((source_blocks + keep_highest) * m**2)`` and independent of
     ``n_blocks``. This orientation does not require the leading diagonal block
     itself to be invertible; only the complete block-tridiagonal system and its
@@ -1832,6 +1835,9 @@ def block_thomas_selected_tail_fn(
         rhs_low: nonzero prefix of the right-hand side, shape
             ``(source_blocks, m)`` or ``(source_blocks, m, n_rhs)``.
         keep_highest: static number of highest solution blocks to return.
+        solution_low: optional exact solution on the same prefix and with the
+            same shape as ``rhs_low``. Supplying the output of
+            :func:`block_thomas_truncated_fn` avoids recomputing that head.
 
     Returns:
         Exact blocks ``x[n_blocks-keep_highest:n_blocks]`` in ascending block
@@ -1843,9 +1849,14 @@ def block_thomas_selected_tail_fn(
     if not 1 <= keep_highest <= n_blocks:
         raise ValueError("need 1 <= keep_highest <= n_blocks")
 
-    low_solution = block_thomas_truncated_fn(
-        block_fn, n_blocks, rhs_low, source_blocks
-    )
+    if solution_low is None:
+        low_solution = block_thomas_truncated_fn(
+            block_fn, n_blocks, rhs_low, source_blocks
+        )
+    else:
+        if solution_low.shape != rhs_low.shape:
+            raise ValueError("solution_low must have the same shape as rhs_low")
+        low_solution = solution_low
     tail_start = n_blocks - keep_highest
     overlap = max(0, source_blocks - tail_start)
     if source_blocks == n_blocks:

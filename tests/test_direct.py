@@ -814,6 +814,17 @@ def test_selected_tail_fn_matches_full_solve(
     )(rhs[:source_blocks])
     reference = block_thomas(lower, diag, upper, rhs)[-keep_highest:]
     assert np.allclose(np.asarray(selected), np.asarray(reference), atol=1e-12)
+    low = block_thomas_truncated_fn(
+        block_fn, n_blocks, rhs[:source_blocks], source_blocks
+    )
+    reused = block_thomas_selected_tail_fn(
+        block_fn,
+        n_blocks,
+        rhs[:source_blocks],
+        keep_highest,
+        solution_low=low,
+    )
+    assert np.allclose(np.asarray(reused), np.asarray(reference), atol=1e-12)
 
 
 def test_selected_tail_fn_is_differentiable_and_validates_lengths():
@@ -836,6 +847,14 @@ def test_selected_tail_fn_is_differentiable_and_validates_lengths():
         block_thomas_selected_tail_fn(block_fn, n_blocks, rhs[:0], keep_highest)
     with pytest.raises(ValueError, match="keep_highest"):
         block_thomas_selected_tail_fn(block_fn, n_blocks, rhs[:source_blocks], 0)
+    with pytest.raises(ValueError, match="solution_low"):
+        block_thomas_selected_tail_fn(
+            block_fn,
+            n_blocks,
+            rhs[:source_blocks],
+            keep_highest,
+            solution_low=rhs[:1],
+        )
 
 
 def test_selected_tail_supports_singular_leading_diagonal_block():
