@@ -13,6 +13,7 @@ from solvax import (
     block_thomas_checkpointed_fn,
     block_thomas_factor,
     block_thomas_factor_fn,
+    block_thomas_selected_tail_fn,
     block_thomas_solve,
     block_thomas_truncated,
     block_thomas_truncated_fn,
@@ -793,6 +794,48 @@ def test_truncated_fn_under_jit():
     x_jit = run(rhs[:keep])
     x_ref = block_thomas(lower, diag, upper, rhs)[:keep]
     assert np.allclose(np.asarray(x_jit), np.asarray(x_ref), atol=1e-12)
+
+
+@pytest.mark.parametrize(
+    "n_blocks,source_blocks,keep_highest,n_rhs",
+    [(16, 3, 2, None), (16, 4, 5, 2), (7, 1, 7, None), (2, 1, 1, 2)],
+)
+def test_selected_tail_fn_matches_full_solve(
+    n_blocks, source_blocks, keep_highest, n_rhs
+):
+    (lower, diag, upper, rhs), _ = make_system(n_blocks, 4, n_rhs, seed=31)
+    rhs = rhs.at[source_blocks:].set(0.0)
+    block_fn = _fn_from_arrays(lower, diag, upper)
+
+    selected = jax.jit(
+        lambda r: block_thomas_selected_tail_fn(
+            block_fn, n_blocks, r, keep_highest
+        )
+    )(rhs[:source_blocks])
+    reference = block_thomas(lower, diag, upper, rhs)[-keep_highest:]
+    assert np.allclose(np.asarray(selected), np.asarray(reference), atol=1e-12)
+
+
+def test_selected_tail_fn_is_differentiable_and_validates_lengths():
+    n_blocks, source_blocks, keep_highest = 9, 3, 2
+    (lower, diag, upper, rhs), _ = make_system(n_blocks, 3, seed=32)
+    rhs = rhs.at[source_blocks:].set(0.0)
+    block_fn = _fn_from_arrays(lower, diag, upper)
+
+    def loss(r):
+        tail = block_thomas_selected_tail_fn(
+            block_fn, n_blocks, r, keep_highest
+        )
+        return jnp.sum(tail**2)
+
+    gradient = jax.grad(loss)(rhs[:source_blocks])
+    assert gradient.shape == rhs[:source_blocks].shape
+    assert np.all(np.isfinite(np.asarray(gradient)))
+
+    with pytest.raises(ValueError, match="rhs_low"):
+        block_thomas_selected_tail_fn(block_fn, n_blocks, rhs[:0], keep_highest)
+    with pytest.raises(ValueError, match="keep_highest"):
+        block_thomas_selected_tail_fn(block_fn, n_blocks, rhs[:source_blocks], 0)
 
 
 @pytest.mark.parametrize("n_rhs", [None, 2])
