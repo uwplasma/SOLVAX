@@ -18,6 +18,7 @@ solution = sx.newton_krylov(
     linear_restart=20,
     linear_rtol=0.5,
     forcing="eisenstat_walker",
+    fixed_work=False,
 )
 ```
 
@@ -27,6 +28,14 @@ well as `newton_iterations`, `linear_iterations`, and `residual_norm`.
 `inner_product=` controls GMRES orthogonalization and supports weighted or
 distributed reductions; `norm=` may independently define the nonlinear
 residual norm.
+
+For bounded-cost composition inside `jax.lax.scan`, opt in with
+`fixed_work=True`. Newton and its inner GMRES then use fixed-length scan
+control and mask updates after convergence; the default early-exit path is
+unchanged. This unrolled derivative is useful when the algorithm itself is the
+object of differentiation. For derivatives of a converged root, prefer
+`root_solve`, whose implicit rule avoids retaining or differentiating through
+the Newton/Krylov iteration history.
 
 The default `forcing="constant"` passes `linear_rtol` to every inner GMRES
 solve. Opt-in `forcing="eisenstat_walker"` treats `linear_rtol` as the initial

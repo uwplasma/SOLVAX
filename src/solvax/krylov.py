@@ -180,7 +180,16 @@ def _tree_dot(left: PyTree, right: PyTree) -> jax.Array:
 
 
 def _tree_norm(value: PyTree, inner_product: InnerProduct) -> jax.Array:
-    return jnp.sqrt(jnp.maximum(jnp.real(inner_product(value, value)), 0.0))
+    squared = jnp.maximum(jnp.real(inner_product(value, value)), 0.0)
+    positive = squared > 0
+    return jnp.where(positive, jnp.sqrt(jnp.where(positive, squared, 1.0)), 0.0)
+
+
+def _array_norm(value: jax.Array) -> jax.Array:
+    """Euclidean norm with a finite zero cotangent at the zero vector."""
+    squared = jnp.maximum(jnp.real(jnp.vdot(value, value)), 0.0)
+    positive = squared > 0
+    return jnp.where(positive, jnp.sqrt(jnp.where(positive, squared, 1.0)), 0.0)
 
 
 def _tree_basis(value: PyTree, size: int) -> PyTree:
@@ -232,7 +241,8 @@ def _complex_givens(a: jax.Array, b: jax.Array):
         (jnp.abs(a) / safe_scale) ** 2 + (jnp.abs(b) / safe_scale) ** 2
     )
     abs_a = jnp.abs(a)
-    alpha = jnp.where(abs_a > 0, a / abs_a, jnp.asarray(1.0, a.dtype))
+    safe_abs_a = jnp.where(abs_a > 0, abs_a, jnp.asarray(1.0, real_dtype))
+    alpha = jnp.where(abs_a > 0, a / safe_abs_a, jnp.asarray(1.0, a.dtype))
     safe_rho = jnp.where(rho > 0, rho, jnp.asarray(1.0, real_dtype))
     c = jnp.where(rho > 0, abs_a / safe_rho, jnp.asarray(1.0, real_dtype))
     s = jnp.where(rho > 0, alpha * jnp.conj(b) / safe_rho, 0.0)
@@ -249,6 +259,8 @@ def _fgmres_cycle(
     m: int,
     C: jax.Array,
     U: jax.Array,
+    *,
+    fixed_work: bool,
 ):
     """One flexible Arnoldi cycle of size ``m`` on the deflated operator.
 
@@ -312,7 +324,7 @@ def _fgmres_cycle(
             h2 = jnp.conj(V) @ w
             w = w - h2 @ V
             h = h1 + h2
-            h_next = jnp.linalg.norm(w)
+            h_next = _array_norm(w)
         V = V.at[j + 1].set(w / jnp.where(h_next > 0, h_next, 1.0))
         h = h.at[j + 1].set(h_next)
         H = H.at[:, j].set(h)  # unrotated column, keeps A Z = C B + V H
@@ -324,7 +336,14 @@ def _fgmres_cycle(
                 -jnp.conj(sn[i]) * hi + cs[i] * hi1
             )
 
-        h = lax.fori_loop(0, j, apply_rotation, h)
+        if fixed_work:
+            def apply_masked_rotation(i, values):
+                rotated = apply_rotation(i, values)
+                return jnp.where(i < j, rotated, values)
+
+            h = lax.fori_loop(0, m, apply_masked_rotation, h)
+        else:
+            h = lax.fori_loop(0, j, apply_rotation, h)
 
         # New rotation annihilating h[j + 1]; happy breakdown (rho == 0)
         # degenerates to the identity rotation.
@@ -342,7 +361,25 @@ def _fgmres_cycle(
         return (j + 1, V, Z, H, R, B, cs, sn, g, res_est)
 
     init = (jnp.int32(0), V, Z, H, R, B, cs, sn, g, beta)
-    j_f, V, Z, H, R, B, cs, sn, g, res_est = lax.while_loop(cond_fun, body_fun, init)
+    if fixed_work:
+        def scan_body(carry, index):
+            used_count, V, Z, H, R, B, cs, sn, g, res_est = carry
+            active = res_est > tol
+            current = (index, V, Z, H, R, B, cs, sn, g, res_est)
+            candidate = lax.cond(active, body_fun, lambda state: state, current)
+            _, V, Z, H, R, B, cs, sn, g, res_est = candidate
+            return (
+                used_count + active.astype(jnp.int32), V, Z, H, R, B,
+                cs, sn, g, res_est,
+            ), None
+
+        fixed_init = (jnp.int32(0), V, Z, H, R, B, cs, sn, g, beta)
+        fixed_final, _ = lax.scan(scan_body, fixed_init, jnp.arange(m, dtype=jnp.int32))
+        j_f, V, Z, H, R, B, cs, sn, g, res_est = fixed_final
+    else:
+        j_f, V, Z, H, R, B, cs, sn, g, res_est = lax.while_loop(
+            cond_fun, body_fun, init
+        )
 
     # Triangular solve on the used leading block; unused columns get a unit
     # diagonal and a zero right-hand side so they contribute y_i = 0.
@@ -502,6 +539,8 @@ def _restarted(
     U: jax.Array,
     fill: jax.Array,
     recycling: str,
+    *,
+    fixed_work: bool,
 ):
     """Outer restart loop shared by :func:`gmres` (k = 0) and :func:`gcrot`.
 
@@ -539,10 +578,10 @@ def _restarted(
         ctr = _adjoint(C) @ r
         x = x + U @ ctr
         r = r - C @ ctr
-        beta = jnp.linalg.norm(r)
+        beta = _array_norm(r)
 
         dx, adx, k_done, _, factorization = _fgmres_cycle(
-            matvec, precond, r, beta, tol, m, C, U
+            matvec, precond, r, beta, tol, m, C, U, fixed_work=fixed_work
         )
         x = x + dx
         # Recompute the residual exactly at the restart boundary (one extra
@@ -550,7 +589,7 @@ def _restarted(
         # orthogonality drift, and a stale small estimate would end the loop
         # while the true residual is still large.
         r = b - _gmres_matvec(matvec, x)
-        res = jnp.linalg.norm(r)
+        res = _array_norm(r)
 
         if recycling == "fifo":
             # Keep the cycle's own optimal correction. One projection pass
@@ -559,8 +598,8 @@ def _restarted(
             proj = _adjoint(C) @ adx
             c_new = adx - C @ proj
             u_new = dx - U @ proj
-            nc = jnp.linalg.norm(c_new)
-            ok = nc > eps * (1.0 + jnp.linalg.norm(adx))
+            nc = _array_norm(c_new)
+            ok = nc > eps * (1.0 + _array_norm(adx))
             nc_safe = jnp.where(ok, nc, 1.0)
             slot = jnp.mod(fill, k)
             C = jnp.where(ok, C.at[:, slot].set(c_new / nc_safe), C)
@@ -576,16 +615,24 @@ def _restarted(
     init = (
         x0,
         r0,
-        jnp.linalg.norm(r0),
+        _array_norm(r0),
         jnp.int32(0),
         jnp.int32(0),
         C,
         U,
         fill,
     )
-    x, _, _, iters, _, C, U, fill = lax.while_loop(cond_fun, body_fun, init)
+    if fixed_work:
+        def scan_body(state, _):
+            active = state[2] > tol
+            return lax.cond(active, body_fun, lambda value: value, state), None
 
-    res = jnp.linalg.norm(b - _gmres_matvec(matvec, x))
+        final, _ = lax.scan(scan_body, init, xs=None, length=max_restarts)
+        x, _, _, iters, _, C, U, fill = final
+    else:
+        x, _, _, iters, _, C, U, fill = lax.while_loop(cond_fun, body_fun, init)
+
+    res = _array_norm(b - _gmres_matvec(matvec, x))
     return x, res, iters, res <= tol, C, U, fill
 
 
@@ -598,6 +645,8 @@ def _pytree_fgmres_cycle(
     tolerance: jax.Array,
     restart: int,
     dtype: jnp.dtype,
+    *,
+    fixed_work: bool,
 ):
     """Run one FGMRES cycle without flattening a pytree operand."""
     basis = _tree_basis(residual, restart + 1)
@@ -642,7 +691,14 @@ def _pytree_fgmres_cycle(
                 -jnp.conj(sines[i]) * first_value + cosines[i] * second_value
             )
 
-        column = lax.fori_loop(0, index, apply_rotation, column)
+        if fixed_work:
+            def apply_masked_rotation(i, values):
+                rotated = apply_rotation(i, values)
+                return jnp.where(i < index, rotated, values)
+
+            column = lax.fori_loop(0, restart, apply_masked_rotation, column)
+        else:
+            column = lax.fori_loop(0, index, apply_rotation, column)
         cosine, sine, diagonal = _complex_givens(column[index], column[index + 1])
         column = column.at[index].set(diagonal).at[index + 1].set(0.0)
         rhs_value = rhs[index]
@@ -676,9 +732,32 @@ def _pytree_fgmres_cycle(
         rotated_rhs,
         beta,
     )
-    used_count, _, z_basis, triangular, _, _, rhs, _ = lax.while_loop(
-        cond_fun, body_fun, initial
-    )
+    if fixed_work:
+        def scan_body(carry, index):
+            used_count, basis, z_basis, triangular, cosines, sines, rhs, estimate = carry
+            active = estimate > tolerance
+            current = (
+                index, basis, z_basis, triangular, cosines, sines, rhs, estimate
+            )
+            candidate = lax.cond(active, body_fun, lambda state: state, current)
+            _, basis, z_basis, triangular, cosines, sines, rhs, estimate = candidate
+            return (
+                used_count + active.astype(jnp.int32), basis, z_basis,
+                triangular, cosines, sines, rhs, estimate,
+            ), None
+
+        fixed_initial = (
+            jnp.int32(0), basis, preconditioned, triangular,
+            cosines, sines, rotated_rhs, beta,
+        )
+        fixed_final, _ = lax.scan(
+            scan_body, fixed_initial, jnp.arange(restart, dtype=jnp.int32)
+        )
+        used_count, _, z_basis, triangular, _, _, rhs, _ = fixed_final
+    else:
+        used_count, _, z_basis, triangular, _, _, rhs, _ = lax.while_loop(
+            cond_fun, body_fun, initial
+        )
     used = jnp.arange(restart) < used_count
     triangular = triangular + jnp.diag(jnp.where(used, 0.0, 1.0).astype(dtype))
     coefficients = solve_triangular(
@@ -699,6 +778,8 @@ def _pytree_gmres(
     max_restarts: int,
     dtype: jnp.dtype,
     zero_initial: bool,
+    *,
+    fixed_work: bool,
 ):
     """Restarted FGMRES implementation for matching pytree operands."""
     residual = b if zero_initial else _tree_sub(b, _gmres_matvec(matvec, x0))
@@ -712,7 +793,7 @@ def _pytree_gmres(
         residual_norm = _tree_norm(residual, inner_product)
         correction, used = _pytree_fgmres_cycle(
             matvec, precond, inner_product, residual, residual_norm,
-            tolerance, restart, dtype
+            tolerance, restart, dtype, fixed_work=fixed_work
         )
         x = _tree_add_scaled(x, 1.0, correction)
         residual = _tree_sub(b, _gmres_matvec(matvec, x))
@@ -723,7 +804,17 @@ def _pytree_gmres(
         x0, residual, _tree_norm(residual, inner_product),
         jnp.int32(0), jnp.int32(0),
     )
-    x, _, residual_norm, iterations, _ = lax.while_loop(cond_fun, body_fun, initial)
+    if fixed_work:
+        def scan_body(state, _):
+            active = state[2] > tolerance
+            return lax.cond(active, body_fun, lambda value: value, state), None
+
+        final, _ = lax.scan(scan_body, initial, xs=None, length=max_restarts)
+        x, _, residual_norm, iterations, _ = final
+    else:
+        x, _, residual_norm, iterations, _ = lax.while_loop(
+            cond_fun, body_fun, initial
+        )
     return KrylovSolution(x, residual_norm, iterations, residual_norm <= tolerance, None)
 
 
@@ -738,6 +829,7 @@ def gmres(
     rtol: float = 1e-8,
     atol: float = 0.0,
     max_restarts: int = 50,
+    fixed_work: bool = False,
 ) -> KrylovSolution:
     """Restarted flexible GMRES with right preconditioning.
 
@@ -769,6 +861,10 @@ def gmres(
         rtol: relative tolerance on ``||b||``.
         atol: absolute tolerance floor.
         max_restarts: static maximum number of cycles.
+        fixed_work: execute every statically configured Arnoldi and restart
+            slot with converged updates masked. This replaces data-dependent
+            ``while_loop`` control flow with reverse-mode-compatible
+            ``scan`` control flow for bounded-cost embedding in an outer scan.
 
     Returns:
         A :class:`KrylovSolution` with ``recycle=None``.
@@ -797,19 +893,20 @@ def gmres(
         tol = jnp.maximum(atol, rtol * _tree_norm(b, inner_product))
         return _pytree_gmres(
             matvec, b, x0, precond, inner_product, restart, tol,
-            max_restarts, dtype, zero_initial
+            max_restarts, dtype, zero_initial, fixed_work=fixed_work
         )
 
     b = jnp.asarray(b)
     n = b.shape[0]
     x0 = jnp.zeros_like(b) if x0 is None else jnp.asarray(x0)
     precond = _identity if precond is None else precond
-    tol = jnp.maximum(atol, rtol * jnp.linalg.norm(b))
+    tol = jnp.maximum(atol, rtol * _array_norm(b))
 
     empty = jnp.zeros((n, 0), b.dtype)
     x, res, iters, converged, _, _, _ = _restarted(
         matvec, b, x0, precond, restart, tol, max_restarts,
         empty, empty, jnp.int32(0), recycling="none",
+        fixed_work=fixed_work,
     )
     return KrylovSolution(x, res, iters, converged, None)
 
@@ -909,7 +1006,7 @@ def gcrot(
     dtype = b.dtype
     x0 = jnp.zeros_like(b) if x0 is None else jnp.asarray(x0)
     precond = _identity if precond is None else precond
-    tol = jnp.maximum(atol, rtol * jnp.linalg.norm(b))
+    tol = jnp.maximum(atol, rtol * _array_norm(b))
 
     if recycle is None:
         C = jnp.zeros((n, k), dtype)
@@ -966,6 +1063,6 @@ def gcrot(
 
     x, res, iters, converged, C, U, _ = _restarted(
         matvec, b, x0, precond, m, tol, max_restarts, C, U, fill,
-        recycling=recycle_strategy,
+        recycling=recycle_strategy, fixed_work=False,
     )
     return KrylovSolution(x.reshape(shape), res, iters, converged, (C, U), drift)

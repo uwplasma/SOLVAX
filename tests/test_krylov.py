@@ -157,6 +157,58 @@ def test_pytree_gmres_validates_tree_structure_and_dtype():
         gmres(lambda x: x, (jnp.ones(2), jnp.ones(1, dtype=jnp.complex64)))
 
 
+def test_fixed_work_gmres_matches_early_exit_and_differentiates_through_scan():
+    matrix, rhs = random_system(20, seed=31, spread=0.2)
+    kwargs = dict(restart=20, max_restarts=2, rtol=1.0e-12)
+    early = gmres(lambda value: matrix @ value, rhs, **kwargs)
+    fixed = gmres(lambda value: matrix @ value, rhs, fixed_work=True, **kwargs)
+
+    relative_error = jnp.linalg.norm(fixed.x - early.x) / jnp.linalg.norm(early.x)
+    assert bool(early.converged and fixed.converged)
+    assert float(relative_error) <= 1.0e-14
+    assert int(fixed.iterations) == int(early.iterations)
+
+    diagonal = jnp.linspace(1.5, 2.5, 5)
+    right_hand_sides = jnp.arange(15.0).reshape(3, 5) / 10.0 + 1.0
+
+    def fixed_loss(shift):
+        def step(previous, value):
+            solution = gmres(
+                lambda vector: (diagonal + shift) * vector,
+                value + 0.05 * previous,
+                restart=5,
+                max_restarts=1,
+                rtol=1.0e-13,
+                fixed_work=True,
+            )
+            return solution.x, None
+
+        final, _ = jax.lax.scan(step, jnp.zeros(5), right_hand_sides)
+        return jnp.sum(final**2)
+
+    def dense_loss(shift):
+        def step(previous, value):
+            solution = (value + 0.05 * previous) / (diagonal + shift)
+            return solution, None
+
+        final, _ = jax.lax.scan(step, jnp.zeros(5), right_hand_sides)
+        return jnp.sum(final**2)
+
+    fixed_gradient = jax.grad(fixed_loss)(jnp.asarray(0.2))
+    dense_gradient = jax.grad(dense_loss)(jnp.asarray(0.2))
+    assert float(fixed_gradient) == pytest.approx(float(dense_gradient), rel=1.0e-11)
+    zero_gradient = jax.grad(
+        lambda scale: gmres(
+            lambda value: scale * value,
+            jnp.asarray(0.0),
+            restart=1,
+            max_restarts=1,
+            fixed_work=True,
+        ).x
+    )(jnp.asarray(2.0))
+    assert float(zero_gradient) == 0.0
+
+
 def test_scalar_gmres():
     solution = gmres(lambda x: 2 * x, jnp.asarray(4.0), rtol=1.0e-12)
     assert np.asarray(solution.x) == pytest.approx(2.0)
