@@ -814,6 +814,17 @@ def test_selected_tail_fn_matches_full_solve(
     )(rhs[:source_blocks])
     reference = block_thomas(lower, diag, upper, rhs)[-keep_highest:]
     assert np.allclose(np.asarray(selected), np.asarray(reference), atol=1e-12)
+    low = block_thomas_truncated_fn(
+        block_fn, n_blocks, rhs[:source_blocks], source_blocks
+    )
+    reused = block_thomas_selected_tail_fn(
+        block_fn,
+        n_blocks,
+        rhs[:source_blocks],
+        keep_highest,
+        solution_low=low,
+    )
+    assert np.allclose(np.asarray(reused), np.asarray(reference), atol=1e-12)
 
 
 def test_selected_tail_fn_is_differentiable_and_validates_lengths():
@@ -836,6 +847,28 @@ def test_selected_tail_fn_is_differentiable_and_validates_lengths():
         block_thomas_selected_tail_fn(block_fn, n_blocks, rhs[:0], keep_highest)
     with pytest.raises(ValueError, match="keep_highest"):
         block_thomas_selected_tail_fn(block_fn, n_blocks, rhs[:source_blocks], 0)
+    with pytest.raises(ValueError, match="solution_low"):
+        block_thomas_selected_tail_fn(
+            block_fn,
+            n_blocks,
+            rhs[:source_blocks],
+            keep_highest,
+            solution_low=rhs[:1],
+        )
+
+
+def test_selected_tail_supports_singular_leading_diagonal_block():
+    """Use the library's high-to-low Schur orientation, not a D0 factorization."""
+    lower = jnp.asarray([[[0.0]], [[1.0]], [[1.0]]])
+    diag = jnp.asarray([[[0.0]], [[2.0]], [[3.0]]])
+    upper = jnp.asarray([[[1.0]], [[1.0]], [[0.0]]])
+    rhs = jnp.asarray([[2.0], [0.0], [0.0]])
+    block_fn = _fn_from_arrays(lower, diag, upper)
+
+    selected = block_thomas_selected_tail_fn(block_fn, 3, rhs[:1], 2)
+    reference = block_thomas(lower, diag, upper, rhs)[-2:]
+    assert np.all(np.isfinite(np.asarray(selected)))
+    assert np.allclose(np.asarray(selected), np.asarray(reference), atol=1e-12)
 
 
 @pytest.mark.parametrize("n_rhs", [None, 2])

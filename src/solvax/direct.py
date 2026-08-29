@@ -1804,16 +1804,23 @@ def block_thomas_selected_tail_fn(
     n_blocks: int,
     rhs_low: jax.Array,
     keep_highest: int,
+    *,
+    solution_low: jax.Array | None = None,
 ) -> jax.Array:
     """Exact highest blocks of a generated block-tridiagonal solve.
 
     This is the tail counterpart to :func:`block_thomas_truncated_fn`.  The
     right-hand side must vanish above its supplied ``rhs_low`` prefix, while
     the returned state contains the highest ``keep_highest`` blocks of the
-    full solution.  A forward Schur sweep visits every block and keeps only a
-    fixed-size ring of the final factors; back substitution then stops after
-    the requested tail.  Dense primal workspace is therefore
-    ``O(keep_highest * m**2)`` and independent of ``n_blocks``.
+    full solution. Unless an exact ``solution_low`` is supplied, a
+    selected-head solve first obtains the exact final source block using the
+    library's high-to-low Schur orientation. A high-to-low sweep then composes
+    only the transfer maps from that block to the requested tail. Dense primal
+    workspace is therefore
+    ``O((source_blocks + keep_highest) * m**2)`` and independent of
+    ``n_blocks``. This orientation does not require the leading diagonal block
+    itself to be invertible; only the complete block-tridiagonal system and its
+    high-to-low Schur complements must be nonsingular.
 
     The kernel is useful for spectral-tail diagnostics when physical moments
     need only a selected head: callers can evaluate both boundaries without
@@ -1828,6 +1835,9 @@ def block_thomas_selected_tail_fn(
         rhs_low: nonzero prefix of the right-hand side, shape
             ``(source_blocks, m)`` or ``(source_blocks, m, n_rhs)``.
         keep_highest: static number of highest solution blocks to return.
+        solution_low: optional exact solution on the same prefix and with the
+            same shape as ``rhs_low``. Supplying the output of
+            :func:`block_thomas_truncated_fn` avoids recomputing that head.
 
     Returns:
         Exact blocks ``x[n_blocks-keep_highest:n_blocks]`` in ascending block
@@ -1839,66 +1849,55 @@ def block_thomas_selected_tail_fn(
     if not 1 <= keep_highest <= n_blocks:
         raise ValueError("need 1 <= keep_highest <= n_blocks")
 
-    _, diag0, upper0 = block_fn(jnp.int32(0))
-    factor0 = lu_factor(diag0)
-    sigma0 = rhs_low[0]
-
-    lu_tail = jnp.zeros((keep_highest,) + factor0[0].shape, factor0[0].dtype)
-    piv_tail = jnp.zeros((keep_highest,) + factor0[1].shape, factor0[1].dtype)
-    sigma_tail = jnp.zeros((keep_highest,) + sigma0.shape, sigma0.dtype)
-    upper_tail = jnp.zeros((keep_highest,) + upper0.shape, upper0.dtype)
-    lu_tail = lu_tail.at[-1].set(factor0[0])
-    piv_tail = piv_tail.at[-1].set(factor0[1])
-    sigma_tail = sigma_tail.at[-1].set(sigma0)
-    upper_tail = upper_tail.at[-1].set(upper0)
-
-    def append(array, value):
-        return jnp.concatenate([array[1:], value[None]], axis=0)
-
-    def eliminate(carry, k):
-        previous_factor, previous_sigma, previous_upper, retained = carry
-        lower, diag, upper = block_fn(k)
-        solved_upper, solved_sigma = _solve_matrix_and_rhs(
-            previous_factor, previous_upper, previous_sigma
+    if solution_low is None:
+        low_solution = block_thomas_truncated_fn(
+            block_fn, n_blocks, rhs_low, source_blocks
         )
-        factor = lu_factor(diag - lower @ solved_upper)
-        rhs_index = jnp.minimum(k, source_blocks - 1)
-        rhs_k = jnp.where(k < source_blocks, rhs_low[rhs_index], jnp.zeros_like(sigma0))
-        sigma = rhs_k - lower @ solved_sigma
-        lus, pivs, sigmas, uppers = retained
-        retained = (
-            append(lus, factor[0]),
-            append(pivs, factor[1]),
-            append(sigmas, sigma),
-            append(uppers, upper),
+    else:
+        if solution_low.shape != rhs_low.shape:
+            raise ValueError("solution_low must have the same shape as rhs_low")
+        low_solution = solution_low
+    tail_start = n_blocks - keep_highest
+    overlap = max(0, source_blocks - tail_start)
+    if source_blocks == n_blocks:
+        return low_solution[-keep_highest:]
+
+    lower_last, diag_last, _ = block_fn(jnp.int32(n_blocks - 1))
+    last = lu_factor(diag_last)
+    transfer_last = -lu_solve(last, lower_last)
+    maps = jnp.zeros(
+        (keep_highest,) + transfer_last.shape, dtype=transfer_last.dtype
+    )
+    maps = maps.at[-1].set(transfer_last)
+
+    def eliminate(step, carry):
+        delta_next, lower_next, selected_maps = carry
+        index = jnp.int32(n_blocks - 2) - step
+        lower, diagonal, upper = block_fn(index)
+        solved_lower = lu_solve(delta_next, lower_next)
+        delta = lu_factor(diagonal - upper @ solved_lower)
+        transfer = -lu_solve(delta, lower)
+        selected_maps = jnp.einsum("kij,jl->kil", selected_maps, transfer)
+        slot = index - tail_start
+        selected_maps = jax.lax.cond(
+            index >= tail_start,
+            lambda values: values.at[slot].set(transfer),
+            lambda values: values,
+            selected_maps,
         )
-        return (factor, sigma, upper, retained), None
+        return delta, lower, selected_maps
 
-    initial = (
-        factor0,
-        sigma0,
-        upper0,
-        (lu_tail, piv_tail, sigma_tail, upper_tail),
-    )
-    final, _ = jax.lax.scan(
-        eliminate, initial, jnp.arange(1, n_blocks, dtype=jnp.int32)
-    )
-    _, _, _, (lus, pivs, sigmas, uppers) = final
-
-    x_last = lu_solve((lus[-1], pivs[-1]), sigmas[-1])
-
-    def substitute(x_next, inputs):
-        lu, piv, sigma, upper = inputs
-        x = lu_solve((lu, piv), sigma - upper @ x_next)
-        return x, x
-
-    _, preceding = jax.lax.scan(
-        substitute,
-        x_last,
-        (lus[:-1], pivs[:-1], sigmas[:-1], uppers[:-1]),
-        reverse=True,
-    )
-    return jnp.concatenate([preceding, x_last[None]], axis=0)
+    steps = n_blocks - source_blocks - 1
+    if steps:
+        _, _, maps = jax.lax.fori_loop(
+            0, steps, eliminate, (last, lower_last, maps)
+        )
+    mapped_tail = jnp.einsum("kij,j...->ki...", maps, low_solution[-1])
+    if overlap:
+        return jnp.concatenate(
+            [low_solution[tail_start:source_blocks], mapped_tail[overlap:]], axis=0
+        )
+    return mapped_tail
 
 
 def _residual_from_state(solution, lus, pivs, sigmas, lowers, rhs_low,

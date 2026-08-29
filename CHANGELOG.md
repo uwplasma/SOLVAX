@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.19.0 - 2026-08-29
+
+### Selected spectral-tail solves
+
+- Added an exact generated block-tridiagonal solve that retains only the
+  highest requested solution blocks for a low-supported right-hand side.
+- Kept dense primal workspace proportional to the retained tail rather than
+  the chain length, enabling high-mode convergence diagnostics without a full
+  modal state.
+
 ### Reusable pseudo-arclength correctors
 
 - Treat the tangent and predictor as dynamic arguments of one compiled
