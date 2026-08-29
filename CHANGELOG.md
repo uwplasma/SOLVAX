@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.18.0 - 2026-08-28
+
 ### Globalized nonlinear continuation
 
 - Added JIT-able pseudo-transient JFNK with a user metric, shifted
@@ -12,6 +14,9 @@
   nonlinear-evaluation, linear-failure, and Krylov-work diagnostics.
 - Added host-orchestrated adaptive branch continuation with complete stage
   records and square pseudo-arclength bordered residual/corrector helpers.
+- Rebalanced hosted CI into exhaustive current-stack shards and focused
+  compatibility/backend lanes, retaining the 95% branch-coverage gate while
+  reducing the complete hosted evidence cycle below ten minutes.
 
 ## 0.17.0 - 2026-08-22
 
