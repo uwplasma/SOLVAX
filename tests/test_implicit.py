@@ -442,6 +442,42 @@ def test_newton_krylov_scalar_converges_under_jit():
     assert int(solution.linear_iterations) >= int(solution.newton_iterations)
 
 
+def test_fixed_work_newton_matches_early_exit_and_differentiates_through_scan():
+    kwargs = dict(
+        rtol=0.0,
+        atol=1.0e-13,
+        max_steps=8,
+        linear_restart=1,
+        linear_rtol=1.0e-13,
+        linear_max_restarts=1,
+    )
+    early = newton_krylov(lambda x: x**2 - 2.0, jnp.asarray(1.0), **kwargs)
+    fixed = newton_krylov(
+        lambda x: x**2 - 2.0, jnp.asarray(1.0), fixed_work=True, **kwargs
+    )
+    assert bool(early.converged and fixed.converged)
+    assert float(fixed.x) == pytest.approx(float(early.x), rel=1.0e-14)
+    assert int(fixed.newton_iterations) == int(early.newton_iterations)
+
+    def fixed_rollout(parameter):
+        def step(initial, offset):
+            solution = newton_krylov(
+                lambda x: x**2 - (parameter + offset),
+                initial,
+                fixed_work=True,
+                **kwargs,
+            )
+            return solution.x, None
+
+        final, _ = jax.lax.scan(step, jnp.asarray(1.0), jnp.asarray([0.0, 1.0]))
+        return final
+
+    parameter = jnp.asarray(3.0)
+    gradient = jax.grad(fixed_rollout)(parameter)
+    expected = 0.5 / jnp.sqrt(parameter + 1.0)
+    assert float(gradient) == pytest.approx(float(expected), rel=1.0e-11)
+
+
 def test_newton_krylov_checks_residual_after_last_update():
     solution = newton_krylov(
         lambda x: x - 3.0,

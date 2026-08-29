@@ -52,6 +52,7 @@ solution = sx.gmres(
     rtol=1e-8,
     atol=0.0,
     max_restarts=50,
+    fixed_work=False,
 )
 ```
 
@@ -66,6 +67,7 @@ solution = sx.gmres(
 | `restart` | maximum Arnoldi steps per cycle |
 | `rtol`, `atol` | true residual stopping tolerances |
 | `max_restarts` | maximum number of Arnoldi cycles |
+| `fixed_work` | use fixed-length scans and mask converged slots |
 
 The optimized array path expects a flat one-dimensional right-hand side. For
 a three-dimensional field, either flatten before calling `gmres` and reshape
@@ -78,6 +80,21 @@ preconditioner must preserve that array/PyTree structure.
 
 `KrylovSolution` contains `x`, true `residual_norm`, total inner
 `iterations`, `converged`, and `recycle=None`.
+
+### Fixed-work embedding
+
+Set `fixed_work=True` when a solve must sit inside `jax.lax.scan` with a
+static reverse-mode cost. SOLVAX then executes fixed-length scan control for
+all configured restart and Arnoldi slots and masks state updates after
+convergence. `iterations` continues to report useful Arnoldi updates, not
+padded slots, and the returned solution and true-residual test are unchanged.
+The default remains the lower-work early-exit path.
+
+Differentiating a converged equation is usually better conditioned and cheaper
+than differentiating Krylov arithmetic. Wrap GMRES with `linear_solve` for the
+implicit derivative; direct differentiation through `fixed_work=True` is
+available for deliberately unrolled algorithms and is guarded at happy
+breakdown and a zero right-hand side.
 
 ## Restart trade-off
 

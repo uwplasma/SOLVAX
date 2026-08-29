@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Fixed-work implicit loops
+
+- Added opt-in fixed-length scan control to GMRES and Newton--Krylov, with
+  converged slots masked and the existing early-exit defaults unchanged.
+- Made happy breakdown and zero-residual norm/Givens paths carry finite zero
+  cotangents, so fixed-work solves compose with reverse mode inside an outer
+  `lax.scan`.
+- Pinned float64 agreement with the early-exit solve to `1e-14` relative and
+  checked scan-embedded gradients against dense or analytic references.
+
 ## 0.18.0 - 2026-08-28
 
 ### Globalized nonlinear continuation

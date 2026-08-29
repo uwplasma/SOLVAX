@@ -74,7 +74,9 @@ def _tree_dot(left: PyTree, right: PyTree) -> jax.Array:
 
 
 def _tree_norm(value: PyTree, inner_product: InnerProduct) -> jax.Array:
-    return jnp.sqrt(jnp.maximum(jnp.real(inner_product(value, value)), 0.0))
+    squared = jnp.maximum(jnp.real(inner_product(value, value)), 0.0)
+    positive = squared > 0
+    return jnp.where(positive, jnp.sqrt(jnp.where(positive, squared, 1.0)), 0.0)
 
 
 def newton_krylov(
@@ -95,6 +97,7 @@ def newton_krylov(
     forcing_gamma: float = 0.9,
     forcing_alpha: float = 2.0,
     forcing_max: float = 0.9,
+    fixed_work: bool = False,
 ) -> NewtonKrylovSolution:
     """Solve a nonlinear system with matrix-free Newton--GMRES.
 
@@ -125,6 +128,11 @@ def newton_krylov(
         forcing_gamma: residual-ratio scale for Eisenstat--Walker choice 2.
         forcing_alpha: residual-ratio exponent for Eisenstat--Walker choice 2.
         forcing_max: strict upper bound on the adaptive forcing term.
+        fixed_work: execute all ``max_steps`` Newton slots and all configured
+            inner GMRES slots, masking updates after convergence. This uses
+            reverse-mode-compatible ``scan`` control flow for bounded-cost
+            embedding in an outer scan. The default early-exit path is
+            unchanged.
 
     Returns:
         A :class:`NewtonKrylovSolution` with the final iterate and diagnostics.
@@ -205,6 +213,7 @@ def newton_krylov(
                 rtol=current_forcing,
                 atol=linear_atol,
                 max_restarts=linear_max_restarts,
+                fixed_work=fixed_work,
             )
             next_x = jax.tree.map(
                 lambda value, step: value + step, x, linear_solution.x
@@ -242,6 +251,13 @@ def newton_krylov(
         jnp.array(True),
         finished0,
     )
+    if fixed_work:
+        def scan_body(state, _):
+            return body_fun(state), None
+
+        final, _ = jax.lax.scan(scan_body, initial, xs=None, length=max_steps)
+    else:
+        final = jax.lax.while_loop(cond_fun, body_fun, initial)
     (
         x,
         residual_norm,
@@ -250,7 +266,9 @@ def newton_krylov(
         linear_iterations,
         linear_converged,
         _,
-    ) = jax.lax.while_loop(cond_fun, body_fun, initial)
+    ) = final
+    if fixed_work:
+        residual_norm = norm(residual_fn(x))
     return NewtonKrylovSolution(
         x,
         residual_norm,
