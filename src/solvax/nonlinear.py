@@ -36,6 +36,16 @@ ShiftedPreconditioner = Callable[[PyTree, PyTree, jax.Array], PyTree]
 ParameterizedPreconditioner = Callable[
     [PyTree, PyTree, jax.Array, jax.Array], PyTree
 ]
+ParameterizedArclengthPreconditioner = Callable[
+    [
+        tuple[PyTree, jax.Array],
+        tuple[PyTree, jax.Array],
+        jax.Array,
+        tuple[PyTree, jax.Array],
+        tuple[PyTree, jax.Array],
+    ],
+    tuple[PyTree, jax.Array],
+]
 
 
 def _require_finite(name: str, *values: float) -> None:
@@ -677,6 +687,64 @@ def pseudo_arclength_residual(
     return residual_fn(x, alpha), jnp.real(arclength)
 
 
+@partial(
+    jax.jit,
+    static_argnames=(
+        "residual_fn",
+        "config",
+        "admissible",
+        "mass",
+        "precond",
+        "parameterized_precond",
+        "inner_product",
+        "norm",
+    ),
+)
+def _parameterized_pseudo_arclength_corrector(
+    residual_fn: Callable[[PyTree, jax.Array], PyTree],
+    initial: tuple[PyTree, jax.Array],
+    tangent: tuple[PyTree, jax.Array],
+    predictor: tuple[PyTree, jax.Array],
+    *,
+    config: PseudoTransientConfig,
+    admissible: Callable[[PyTree, jax.Array], jax.Array] | None,
+    mass: Callable[
+        [tuple[PyTree, jax.Array], tuple[PyTree, jax.Array]],
+        tuple[PyTree, jax.Array],
+    ]
+    | None,
+    precond: ShiftedPreconditioner | None,
+    parameterized_precond: ParameterizedArclengthPreconditioner | None,
+    inner_product: InnerProduct | None,
+    norm: Callable[[tuple[PyTree, jax.Array]], jax.Array] | None,
+) -> PseudoTransientSolution:
+    """Compile one bordered solve with dynamic branch data."""
+
+    bordered = lambda state: pseudo_arclength_residual(  # noqa: E731
+        residual_fn, state, tangent=tangent, predictor=predictor
+    )
+    bordered_admissible = (
+        None if admissible is None else lambda state: admissible(state[0], state[1])
+    )
+    bordered_precond = (
+        precond
+        if parameterized_precond is None
+        else lambda state, rhs, dtau: parameterized_precond(
+            state, rhs, dtau, tangent, predictor
+        )
+    )
+    return pseudo_transient_continuation(
+        bordered,
+        initial,
+        mass=mass,
+        precond=bordered_precond,
+        admissible=bordered_admissible,
+        inner_product=inner_product,
+        norm=norm,
+        config=config,
+    )
+
+
 def pseudo_arclength_corrector(
     residual_fn: Callable[[PyTree, jax.Array], PyTree],
     initial: tuple[PyTree, jax.Array],
@@ -699,32 +767,33 @@ def pseudo_arclength_corrector(
         tuple[PyTree, jax.Array],
     ]
     | None = None,
+    parameterized_precond: ParameterizedArclengthPreconditioner | None = None,
     inner_product: InnerProduct | None = None,
     norm: Callable[[tuple[PyTree, jax.Array]], jax.Array] | None = None,
 ) -> PseudoTransientSolution:
     """Correct one predictor on a fold-capable pseudo-arclength branch.
 
     ``mass(state, vector)`` and ``precond(state, rhs, dtau)`` act on the
-    complete bordered ``(x, alpha)`` state.  This lets applications supply a
-    Schur or block bordered preconditioner without reimplementing the
-    pseudo-transient globalization.
+    complete bordered ``(x, alpha)`` state.  A ``parameterized_precond`` also
+    receives the dynamic tangent and predictor, allowing repeated correctors
+    to reuse one compiled executable.  Provide at most one preconditioner.
     """
 
-    bordered = lambda state: pseudo_arclength_residual(  # noqa: E731
-        residual_fn, state, tangent=tangent, predictor=predictor
-    )
-    bordered_admissible = (
-        None if admissible is None else lambda state: admissible(state[0], state[1])
-    )
-    return pseudo_transient_continuation(
-        bordered,
+    if precond is not None and parameterized_precond is not None:
+        raise ValueError("provide precond or parameterized_precond, not both")
+    config = PseudoTransientConfig() if config is None else config
+    return _parameterized_pseudo_arclength_corrector(
+        residual_fn,
         initial,
+        tangent,
+        predictor,
+        config=config,
+        admissible=admissible,
         mass=mass,
         precond=precond,
-        admissible=bordered_admissible,
+        parameterized_precond=parameterized_precond,
         inner_product=inner_product,
         norm=norm,
-        config=config,
     )
 
 

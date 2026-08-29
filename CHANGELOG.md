@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Reusable pseudo-arclength correctors
+
+- Treat the tangent and predictor as dynamic arguments of one compiled
+  bordered solve, avoiding a fresh JAX trace for every corrector on a branch.
+- Added a mutually exclusive parameterized bordered preconditioner that sees
+  the dynamic tangent and predictor without capturing them in a new closure.
+
 ### Fixed-work implicit loops
 
 - Added opt-in fixed-length scan control to GMRES and Newton--Krylov, with
