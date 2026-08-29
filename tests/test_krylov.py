@@ -209,6 +209,20 @@ def test_fixed_work_gmres_matches_early_exit_and_differentiates_through_scan():
     assert float(zero_gradient) == 0.0
 
 
+def test_gmres_preserves_nonfinite_array_and_pytree_residuals():
+    for rhs in (jnp.ones(2), (jnp.ones(2),)):
+        result = jax.jit(
+            lambda value: gmres(
+                lambda state: jax.tree.map(lambda leaf: jnp.full_like(leaf, jnp.nan), state),
+                value,
+                restart=2,
+                max_restarts=1,
+            )
+        )(rhs)
+        assert jnp.isnan(result.residual_norm)
+        assert not bool(result.converged)
+
+
 def test_scalar_gmres():
     solution = gmres(lambda x: 2 * x, jnp.asarray(4.0), rtol=1.0e-12)
     assert np.asarray(solution.x) == pytest.approx(2.0)

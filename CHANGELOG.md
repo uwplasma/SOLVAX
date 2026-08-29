@@ -9,6 +9,9 @@
 - Made happy breakdown and zero-residual norm/Givens paths carry finite zero
   cotangents, so fixed-work solves compose with reverse mode inside an outer
   `lax.scan`.
+- Preserve NaN Krylov norms as nonfinite failures instead of mistaking them
+  for zero residuals; array and pytree GMRES now fail closed on nonfinite
+  operator actions while retaining finite zero cotangents.
 - Pinned float64 agreement with the early-exit solve to `1e-14` relative and
   checked scan-embedded gradients against dense or analytic references.
 
