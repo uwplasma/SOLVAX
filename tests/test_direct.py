@@ -838,6 +838,20 @@ def test_selected_tail_fn_is_differentiable_and_validates_lengths():
         block_thomas_selected_tail_fn(block_fn, n_blocks, rhs[:source_blocks], 0)
 
 
+def test_selected_tail_supports_singular_leading_diagonal_block():
+    """Use the library's high-to-low Schur orientation, not a D0 factorization."""
+    lower = jnp.asarray([[[0.0]], [[1.0]], [[1.0]]])
+    diag = jnp.asarray([[[0.0]], [[2.0]], [[3.0]]])
+    upper = jnp.asarray([[[1.0]], [[1.0]], [[0.0]]])
+    rhs = jnp.asarray([[2.0], [0.0], [0.0]])
+    block_fn = _fn_from_arrays(lower, diag, upper)
+
+    selected = block_thomas_selected_tail_fn(block_fn, 3, rhs[:1], 2)
+    reference = block_thomas(lower, diag, upper, rhs)[-2:]
+    assert np.all(np.isfinite(np.asarray(selected)))
+    assert np.allclose(np.asarray(selected), np.asarray(reference), atol=1e-12)
+
+
 @pytest.mark.parametrize("n_rhs", [None, 2])
 def test_truncated_fn_residual_includes_eliminated_tail(n_rhs):
     n_blocks, keep = 16, 3

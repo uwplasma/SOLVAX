@@ -203,8 +203,8 @@ head, the Schur update and all right-hand-side updates share one multi-column LU
 solve. This matters when block assembly or dense triangular dispatch dominates.
 
 When the physical output uses the selected head but convergence evidence needs
-the opposite spectral boundary, retain only the highest blocks with a second,
-forward Schur sweep:
+the opposite spectral boundary, retain only the highest blocks with a second
+high-to-low Schur sweep:
 
 ```python
 x_tail = sx.block_thomas_selected_tail_fn(
@@ -214,10 +214,13 @@ x_tail = sx.block_thomas_selected_tail_fn(
 
 The source is still the supplied low-block prefix. The result is the exact
 highest two blocks of the full solution in ascending order, with dense primal
-workspace $O(2m^2)$ rather than a full modal state. This diagnostic sweep is
-independent of the selected-head solve; callers should make its extra runtime
-explicit. Ordinary reverse mode is supported but tapes the full sweep, so this
-entry point makes no bounded-adjoint claim.
+workspace $O((K+2)m^2)$ rather than a full modal state, where $K$ is the
+supplied source-prefix length. The high-to-low orientation remains valid when
+the leading diagonal block is singular but the complete system and its Schur
+complements are nonsingular. This diagnostic sweep is independent of the
+selected-head solve; callers should make its extra runtime explicit. Ordinary
+reverse mode is supported but tapes the full sweep, so this entry point makes
+no bounded-adjoint claim.
 
 Request a tail-aware algebraic residual without reconstructing another block:
 

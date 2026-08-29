@@ -18,13 +18,16 @@ x_tail = sx.block_thomas_selected_tail_fn(
 )
 ```
 
-A forward Schur sweep visits every block while a fixed-size ring retains only
-the final factors. Dense primal workspace is therefore
-$O(\mathtt{keep\_highest}\,m^2)$ and independent of the chain length. The
-returned blocks preserve ascending spectral order and support one or multiple
-right-hand sides, JIT compilation, and ordinary autodiff. Ordinary reverse
-mode tapes the generated sweep; this release makes no bounded-adjoint claim for
-the selected-tail entry point.
+A selected-head solve followed by a high-to-low transfer-map sweep visits every
+block while retaining only the source prefix and requested maps. Dense primal
+workspace is therefore
+$O((\mathtt{source\_blocks}+\mathtt{keep\_highest})m^2)$ and independent of the
+chain length. This orientation also supports a singular leading diagonal block
+when the complete system and its high-to-low Schur complements are nonsingular.
+The returned blocks preserve ascending spectral order and support one or
+multiple right-hand sides, JIT compilation, and ordinary autodiff. Ordinary
+reverse mode tapes the generated sweeps; this release makes no bounded-adjoint
+claim for the selected-tail entry point.
 
 The intended first downstream use is a stopped-gradient kinetic convergence
 diagnostic: transport moments can continue to use the exact selected head,
