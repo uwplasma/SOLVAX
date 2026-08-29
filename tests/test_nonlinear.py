@@ -252,6 +252,10 @@ def test_adaptive_continuation_records_rejection_then_reaches_target():
     assert not solution.steps[0].accepted
     assert any(step.accepted for step in solution.steps[1:])
     assert solution.steps[1].step_size < solution.steps[0].step_size
+    assert all(
+        step.residual_evaluations >= step.nonlinear_steps + 1
+        for step in solution.steps
+    )
     assert solution.last_nonlinear is not None
 
 
@@ -288,6 +292,19 @@ def test_continuation_supports_descending_parameter_branches():
     assert all(step.step_size < 0.0 for step in solution.steps)
 
 
+def test_continuation_accepts_parameter_dependent_preconditioner():
+    solution = adaptive_continuation(
+        lambda x, alpha: x**2 - (1.0 + alpha),
+        jnp.asarray([1.0]),
+        nonlinear_config=_scalar_config(initial_dt=0.1),
+        continuation_config=ContinuationConfig(target=0.5, initial_step=0.25),
+        parameterized_precond=lambda state, rhs, dt, alpha: rhs
+        / (2.0 * state + 1.0 / dt + 0.0 * alpha),
+    )
+    assert solution.converged
+    np.testing.assert_allclose(solution.x, np.sqrt(1.5), rtol=3e-10)
+
+
 def test_pseudo_arclength_bordered_residual_and_corrector():
     residual = lambda x, alpha: jnp.asarray([x[0] ** 2 + alpha - 1.0])  # noqa: E731
     # The sign of a branch tangent is arbitrary; this orientation gives the
@@ -303,6 +320,11 @@ def test_pseudo_arclength_bordered_residual_and_corrector():
         tangent=tangent,
         predictor=predictor,
         admissible=lambda x, alpha: (x[0] >= 0.0) & (alpha >= 0.0),
+        mass=lambda state, vector: vector,
+        precond=lambda state, rhs, dt: rhs,
+        norm=lambda state: jnp.sqrt(
+            jnp.vdot(state[0], state[0]).real + state[1] ** 2
+        ),
         config=_scalar_config(initial_dt=1.0, linear_restart=4),
     )
     assert bool(solution.converged)
@@ -357,3 +379,10 @@ def test_invalid_structures_empty_trees_and_alpha_are_rejected():
         nonlinear_module._tree_finite({})
     with pytest.raises(ValueError, match="finite"):
         adaptive_continuation(lambda x, alpha: x, jnp.ones(1), alpha0=float("nan"))
+    with pytest.raises(ValueError, match="precond or parameterized_precond"):
+        adaptive_continuation(
+            lambda x, alpha: x,
+            jnp.ones(1),
+            precond=lambda state, rhs, dt: rhs,
+            parameterized_precond=lambda state, rhs, dt, alpha: rhs,
+        )

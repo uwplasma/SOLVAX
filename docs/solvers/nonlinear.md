@@ -95,7 +95,7 @@ branch = sx.adaptive_continuation(
 Fast stages grow the parameter step; nonlinear failure or a validation-gate
 rejection leaves `(x, alpha)` unchanged and shrinks it. Every attempt is a
 `ContinuationStep` containing the old/new parameter, acceptance, nonlinear and
-linear work, final residual, and minimum pseudo-time. If the step crosses
+linear work, residual evaluations, final residual, and minimum pseudo-time. If the step crosses
 `min_step`, the driver returns an unconverged result rather than changing
 solver families or silently accepting a branch jump.
 
@@ -105,7 +105,12 @@ signed direction of travel.
 
 This orchestration is deliberately host-side because `accept_stage` may read a
 separate de-aliased certificate or other application diagnostics. The stage
-solve itself remains compatible with `jax.jit`.
+solve itself remains compatible with `jax.jit`. SOLVAX keeps the continuation
+parameter dynamic inside one compiled stage executable, so changing `alpha`
+does not force one compilation per attempt. Applications whose approximate
+inverse changes along the branch can supply `parameterized_precond(state,
+rhs, dtau, alpha)`; it is mutually exclusive with the parameter-independent
+`precond` argument.
 
 ## Folds and pseudo-arclength
 
@@ -121,9 +126,10 @@ $$
 solver. `pseudo_arclength_corrector` applies the pseudo-transient solver when
 the chosen tangent orientation gives a stable pseudo-time evolution. Tangent
 sign is mathematically arbitrary but matters to that evolution; reverse it if
-the bordered Jacobian has negative-real modes. Applications with an explicit
-bordered Schur preconditioner may pass the residual directly to their own
-Newton--Krylov corrector.
+the bordered Jacobian has negative-real modes. Applications may pass bordered
+`mass`, `precond`, `inner_product`, and `norm` callables directly; these act on
+the complete `(x, alpha)` state, so a Schur or block elimination can reuse the
+application's physical preconditioner.
 
 ## Selection boundary
 

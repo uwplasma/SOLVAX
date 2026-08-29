@@ -21,6 +21,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, NamedTuple
 
 import jax
@@ -32,6 +33,9 @@ PyTree = Any
 InnerProduct = Callable[[PyTree, PyTree], jax.Array]
 MassOperator = Callable[[PyTree, PyTree], PyTree]
 ShiftedPreconditioner = Callable[[PyTree, PyTree, jax.Array], PyTree]
+ParameterizedPreconditioner = Callable[
+    [PyTree, PyTree, jax.Array, jax.Array], PyTree
+]
 
 
 def _require_finite(name: str, *values: float) -> None:
@@ -174,6 +178,7 @@ class ContinuationStep:
     accepted: bool
     nonlinear_steps: int
     linear_iterations: int
+    residual_evaluations: int
     residual_norm: float
     minimum_pseudo_dt: float
 
@@ -506,6 +511,58 @@ def pseudo_transient_continuation(
     )
 
 
+@partial(
+    jax.jit,
+    static_argnames=(
+        "residual_fn",
+        "mass",
+        "precond",
+        "parameterized_precond",
+        "admissible",
+        "inner_product",
+        "norm",
+        "config",
+    ),
+)
+def _parameterized_pseudo_transient_continuation(
+    residual_fn: Callable[[PyTree, jax.Array], PyTree],
+    x0: PyTree,
+    parameter: jax.Array,
+    *,
+    mass: MassOperator | None,
+    precond: ShiftedPreconditioner | None,
+    parameterized_precond: ParameterizedPreconditioner | None,
+    admissible: Callable[[PyTree, jax.Array], jax.Array] | None,
+    inner_product: InnerProduct | None,
+    norm: Callable[[PyTree], jax.Array] | None,
+    config: PseudoTransientConfig,
+) -> PseudoTransientSolution:
+    """Compile one reusable nonlinear stage with a dynamic parameter."""
+
+    stage_admissible = (
+        None
+        if admissible is None
+        else lambda candidate: admissible(candidate, parameter)
+    )
+    stage_precond = (
+        precond
+        if parameterized_precond is None
+        else lambda state, rhs, dtau: parameterized_precond(
+            state, rhs, dtau, parameter
+        )
+    )
+    return pseudo_transient_continuation(
+        lambda candidate: residual_fn(candidate, parameter),
+        x0,
+        mass=mass,
+        precond=stage_precond,
+        admissible=stage_admissible,
+        inner_product=inner_product,
+        norm=norm,
+        config=config,
+    )
+
+
 def adaptive_continuation(
     residual_fn: Callable[[PyTree, float], PyTree],
     x0: PyTree,
@@ -515,6 +572,7 @@ def adaptive_continuation(
     continuation_config: ContinuationConfig | None = None,
     mass: MassOperator | None = None,
     precond: ShiftedPreconditioner | None = None,
+    parameterized_precond: ParameterizedPreconditioner | None = None,
     admissible: Callable[[PyTree, float], jax.Array] | None = None,
     accept_stage: Callable[[PyTree, float, PseudoTransientSolution], bool] | None = None,
     inner_product: InnerProduct | None = None,
@@ -535,6 +593,8 @@ def adaptive_continuation(
     alpha = float(alpha0)
     if not math.isfinite(alpha):
         raise ValueError("alpha0 must be finite")
+    if precond is not None and parameterized_precond is not None:
+        raise ValueError("provide precond or parameterized_precond, not both")
     direction = 1.0 if continuation_config.target >= alpha else -1.0
     x = x0
     step_size = float(continuation_config.initial_step)
@@ -546,22 +606,14 @@ def adaptive_continuation(
             break
         trial_alpha = alpha + direction * min(abs(continuation_config.target - alpha), step_size)
 
-        def stage_residual(candidate, alpha: float = trial_alpha):
-            return residual_fn(candidate, alpha)
-
-        if admissible is None:
-            stage_admissible = None
-        else:
-
-            def stage_admissible(candidate, alpha: float = trial_alpha):
-                return admissible(candidate, alpha)
-
-        solution = pseudo_transient_continuation(
-            stage_residual,
+        solution = _parameterized_pseudo_transient_continuation(
+            residual_fn,
             x,
+            jnp.asarray(trial_alpha),
             mass=mass,
             precond=precond,
-            admissible=stage_admissible,
+            parameterized_precond=parameterized_precond,
+            admissible=admissible,
             inner_product=inner_product,
             norm=norm,
             config=nonlinear_config,
@@ -580,6 +632,7 @@ def adaptive_continuation(
                 accepted=accepted,
                 nonlinear_steps=int(solution.steps),
                 linear_iterations=int(solution.linear_iterations),
+                residual_evaluations=int(solution.residual_evaluations),
                 residual_norm=float(solution.residual_norm),
                 minimum_pseudo_dt=minimum_dt,
             )
@@ -632,8 +685,30 @@ def pseudo_arclength_corrector(
     predictor: tuple[PyTree, jax.Array],
     config: PseudoTransientConfig | None = None,
     admissible: Callable[[PyTree, jax.Array], jax.Array] | None = None,
+    mass: Callable[
+        [tuple[PyTree, jax.Array], tuple[PyTree, jax.Array]],
+        tuple[PyTree, jax.Array],
+    ]
+    | None = None,
+    precond: Callable[
+        [
+            tuple[PyTree, jax.Array],
+            tuple[PyTree, jax.Array],
+            jax.Array,
+        ],
+        tuple[PyTree, jax.Array],
+    ]
+    | None = None,
+    inner_product: InnerProduct | None = None,
+    norm: Callable[[tuple[PyTree, jax.Array]], jax.Array] | None = None,
 ) -> PseudoTransientSolution:
-    """Correct one predictor on a fold-capable pseudo-arclength branch."""
+    """Correct one predictor on a fold-capable pseudo-arclength branch.
+
+    ``mass(state, vector)`` and ``precond(state, rhs, dtau)`` act on the
+    complete bordered ``(x, alpha)`` state.  This lets applications supply a
+    Schur or block bordered preconditioner without reimplementing the
+    pseudo-transient globalization.
+    """
 
     bordered = lambda state: pseudo_arclength_residual(  # noqa: E731
         residual_fn, state, tangent=tangent, predictor=predictor
@@ -644,7 +719,11 @@ def pseudo_arclength_corrector(
     return pseudo_transient_continuation(
         bordered,
         initial,
+        mass=mass,
+        precond=precond,
         admissible=bordered_admissible,
+        inner_product=inner_product,
+        norm=norm,
         config=config,
     )
 
