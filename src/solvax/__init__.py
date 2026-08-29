@@ -74,6 +74,14 @@ from solvax.implicit import (
     root_solve,
 )
 from solvax.krylov import RECYCLE_DRIFT_ADVISORY, KrylovSolution, gcrot, gmres
+from solvax.least_squares import (
+    LeastSquaresConfig,
+    LeastSquaresHistory,
+    LeastSquaresSolution,
+    gauss_newton_least_squares,
+    implicit_least_squares,
+    least_squares_stationarity,
+)
 from solvax.native import SpluFactorization, splu_solve
 from solvax.native_eigen import (
     SparseEigenSolution,
@@ -239,6 +247,12 @@ __all__ = [
     "NewtonKrylovSolution",
     "newton_krylov",
     "root_solve",
+    "LeastSquaresConfig",
+    "LeastSquaresHistory",
+    "LeastSquaresSolution",
+    "gauss_newton_least_squares",
+    "implicit_least_squares",
+    "least_squares_stationarity",
     "ContinuationConfig",
     "ContinuationSolution",
     "ContinuationStep",
