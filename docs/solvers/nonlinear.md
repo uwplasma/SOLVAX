@@ -149,3 +149,34 @@ are mutually exclusive.
 Pseudo-transient iteration is a primal globalization method. Differentiate the
 converged equation implicitly; do not reverse-differentiate the accept/reject
 history.
+
+## Rectangular nonlinear least squares
+
+Use `gauss_newton_least_squares` when the residual has more equations than
+unknowns and the target is a stationary point of
+
+$$
+\frac{1}{2}\lVert r(x)\rVert^2, \qquad J(x)^T r(x)=0.
+$$
+
+```python
+config = sx.LeastSquaresConfig(max_steps=20, gradient_rtol=1e-8)
+solution = sx.gauss_newton_least_squares(
+    residual,
+    initial,
+    config=config,
+    admissible=physical_gate,
+    precond=normal_preconditioner,
+)
+```
+
+The solver forms neither `J` nor `J.T J`. JVP and VJP actions define the normal
+operator used by PCG; Levenberg damping and trust-ratio acceptance globalize
+the step. Inspect both `converged` and `linear_converged`, together with the
+accepted/rejected counts and gradient-norm history.
+
+`implicit_least_squares` differentiates the converged stationarity equation,
+not the iteration history. Its linearization includes the residual-weighted
+second-derivative term, so it remains exact when the optimum has nonzero
+residual. Use it for outer optimization and verify the resulting tangent or
+adjoint against an independently reconverged finite difference.

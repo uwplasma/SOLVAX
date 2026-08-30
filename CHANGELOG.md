@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.20.0 - 2026-08-29
+
+### Matrix-free nonlinear least squares
+
+- Added a damped Gauss--Newton solver for rectangular residuals with
+  matrix-free `J` and `J.T` actions, PCG normal solves, Levenberg damping,
+  trust-ratio acceptance, hard admissibility checks, fixed-shape histories,
+  and application preconditioners.
+- Added implicit differentiation of the exact least-squares stationarity
+  equation `J.T r = 0`, including its nonzero-residual Hessian term.
+- Exported the least-squares configuration, solution, history, primal solver,
+  stationarity residual, and implicit wrapper from the public package API.
+
 ## 0.19.0 - 2026-08-29
 
 ### Selected spectral-tail solves
