@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Initialize generated selected-head full recovery from the actual top block,
+  removing a redundant identity-system solve and its reverse-mode work. Partial
+  recovery and the public API are unchanged; single-block and multi-RHS cases
+  retain exact boundary semantics and differentiated solutions.
+
 ## 0.20.0 - 2026-08-29
 
 ### Matrix-free nonlinear least squares

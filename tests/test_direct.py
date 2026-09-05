@@ -920,6 +920,43 @@ def test_truncated_fn_residual_can_select_one_rhs():
         )
 
 
+@pytest.mark.parametrize("n_blocks", [1, 5])
+@pytest.mark.parametrize("n_rhs", [None, 2])
+def test_generated_full_recovery_boundary_and_gradients(n_blocks, n_rhs):
+    (lower, diag, upper, rhs), dense = make_system(n_blocks, 3, n_rhs, seed=41)
+    # These boundary couplings are outside the matrix and must never contribute.
+    lower = lower.at[0].set(jnp.nan)
+    upper = upper.at[-1].set(jnp.nan)
+
+    def computed(scale, r, window):
+        def fn(bands, k):
+            return bands[0][k], bands[1][k], bands[2][k]
+        bands = (lower, diag * scale, upper)
+        if window is None:
+            return block_thomas_truncated_fn(lambda k: fn(bands, k), n_blocks, r, n_blocks)
+        return block_thomas_truncated_fn(
+            fn, n_blocks, r, n_blocks, params=bands, adjoint_window=window,
+        )
+
+    reference = np.linalg.solve(dense, np.asarray(rhs).reshape(n_blocks * 3, -1))
+    for window in (None, 1):
+        result = jax.jit(lambda s, r, w=window: computed(s, r, w))(1., rhs)
+        np.testing.assert_allclose(
+            result.reshape(reference.shape), reference, rtol=1e-11, atol=1e-12
+        )
+        def objective(scale, r, w=window):
+            return jnp.sum(computed(scale, r, w)**2)
+        grad_scale, grad_rhs = jax.jit(jax.grad(objective, argnums=(0, 1)))(1., rhs)
+        expected_rhs = 2 * np.linalg.solve(dense.T, reference)
+        np.testing.assert_allclose(
+            grad_rhs.reshape(expected_rhs.shape), expected_rhs, rtol=1e-10, atol=1e-12
+        )
+        assert np.isfinite(grad_scale)
+        h = 1e-4
+        fd = (objective(1.+h, rhs) - objective(1.-h, rhs)) / (2*h)
+        np.testing.assert_allclose(grad_scale, fd, rtol=1e-6, atol=1e-12)
+
+
 def test_truncated_fn_multiple_rhs_jit_vmap_and_grad():
     n_blocks, keep, n_rhs = 9, 3, 2
     (lower, diag, upper, rhs), _ = make_system(n_blocks, 4, n_rhs, seed=12)

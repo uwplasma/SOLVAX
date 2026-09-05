@@ -1268,9 +1268,6 @@ def _block_thomas_selected_fn_state(
         rhs_low = jnp.concatenate([rhs_low, pad], axis=0)
 
     k = retain_blocks
-    m = rhs_low.shape[1]
-    dtype = rhs_low.dtype
-
     if k < n:
         # Tail sweep (blocks n-1 .. k): carry the running Schur complement
         # and the L block of the row just processed (needed one step below).
@@ -1287,30 +1284,34 @@ def _block_thomas_selected_fn_state(
         (delta_head, l_head), _ = jax.lax.scan(
             tail_step, tail_carry0, jnp.arange(k, n - 1, dtype=jnp.int32), reverse=True
         )
+        head_carry0 = (delta_head, l_head, jnp.zeros_like(rhs_low[0]))
+        head_inputs = (jnp.arange(k, dtype=jnp.int32), rhs_low)
     else:
-        # No tail: the head's top step has no block above; a dummy identity
-        # carry works because that step's U is annihilated below.
-        eye = jnp.eye(m, dtype=dtype)
-        delta_head = lu_factor(eye)
-        l_head = jnp.zeros((m, m), dtype=dtype)
+        # Full recovery starts at the actual top block. Solving a dummy
+        # identity system here needlessly factors/solves zero RHSs and tapes
+        # those operations in reverse mode. The top U block is never used.
+        l_last, d_last, _ = block_fn(jnp.int32(n - 1))
+        head_carry0 = (lu_factor(d_last), l_last, rhs_low[-1])
+        head_inputs = (jnp.arange(k - 1, dtype=jnp.int32), rhs_low[:-1])
 
     def head_step(carry, inputs):
         delta_next, l_next, sigma_next = carry
         j, b_j = inputs
         l_j, d_j, u_j = block_fn(j)
-        if k == n:
-            # Top block couples to nothing above.
-            u_j = jnp.where(j == n - 1, jnp.zeros_like(u_j), u_j)
         x, solved_sigma = _solve_matrix_and_rhs(delta_next, l_next, sigma_next)
         sigma_j = b_j - u_j @ solved_sigma
         delta_j = lu_factor(d_j - u_j @ x)
         return (delta_j, l_j, sigma_j), (delta_j[0], delta_j[1], sigma_j, l_j)
 
-    head_carry0 = (delta_head, l_head, jnp.zeros_like(rhs_low[0]))
-    head_inputs = (jnp.arange(k, dtype=jnp.int32), rhs_low)
     _, (lus, pivs, sigmas, ls) = jax.lax.scan(
         head_step, head_carry0, head_inputs, reverse=True
     )
+    if k == n:
+        delta_last, l_last, sigma_last = head_carry0
+        lus = jnp.concatenate([lus, delta_last[0][None]], axis=0)
+        pivs = jnp.concatenate([pivs, delta_last[1][None]], axis=0)
+        sigmas = jnp.concatenate([sigmas, sigma_last[None]], axis=0)
+        ls = jnp.concatenate([ls, l_last[None]], axis=0)
 
     def up_step(x_prev, inputs):
         lu_j, piv_j, l_j, sigma_j = inputs
