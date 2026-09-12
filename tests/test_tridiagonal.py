@@ -297,8 +297,9 @@ def test_jit_static_method():
 
 
 @pytest.mark.parametrize("method", ["thomas", "lax"])
-def test_gradient_through_solve(method):
-    lower, diag, upper, rhs = make_tridiag(8, (), None, seed=8)
+@pytest.mark.parametrize("n", [8, 9, 17])
+def test_gradient_through_solve(method, n):
+    lower, diag, upper, rhs = make_tridiag(n, (), None, seed=8)
 
     def loss(d):
         return jnp.sum(tridiagonal_solve(lower, d, upper, rhs, method=method) ** 2)

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Reduce accelerator launch overhead in Thomas and checked-pivot sweeps by
+  unrolling eight rows per loop. Preserve the original CPU sweeps and all
+  solve acceptance checks; backend selection is unchanged.
+
 ## 0.20.0 - 2026-08-29
 
 ### Matrix-free nonlinear least squares

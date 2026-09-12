@@ -430,6 +430,20 @@ def _lax_solve_raw(
     return jnp.moveaxis(solution_t, -2, 0).reshape(rhs.shape)
 
 
+def _sweep(body, initial, values, *, reverse=False):
+    """Keep CPU sweep order; amortize accelerator launch overhead eight rows at a time."""
+    def cpu(carry, rows):
+        return lax.scan(body, carry, rows, reverse=reverse)
+
+    def accelerator(carry, rows):
+        return lax.scan(body, carry, rows, reverse=reverse, unroll=8)
+
+    if _platform_dependent is not None:
+        return _platform_dependent(initial, values, cpu=cpu, default=accelerator)
+    run = cpu if jax.default_backend() == "cpu" else accelerator  # pragma: no cover
+    return run(initial, values)  # pragma: no cover
+
+
 def _thomas_solve(lower: jax.Array, diag: jax.Array, upper: jax.Array, rhs: jax.Array) -> jax.Array:
     """Two-sweep ``lax.scan`` Thomas elimination (bit-reproducible)."""
     if rhs.ndim > diag.ndim:
@@ -458,7 +472,7 @@ def _thomas_solve(lower: jax.Array, diag: jax.Array, upper: jax.Array, rhs: jax.
     if n_rows == 1:
         return x0[None, ...]
     inputs = (upper[1:], diag[1:], lower[1:], rhs[1:])
-    _, (upper_rest, x_rest) = lax.scan(forward, (upper0, x0), inputs)
+    _, (upper_rest, x_rest) = _sweep(forward, (upper0, x0), inputs)
     upper_norm = jnp.concatenate([upper0[None, ...], upper_rest], axis=0)
     x = jnp.concatenate([x0[None, ...], x_rest], axis=0)
 
@@ -468,7 +482,7 @@ def _thomas_solve(lower: jax.Array, diag: jax.Array, upper: jax.Array, rhs: jax.
         return x_new, x_new
 
     x_last = x[-1]
-    _, x_body = lax.scan(backward, x_last, (upper_norm[:-1], x[:-1]), reverse=True)
+    _, x_body = _sweep(backward, x_last, (upper_norm[:-1], x[:-1]), reverse=True)
     return jnp.concatenate([x_body, x_last[None, ...]], axis=0)
 
 
@@ -488,7 +502,7 @@ def _thomas_pivots(lower: jax.Array, diag: jax.Array, upper: jax.Array) -> jax.A
 
     if int(diag.shape[0]) == 1:
         return pivot0[None, ...]
-    _, remaining = lax.scan(
+    _, remaining = _sweep(
         eliminate, upper0, (upper[1:], diag[1:], lower[1:])
     )
     return jnp.concatenate((pivot0[None, ...], remaining), axis=0)
