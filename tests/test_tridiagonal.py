@@ -297,17 +297,20 @@ def test_jit_static_method():
 
 
 @pytest.mark.parametrize("method", ["thomas", "lax"])
-def test_gradient_through_solve(method):
-    lower, diag, upper, rhs = make_tridiag(8, (), None, seed=8)
+@pytest.mark.parametrize("n", [8, 9, 17])
+@pytest.mark.parametrize("columns", [(), (4,)])
+def test_gradient_through_solve(method, n, columns):
+    lower, diag, upper, rhs = make_tridiag(n, columns, None, seed=8)
 
     def loss(d):
         return jnp.sum(tridiagonal_solve(lower, d, upper, rhs, method=method) ** 2)
 
     g = jax.grad(loss)(diag)
     eps = 1e-6
-    e = jnp.zeros_like(diag).at[3].set(eps)
+    index = (3,) + (0,) * len(columns)
+    e = jnp.zeros_like(diag).at[index].set(eps)
     fd = (loss(diag + e) - loss(diag - e)) / (2 * eps)
-    assert np.isclose(float(g[3]), float(fd), rtol=1e-5)
+    assert np.isclose(float(g[index]), float(fd), rtol=1e-5)
 
 
 def test_multiple_field_axes_solved_together():
