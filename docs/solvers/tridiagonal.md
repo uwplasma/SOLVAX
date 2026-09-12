@@ -60,6 +60,15 @@ The work is $O(n)$ per system and storage is $O(n)$; no pivoting occurs
 Systems with fewer than three rows use Thomas because accelerator kernels may
 require a larger minimum dimension.
 
+Thomas elimination, back substitution, and checked-pivot sweeps unroll two
+rows per accelerator loop iteration for batches of at least four. CPU and
+narrower sweeps retain their original loop.
+This reduces launch overhead without changing pivot or backward-residual
+acceptance. See JAX's [scan unrolling parameter](https://docs.jax.dev/en/latest/_autosummary/jax.lax.scan.html).
+For short batched systems, compare explicit `method="thomas"` with `"lax"`:
+vendor-kernel launch costs can dominate. `auto` is a platform policy, not a
+guarantee of the fastest backend for every shape.
+
 For real bands and a complex right-hand side, SOLVAX solves the real and
 imaginary parts independently. This keeps real band storage and the fast fused
 accelerator kernel; packing them as a multiple-right-hand-side field is avoided

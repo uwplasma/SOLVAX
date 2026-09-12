@@ -252,8 +252,9 @@ def chunk_map(
     - ``chunk_size = k``: ``jax.lax.map(fun, xs, batch_size=k)`` — the leading
       axis is processed ``k`` slices at a time (vmapped within a chunk,
       scanned across chunks), so peak memory scales with ``k`` instead of
-      ``len(xs)``. The final chunk is padded internally by ``lax.map`` and the
-      padding discarded.
+      ``len(xs)``. A nondivisible tail is traced separately at its remainder
+      width. Choosing a divisor of the axis length avoids that second
+      batched computation; the wrapper does not pad inputs.
 
     Args:
         fun: callable applied to a single leading-axis slice of ``xs``.
