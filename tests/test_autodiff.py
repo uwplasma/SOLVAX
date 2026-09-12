@@ -78,6 +78,44 @@ def test_checkpointed_loop_validates_static_bounds_and_handles_empty_range():
         checkpointed_fori_loop(0.0, 1, body, 0)
 
 
+@pytest.mark.parametrize("steps,size", [(1, 1), (2, 8), (7, 3), (8, 4), (9, 4), (9, 1)])
+def test_checkpointed_segments_and_tail_complex_derivatives(steps, size):
+    """Cover exact segments, partial tails and clamping with real-linear states."""
+
+    def objective(parameter, checkpointed):
+        def body(index, state):
+            z, total = state
+            z = jnp.sin(parameter * z) + 0.01 * jnp.conj(z) + 0.001 * index
+            return z, total + jnp.sum(jnp.abs(z) ** 2)
+
+        initial = (jnp.array([0.1 + 0.2j, -0.2 + 0.1j]), jnp.array(0.0))
+        if checkpointed:
+            z, total = checkpointed_fori_loop(-3, steps - 3, body, initial, checkpoint_size=size)
+        else:
+            z, total = jax.lax.fori_loop(-3, steps - 3, body, initial)
+        return jnp.sum(jnp.real(z)) + total
+
+    def plain(p):
+        return objective(p, False)
+
+    def bounded(p):
+        return objective(p, True)
+
+    parameter = jnp.array(0.7)
+    np.testing.assert_allclose(
+        jax.jit(jax.value_and_grad(bounded))(parameter),
+        jax.jit(jax.value_and_grad(plain))(parameter),
+        rtol=2e-14,
+        atol=2e-14,
+    )
+    np.testing.assert_allclose(
+        jax.jvp(bounded, (parameter,), (jnp.ones_like(parameter),)),
+        jax.jvp(plain, (parameter,), (jnp.ones_like(parameter),)),
+        rtol=2e-14,
+        atol=2e-14,
+    )
+
+
 def vector_fun(x):
     """R^n -> R^m with a genuinely dense Jacobian."""
     return jnp.stack(

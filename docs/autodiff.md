@@ -43,6 +43,62 @@ Discrete loop counts and checkpoint widths are static configuration. Gradients
 flow through array/pytree state and differentiable values closed over by
 `body_fun`; they do not flow through those discrete controls.
 
+### Full segments and the final tail
+
+Complete segments execute without a per-step bounds conditional. A partial final
+segment has its own static bounds and checkpoint, so no transition outside
+`[lower, upper)` is evaluated. The recurrence, JVP/VJP contract and retained-state
+bound are unchanged. The separate tail can increase compilation work, so this is
+a tradeoff for repeated execution, not a claim of faster cold solves.
+
+A SPECTRAX plasma comparison on one NVIDIA RTX A4000 used float64/complex128,
+JAX 0.9.2, a 32² spatial grid, 4³ Hermite modes per species and eight controls.
+The released baseline was SOLVAX 0.20.0. Isolated-process results were:
+
+| RK4 steps | Released gradient seconds | Full/tail gradient seconds | Peak allocator MiB, both |
+|---:|---:|---:|---:|
+| 64 | 0.2842 | 0.2726 | 66 |
+| 65 | 0.2883 | 0.2767 | 66 |
+| 256 | 1.1300 | 1.1040 | 66 |
+
+A separate interleaved ten-sample comparison at 64 steps, after vectorizing the
+same initial-condition construction in both paths, measured 0.28146 versus
+0.27190 seconds: **3.40% lower steady gradient time**. Gradients agree within
+rtol=1e-10/atol=1e-12. Compilation took 16.38 versus 18.39 seconds in that run;
+roughly 210 repeated gradient evaluations amortize this measured difference.
+Compilation timing depends on host load. The partial-tail isolated case compiled
+in 29.41 seconds versus 20.81 seconds. Do not omit compilation when evaluating a
+short optimization workflow.
+
+These are modest workload-specific improvements. Peak GPU allocator usage did
+not decrease. The XLA buffer estimate at 256 steps increased from 60.80 to
+63.35 MiB, despite the unchanged allocator peak. Allocator peaks exclude device
+context/driver memory and differ from compiler estimates. Raw samples, source
+hashes and manifests are in `benchmarks/results/checkpointed_loop_spectrax/`.
+
+The implementation passes all 44 autodiff tests on CPU and GPU, including complex
+real-linear states, exact segments, partial tails, clamping and nonzero bounds.
+Two SPECTRAX tests additionally compare complex plasma gradients and streamed
+window objectives against taped and fixed-budget references. SPECTRAX's
+[PR #42](https://github.com/uwplasma/SPECTRAX/pull/42) contains the plasma model,
+independent derivative checks and broader memory/optimization study.
+
+To reproduce the controlled timing, use an environment with released SOLVAX
+0.20.0 and an editable SPECTRAX checkout at `7ac745c` (or explicitly record another
+revision), then run from this SOLVAX checkout:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false JAX_PLATFORMS=cuda \
+  python benchmarks/benchmark_checkpointed_loop_spectrax.py \
+  --spectrax-root /path/to/spectrax --steps 64 --repeats 10 --output replay.json
+```
+
+The script loads the candidate recurrence directly from this checkout while
+keeping the installed release as baseline. Both executables coexist, so its
+allocator footprint must not be attributed to either method; use the isolated
+SPECTRAX benchmark for memory. The full/tail loop does not add an implicit solver,
+continuous adjoint, or backward reconstruction of a dissipative trajectory.
+
 ## Chunked Jacobians
 
 `jax.jacfwd` and `jax.jacrev` batch all basis directions by default. If a

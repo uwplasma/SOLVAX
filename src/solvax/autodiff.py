@@ -214,24 +214,26 @@ def checkpointed_fori_loop(
         if checkpoint_size < 1:
             raise ValueError("checkpoint_size must be positive")
         checkpoint_size = min(checkpoint_size, steps)
-    segments = (steps + checkpoint_size - 1) // checkpoint_size
+    segments, remainder = divmod(steps, checkpoint_size)
 
     @jax.checkpoint
     def replay_segment(segment_index, value):
         start = lower + segment_index * checkpoint_size
 
         def replay(local_index, current):
-            index = start + local_index
-            return jax.lax.cond(
-                index < upper,
-                lambda state: body_fun(index, state),
-                lambda state: state,
-                current,
-            )
+            return body_fun(start + local_index, current)
 
         return jax.lax.fori_loop(0, checkpoint_size, replay, value)
 
-    return jax.lax.fori_loop(0, segments, replay_segment, init_val)
+    value = jax.lax.fori_loop(0, segments, replay_segment, init_val)
+    if remainder:
+        # Only the final segment is partial; full segments need no per-step guard.
+        @jax.checkpoint
+        def replay_tail(current):
+            return jax.lax.fori_loop(lower + segments * checkpoint_size, upper, body_fun, current)
+
+        value = replay_tail(value)
+    return value
 
 
 def chunk_map(
