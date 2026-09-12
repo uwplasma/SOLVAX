@@ -379,6 +379,56 @@ def test_schur_projected_precond_d_none_matches_zero_d():
     assert np.allclose(np.asarray(none_out), np.asarray(zero_out), atol=1e-12)
 
 
+def test_schur_projected_application_uses_one_principal_inverse():
+    a, b, c = make_bordered(n=12, p=2, seed=19)
+    calls = []
+
+    def inverse(v):
+        calls.append(v.shape)
+        return jnp.linalg.solve(a, v)
+
+    precond = schur_projected_precond(inverse, b, c)
+    calls.clear()  # Setup applies the inverse to the border columns.
+    rhs = jnp.arange(14, dtype=jnp.float64)
+    x = precond(rhs)
+    assert calls == [(12,)]
+    dense = jnp.block([[a, b], [c, jnp.zeros((2, 2))]])
+    np.testing.assert_allclose(dense @ x, rhs, rtol=1e-11, atol=1e-11)
+
+
+@pytest.mark.parametrize("complex_values", [False, True])
+@pytest.mark.parametrize("border_diagonal", [0.0, 0.3])
+def test_schur_projected_parameter_derivative_matches_dense(complex_values, border_diagonal):
+    a, b, c = make_bordered(n=7, p=2, seed=23)
+    if complex_values:
+        a = a + 0.2j * jnp.eye(7)
+        b, c = (1.0 + 0.1j) * b, (1.0 - 0.3j) * c
+    d = border_diagonal * jnp.eye(2)
+    rhs = jnp.linspace(-0.4, 1.1, 9)
+    weights = jnp.linspace(0.2, 0.8, 9)
+
+    def evaluate(parameter, *, dense=False):
+        aa, bb, cc, dd = a + parameter * jnp.eye(7), (1 + parameter) * b, c, d
+        if dense:
+            x = jnp.linalg.solve(jnp.block([[aa, bb], [cc, dd]]), rhs)
+        else:
+            inverse = schur_projected_precond(
+                lambda v: jnp.linalg.solve(aa, v), bb, cc, d_block=dd
+            )
+            x = inverse(rhs)
+        return jnp.real(jnp.vdot(weights, x))
+
+    value, derivative = jax.jit(jax.value_and_grad(evaluate))(0.1)
+    expected, expected_derivative = jax.value_and_grad(
+        lambda parameter: evaluate(parameter, dense=True)
+    )(0.1)
+    np.testing.assert_allclose(value, expected, rtol=1e-11, atol=1e-11)
+    np.testing.assert_allclose(derivative, expected_derivative, rtol=1e-10, atol=1e-10)
+    h = 1e-5
+    fd = (evaluate(0.1 + h, dense=True) - evaluate(0.1 - h, dense=True)) / (2 * h)
+    np.testing.assert_allclose(derivative, fd, rtol=1e-7, atol=1e-8)
+
+
 # --------------------------------------------------------------- Composition
 
 

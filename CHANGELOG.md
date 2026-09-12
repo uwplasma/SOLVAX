@@ -8,6 +8,20 @@
 - Extend the Newton–Krylov PDE example with implicit forcing calibration,
   re-solved Taylor checks, and structured primal/tangent solves.
 
+- Initialize generated selected-head full recovery from the actual top block,
+  removing a redundant identity-system solve and its reverse-mode work. Partial
+  recovery and the public API are unchanged; single-block and multi-RHS cases
+  retain exact boundary semantics and differentiated solutions.
+
+- Reduce accelerator launch overhead in Thomas and checked-pivot sweeps by
+  unrolling two rows per loop for batches of at least four. Preserve CPU
+  and narrower sweeps, and all
+  solve acceptance checks; backend selection is unchanged.
+
+- Reuse the transformed border in `schur_projected_precond`, reducing each
+  application from two principal inverse calls to one and replacing the
+  retained border with its transformed counterpart.
+
 ## 0.20.0 - 2026-08-29
 
 ### Matrix-free nonlinear least squares
