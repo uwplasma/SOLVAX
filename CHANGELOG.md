@@ -3,7 +3,8 @@
 ## Unreleased
 
 - Reduce accelerator launch overhead in Thomas and checked-pivot sweeps by
-  unrolling eight rows per loop. Preserve the original CPU sweeps and all
+  unrolling two rows per loop for batches of at least four. Preserve CPU
+  and narrower sweeps, and all
   solve acceptance checks; backend selection is unchanged.
 
 ## 0.20.0 - 2026-08-29

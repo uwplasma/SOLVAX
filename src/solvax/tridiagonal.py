@@ -27,8 +27,9 @@ Two backends, selected per *lowering platform* at trace time:
   :func:`jax.lax.linalg.tridiagonal_solve` (cuSPARSE ``gtsv2`` on CUDA,
   LAPACK ``gtsv`` on CPU). On a GPU the ``n`` sequential scan steps of Thomas
   serialize into ``n`` kernel launches (latency-bound, independent of how many
-  columns ride along), so the single fused kernel is dramatically faster
-  there. Numerically equivalent to Thomas (same solution to roundoff) but not
+  columns ride along), so vendor kernels can be faster for sufficiently large systems.
+  Short systems can instead be dominated by vendor launch overhead.
+  Numerically equivalent to Thomas (same solution to roundoff) but not
   bit-identical.
 
 ``method="auto"`` (default) uses :func:`jax.lax.platform_dependent` to pick
@@ -431,13 +432,15 @@ def _lax_solve_raw(
 
 
 def _sweep(body, initial, values, *, reverse=False):
-    """Keep CPU sweep order; amortize accelerator launch overhead eight rows at a time."""
+    """Keep CPU sweep order; amortize batched accelerator launches two rows at a time."""
     def cpu(carry, rows):
         return lax.scan(body, carry, rows, reverse=reverse)
 
     def accelerator(carry, rows):
-        return lax.scan(body, carry, rows, reverse=reverse, unroll=8)
+        return lax.scan(body, carry, rows, reverse=reverse, unroll=2)
 
+    if min(leaf.size for leaf in jax.tree.leaves(initial)) < 4:
+        return cpu(initial, values)
     if _platform_dependent is not None:
         return _platform_dependent(initial, values, cpu=cpu, default=accelerator)
     run = cpu if jax.default_backend() == "cpu" else accelerator  # pragma: no cover
