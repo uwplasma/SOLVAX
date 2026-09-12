@@ -421,6 +421,38 @@ def test_root_solve_custom_tangent_solve():
     assert np.allclose(np.asarray(g), expected, rtol=1e-8)
 
 
+@pytest.mark.parametrize("bad_value", [float("nan"), float("inf")])
+@pytest.mark.parametrize("fixed_work", [False, True])
+@pytest.mark.parametrize("after_update", [False, True])
+def test_newton_krylov_never_certifies_nonfinite_residuals(
+    bad_value, fixed_work, after_update
+):
+    def residual(x):
+        return jnp.where(x >= 1.0, bad_value, x - 2.0) if after_update else jnp.asarray(bad_value)
+
+    result = jax.jit(lambda: newton_krylov(
+        residual, jnp.asarray(0.0), max_steps=2, linear_restart=1,
+        linear_max_restarts=1, fixed_work=fixed_work,
+    ))()
+    assert not bool(result.converged)
+    assert not np.isfinite(float(result.residual_norm))
+    assert int(result.newton_iterations) == int(after_update)
+
+
+@pytest.mark.parametrize("name", ["atol", "rtol"])
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+@pytest.mark.parametrize("fixed_work", [False, True])
+def test_newton_krylov_rejects_nonfinite_tolerance(name, value, fixed_work):
+    result = jax.jit(lambda: newton_krylov(
+        lambda x: x - 1.0, jnp.asarray(0.0), max_steps=2,
+        linear_restart=1, linear_max_restarts=1, fixed_work=fixed_work,
+        **{name: value},
+    ))()
+    assert not bool(result.converged)
+    assert float(result.residual_norm) == 1.0
+    assert int(result.newton_iterations) == 0
+
+
 def test_newton_krylov_scalar_converges_under_jit():
     solution = jax.jit(
         lambda initial: newton_krylov(

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Newton–Krylov and pseudo-transient continuation reject nonfinite residual
+  norms and stopping thresholds instead of reporting false convergence. Newton's
+  zero-safe norm now preserves NaNs.
+- Extend the Newton–Krylov PDE example with implicit forcing calibration,
+  re-solved Taylor checks, and structured primal/tangent solves.
+
 ## 0.20.0 - 2026-08-29
 
 ### Matrix-free nonlinear least squares

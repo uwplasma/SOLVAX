@@ -23,6 +23,17 @@ from solvax import nonlinear as nonlinear_module
 jax.config.update("jax_enable_x64", True)
 
 
+@pytest.mark.parametrize("bad_value", [float("nan"), float("inf")])
+def test_pseudo_transient_rejects_nonfinite_initial_residual(bad_value):
+    result = jax.jit(lambda: pseudo_transient_continuation(
+        lambda x: jnp.full_like(x, bad_value), jnp.zeros(1)
+    ))()
+    assert not bool(result.converged)
+    assert not np.isfinite(float(result.residual_norm))
+    assert int(result.steps) == 0
+    assert int(result.linear_iterations) == 0
+
+
 def _scalar_config(**updates) -> PseudoTransientConfig:
     values = dict(
         rtol=1.0e-11,

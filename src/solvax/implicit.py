@@ -75,8 +75,10 @@ def _tree_dot(left: PyTree, right: PyTree) -> jax.Array:
 
 def _tree_norm(value: PyTree, inner_product: InnerProduct) -> jax.Array:
     squared = jnp.maximum(jnp.real(inner_product(value, value)), 0.0)
-    positive = squared > 0
-    return jnp.where(positive, jnp.sqrt(jnp.where(positive, squared, 1.0)), 0.0)
+    # Preserve NaN instead of turning a failed residual into an exact root.
+    # The guarded zero branch still has a finite derivative at the origin.
+    nonzero = squared != 0
+    return jnp.where(nonzero, jnp.sqrt(jnp.where(nonzero, squared, 1.0)), 0.0)
 
 
 def newton_krylov(
@@ -105,6 +107,9 @@ def newton_krylov(
     Jacobian is never materialised. The nonlinear iteration stops when
 
     ``norm(residual) <= max(atol, rtol * norm(initial_residual))``.
+
+    Nonfinite residual norms or stopping thresholds terminate with ``converged=False``.
+    Such a result must not be used as a certified implicit differentiation root.
 
     Args:
         residual_fn: nonlinear residual with the same PyTree input/output structure.
@@ -181,6 +186,8 @@ def newton_krylov(
         residual_norm = norm(residual)
         update = (
             (residual_norm > tolerance)
+            & jnp.isfinite(residual_norm)
+            & jnp.isfinite(tolerance)
             & (newton_iterations < max_steps)
             & linear_converged
         )
@@ -241,7 +248,10 @@ def newton_krylov(
 
         return jax.lax.cond(update, update_fn, finish_fn, operand=None)
 
-    finished0 = (residual_norm0 <= tolerance) | (max_steps == 0)
+    finished0 = (
+        (residual_norm0 <= tolerance) | (max_steps == 0)
+        | ~jnp.isfinite(residual_norm0) | ~jnp.isfinite(tolerance)
+    )
     initial = (
         x0,
         residual_norm0,
@@ -274,7 +284,7 @@ def newton_krylov(
         residual_norm,
         newton_iterations,
         linear_iterations,
-        residual_norm <= tolerance,
+        jnp.isfinite(residual_norm) & jnp.isfinite(tolerance) & (residual_norm <= tolerance),
         linear_converged,
     )
 
