@@ -7,6 +7,10 @@
   and narrower sweeps, and all
   solve acceptance checks; backend selection is unchanged.
 
+- Reuse the transformed border in `schur_projected_precond`, reducing each
+  application from two principal inverse calls to one and replacing the
+  retained border with its transformed counterpart.
+
 ## 0.20.0 - 2026-08-29
 
 ### Matrix-free nonlinear least squares

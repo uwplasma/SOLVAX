@@ -122,6 +122,13 @@ $$
 x=\widetilde A^{-1}(r_x-By).
 $$
 
+Linearity lets the implementation retain $\widetilde A^{-1}B$ from setup and
+compute $x=\widetilde A^{-1}r_x-(\widetilde A^{-1}B)y$. Each application then
+needs only one principal inverse action. The transformed border replaces $B$
+in the closure; its shape is unchanged, and its dtype is the inverse's output
+dtype. This is an algebraic rearrangement, not a change of preconditioner;
+floating-point results need not be bitwise identical.
+
 ```python
 precond = sx.schur_projected_precond(a_inv, b_columns, c_rows)
 solution = sx.gmres(K, rhs, precond=precond)

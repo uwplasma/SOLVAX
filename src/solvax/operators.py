@@ -435,8 +435,11 @@ def schur_projected_precond(
     the preconditioned operator is the identity and GMRES converges in one
     iteration; with an approximate ``a_inv``, the border is still eliminated
     exactly through the projected Schur system, so a preconditioner built for
-    the physics block ``A`` preconditions the full bordered system.  Each
-    application costs two calls to ``a_inv`` plus one small triangular solve.
+    the physics block ``A`` preconditions the full bordered system. Store
+    ``a_inv(B)`` instead of ``B``: linearity gives
+    ``x = a_inv(r_x) - a_inv(B) y``, so each application costs one call to
+    ``a_inv`` plus one small triangular solve. The retained border has the
+    same shape as ``B``, in the inverse's output dtype.
 
     Args:
         a_inv: callable ``r -> A^{-1} r`` (approximate is fine) on flat
@@ -460,16 +463,12 @@ def schur_projected_precond(
     if schur.shape[0] != schur.shape[1]:
         raise ValueError(f"Schur complement must be square; got shape {schur.shape}")
     schur_lu = lu_factor(schur)
-    projected = schur_complement_precond(
-        a_inv,
-        lambda y: b_cols @ y,
-        lambda x: c_rows @ x,
-        lambda rhs: lu_solve(schur_lu, rhs),
-    )
     n = c_rows.shape[1]
 
     def precond(r: jax.Array) -> jax.Array:
-        x, y = projected((r[:n], r[n:]))
+        a_rhs = a_inv(r[:n])
+        y = lu_solve(schur_lu, c_rows @ a_rhs - r[n:])
+        x = a_rhs - ainv_b @ y
         return jnp.concatenate([x, y])
 
     return precond
