@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.21.0 - 2026-09-13
+
 - Newton–Krylov and pseudo-transient continuation reject nonfinite residual
   norms and stopping thresholds instead of reporting false convergence. Newton's
   zero-safe norm now preserves NaNs.
