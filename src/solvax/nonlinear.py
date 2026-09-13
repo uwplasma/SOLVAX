@@ -341,7 +341,11 @@ def pseudo_transient_continuation(
 
     def continue_iteration(state):
         residual_norm, terminal_linear_failure, steps = state[1], state[2], state[5]
-        return (steps < config.max_steps) & (residual_norm > tolerance) & ~terminal_linear_failure
+        return (
+            (steps < config.max_steps) & (residual_norm > tolerance)
+            & jnp.isfinite(residual_norm) & jnp.isfinite(tolerance)
+            & ~terminal_linear_failure
+        )
 
     def iteration(state):
         (
@@ -496,7 +500,7 @@ def pseudo_transient_continuation(
         accepted_history,
         linear_history,
     ) = final
-    converged = residual_norm <= tolerance
+    converged = jnp.isfinite(residual_norm) & jnp.isfinite(tolerance) & (residual_norm <= tolerance)
     return PseudoTransientSolution(
         x=x,
         residual_norm=residual_norm,

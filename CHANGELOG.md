@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Newton–Krylov and pseudo-transient continuation reject nonfinite residual
+  norms and stopping thresholds instead of reporting false convergence. Newton's
+  zero-safe norm now preserves NaNs.
+- Extend the Newton–Krylov PDE example with implicit forcing calibration,
+  re-solved Taylor checks, and structured primal/tangent solves.
+
 - Initialize generated selected-head full recovery from the actual top block,
   removing a redundant identity-system solve and its reverse-mode work. Partial
   recovery and the public API are unchanged; single-block and multi-RHS cases

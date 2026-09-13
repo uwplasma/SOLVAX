@@ -147,3 +147,14 @@ preconditioner, and inner-product contracts, and skips the outer Newton loop.
   is unchanged as long as `residual` preserves the state structure.
 
 Runnable counterpart: `examples/19_newton_krylov.py`.
+
+The runnable example also calibrates the forcing amplitude to a target mean
+state. It uses `root_solve` for implicit differentiation, checks second-order
+Taylor remainders over four step halvings with fresh nonlinear solves, and
+verifies the final fitted amplitude. Its one-dimensional Jacobian is
+tridiagonal: a single operator action recovers the diagonal, and
+`linear_solve` supplies the transpose rule around the structured solve. This
+avoids differentiating a Thomas scan inside the root tangent. The operator is
+symmetric in this example; a nonsymmetric operator requires the corresponding
+transpose solver. These checks demonstrate the solver interface, not the
+accuracy of an MHD equilibrium or its shape derivatives.

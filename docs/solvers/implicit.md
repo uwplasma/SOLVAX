@@ -29,6 +29,12 @@ well as `newton_iterations`, `linear_iterations`, and `residual_norm`.
 distributed reductions; `norm=` may independently define the nonlinear
 residual norm.
 
+Nonfinite residual norms or stopping thresholds are failures, including an infinite
+initial norm with relative stopping. A successful linear flag alone says
+nothing about the nonlinear root. The `root_solve` wrapper trusts its supplied
+solver; check convergence before using an implicit derivative and propagate
+failure rather than returning an uncertified iterate.
+
 For bounded-cost composition inside `jax.lax.scan`, opt in with
 `fixed_work=True`. Newton and its inner GMRES then use fixed-length scan
 control and mask updates after convergence; the default early-exit path is
