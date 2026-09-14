@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Add `block_thomas_factor_ops` / `block_thomas_solve_ops` for block-tridiagonal
+  systems whose off-diagonal blocks are linear operators
+  (`couple(params, k, Z, *, which, transpose)`), e.g. `a_k S + b_k diag(mu)`.
+  Only the Schur LU factors are stored, a third of the stored-band factors, and
+  `U_k Delta^{-1} L_{k+1}` is formed through the action. The solve is two
+  carry-threaded scans supporting transposed solves, `jit`, `vmap`,
+  `linear_transpose` and reverse mode without copying the factors.
+
 ## 0.21.0 - 2026-09-13
 
 - Newton–Krylov and pseudo-transient continuation reject nonfinite residual

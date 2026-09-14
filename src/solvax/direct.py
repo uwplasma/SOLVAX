@@ -715,6 +715,192 @@ def block_thomas_solve(
     return jnp.stack(solution)
 
 
+@jax.tree_util.register_pytree_node_class
+@dataclasses.dataclass(frozen=True, eq=False)
+class OperatorBlockTridiagFactors:
+    """Schur factors of a block-tridiagonal system with operator couplings.
+
+    Returned by :func:`block_thomas_factor_ops`, consumed by
+    :func:`block_thomas_solve_ops`. No off-diagonal block is stored: the
+    solve applies ``L_k`` and ``U_k`` through ``couple``.
+
+    Attributes:
+        blocks: ``(n_blocks, m, m)`` LU factors of ``Delta_k``.
+        pivots: ``(n_blocks, m)`` LU pivots.
+        params: coupling parameters passed to ``couple``. A pytree *child*,
+            so batched or traced coefficients can cross ``jit``/``vmap``.
+        couple: the coupling action (static; see :func:`block_thomas_factor_ops`).
+        work_dtype: working precision of the diagonal blocks (static).
+    """
+
+    blocks: jax.Array
+    pivots: jax.Array
+    params: object
+    couple: Callable
+    work_dtype: object
+
+    def tree_flatten(self):
+        return (self.blocks, self.pivots, self.params), (self.couple, self.work_dtype)
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        return cls(*children, *aux_data)
+
+
+def block_thomas_factor_ops(
+    diag: jax.Array | Callable[[jax.Array], jax.Array],
+    couple: Callable,
+    params=None,
+    *,
+    n_blocks: int | None = None,
+) -> OperatorBlockTridiagFactors:
+    """Schur sweep for block-tridiagonal systems whose couplings are operators.
+
+    Same elimination order and recurrences as :func:`block_thomas_factor`, for
+    ``L_k x_{k-1} + D_k x_k + U_k x_{k+1} = b_k`` with dense ``D_k`` and
+    ``L_k``, ``U_k`` available only as actions, e.g. ``a_k S + b_k diag(mu)``
+    with one sparse stencil ``S``. Each step materializes at most one ``m x m``
+    block and forms ``U_k Delta_{k+1}^{-1} L_{k+1}`` by applying ``U_k`` to a
+    matrix instead of the stored-band route's dense ``m^3`` product.
+
+    Coupling contract. ``couple(params, k, Z, *, which, transpose)`` must return
+    ``C Z`` for a 2-D ``Z`` of shape ``(m, r)``, ``r >= 1``, where ``C`` is
+    ``L_k`` (``which="lower"``) or ``U_k`` (``which="upper"``), transposed when
+    ``transpose=True``. ``k`` is a traced int32 in ``[0, n_blocks)``; ``which``
+    and ``transpose`` are static Python values. It must be linear in ``Z`` and a
+    pure function of ``(params, k)``. ``L_0`` and ``U_{n-1}`` never affect the
+    result but are applied to exact zeros, so they must be finite. Transposed
+    actions are required only by ``transpose=True`` solves, hence by
+    :func:`jax.linear_transpose` and reverse mode of the solve. Batched or
+    traced coefficients belong in ``params``, which the factors carry as data;
+    ``couple`` itself is static, so pass the same function object each time to
+    avoid recompiling.
+
+    Storage. The LU factors and pivots of ``Delta_k`` are kept: one
+    ``lu_solve`` of the materialized ``L_{k+1}`` plus one ``lu_factor`` per
+    step, and two triangular solves per block per application. That is
+    ``n_blocks * m^2`` values, a third of the stored-band factors.
+
+    Args:
+        diag: ``(n_blocks, m, m)`` diagonal blocks, or ``diag(k) -> (m, m)``
+            evaluated once per block (then ``n_blocks`` is required).
+        couple: coupling action, contract above.
+        params: pytree passed as the first argument of ``couple``.
+        n_blocks: static block count; inferred from an array ``diag``.
+
+    Returns:
+        :class:`OperatorBlockTridiagFactors` for :func:`block_thomas_solve_ops`.
+    """
+    if callable(diag):
+        if n_blocks is None:
+            raise ValueError("n_blocks is required when diag is callable")
+        diag_fn = diag
+    else:
+        if n_blocks is not None and n_blocks != diag.shape[0]:
+            raise ValueError("n_blocks disagrees with diag.shape[0]")
+        n_blocks = int(diag.shape[0])
+        diag_fn = lambda k: diag[k]  # noqa: E731
+    if n_blocks < 1:
+        raise ValueError("n_blocks must be positive")
+
+    d_last = diag_fn(jnp.int32(n_blocks - 1))
+    work = jnp.result_type(d_last)
+    apply = partial(couple, params)
+    eye = jnp.eye(d_last.shape[-1], dtype=work)
+
+    def step(delta_next, k):
+        solved = lu_solve(delta_next, apply(k + 1, eye, which="lower", transpose=False))
+        delta = lu_factor(diag_fn(k) - apply(k, solved, which="upper", transpose=False))
+        return delta, delta
+
+    last = lu_factor(d_last)
+    _, (lus, pivs) = jax.lax.scan(
+        step, last, jnp.arange(n_blocks - 1, dtype=jnp.int32), reverse=True
+    )
+    blocks = jnp.concatenate([lus, last[0][None]], axis=0)
+    pivots = jnp.concatenate([pivs, last[1][None]], axis=0)
+    return OperatorBlockTridiagFactors(blocks, pivots, params, couple, work)
+
+
+def block_thomas_solve_ops(
+    factors: OperatorBlockTridiagFactors, rhs: jax.Array, transpose: bool = False
+) -> jax.Array:
+    """Solve with :class:`OperatorBlockTridiagFactors`, primal or transposed.
+
+    The recurrences are those of :func:`_block_thomas_solve_regenerated`: a
+    reverse scan carrying ``z_{k+1} = Delta_{k+1}^{-1} sigma_{k+1}`` and
+    forming ``sigma_k = b_k - U_k z_{k+1}``, then a forward scan forming
+    ``x_k = Delta_k^{-1} (sigma_k - L_k x_{k-1})``. For ``transpose=True`` the
+    couplings become ``L_{k+1}^T`` and ``U_{k-1}^T`` and ``Delta_k^{-1}``
+    becomes ``Delta_k^{-T}`` — the same factors serve ``A^T``.
+
+    Both scans iterate over block indices and thread one ``(n_blocks, m, r)``
+    buffer through the carry, so nothing linear in ``rhs`` is a scan input and
+    the solve stays transposable on JAX releases before 0.10. Factors are read
+    one block per step as scan constants: under ``vmap`` a batched scan input
+    moves its batch axis behind the scan axis and copies the band, a batched
+    constant does not.
+
+    Args:
+        factors: output of :func:`block_thomas_factor_ops`.
+        rhs: ``(n_blocks, m)`` or ``(n_blocks, m, n_rhs)``; ``couple`` always
+            receives 2-D ``(m, r)`` operands.
+        transpose: solve ``A^T x = rhs``; requires transposed coupling actions.
+
+    Returns:
+        Solution with the shape of ``rhs``, in the promoted precision of
+        ``rhs`` and the diagonal blocks.
+    """
+    blocks, pivots = factors.blocks, factors.pivots
+    n_blocks = int(blocks.shape[0])
+    if int(rhs.shape[0]) != n_blocks:
+        raise ValueError("rhs leading dimension must equal n_blocks")
+    work = jnp.result_type(rhs, factors.work_dtype)
+    apply = partial(factors.couple, factors.params)
+    vector = rhs.ndim == 2
+    buffer = (rhs[..., None] if vector else rhs).astype(work)
+    read = lambda values, k: jax.lax.dynamic_index_in_dim(values, k, 0, keepdims=False)  # noqa: E731
+    write = lambda values, v, k: jax.lax.dynamic_update_index_in_dim(values, v, k, 0)  # noqa: E731
+
+    def inverse(k, v):
+        return lu_solve((read(blocks, k), read(pivots, k)), v, trans=int(transpose))
+
+    # Without this, reverse mode saves every per-step block read as a stacked
+    # scan residual (a copy of the band per scan). Rematerializing leaves the
+    # index as the only per-step residual; the band itself is loop-invariant.
+    inverse = jax.checkpoint(
+        inverse, prevent_cse=False, policy=jax.checkpoint_policies.nothing_saveable
+    )
+
+    # The zero carries make the boundary couplings (U_{n-1}, L_0, or their
+    # transposed counterparts at the clamped index) act on exact zeros.
+    def down(carry, k):
+        z_next, values = carry
+        if transpose:
+            k_next = jnp.minimum(k + 1, n_blocks - 1)
+            coupled = apply(k_next, z_next, which="lower", transpose=True)
+        else:
+            coupled = apply(k, z_next, which="upper", transpose=False)
+        sigma = read(values, k) - coupled
+        return (inverse(k, sigma), write(values, sigma, k)), None
+
+    def up(carry, k):
+        x_previous, values = carry
+        if transpose:
+            k_previous = jnp.maximum(k - 1, 0)
+            coupled = apply(k_previous, x_previous, which="upper", transpose=True)
+        else:
+            coupled = apply(k, x_previous, which="lower", transpose=False)
+        x = inverse(k, read(values, k) - coupled)
+        return (x, write(values, x, k)), None
+
+    indices = jnp.arange(n_blocks, dtype=jnp.int32)
+    zero = jnp.zeros(buffer.shape[1:], work)
+    (_, sigma), _ = jax.lax.scan(down, (zero, buffer), indices, reverse=True)
+    (_, solution), _ = jax.lax.scan(up, (zero, sigma), indices)
+    return solution[..., 0] if vector else solution
+
+
 def block_thomas(
     lower: jax.Array,
     diag: jax.Array,
