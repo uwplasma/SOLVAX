@@ -9,6 +9,10 @@
   `U_k Delta^{-1} L_{k+1}` is formed through the action. The solve is two
   carry-threaded scans supporting transposed solves, `jit`, `vmap`,
   `linear_transpose` and reverse mode without copying the factors.
+- `block_thomas_factor_ops` gains `factor_dtype` (for example float32 Schur
+  factors under float64 substitution) and `store="inverse"`, which keeps
+  `Delta_k^{-1}` and applies each block as a matrix product instead of two
+  triangular solves. `store="inverse"` requires transposed coupling actions.
 
 ## 0.21.0 - 2026-09-13
 
