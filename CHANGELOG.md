@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.22.0 - 2026-09-14
+
 - Add `block_thomas_factor_ops` / `block_thomas_solve_ops` for block-tridiagonal
   systems whose off-diagonal blocks are linear operators
   (`couple(params, k, Z, *, which, transpose)`), e.g. `a_k S + b_k diag(mu)`.

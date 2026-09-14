@@ -116,6 +116,7 @@ testing
 :caption: Reference
 
 api
+release-notes-0.22.0
 release-notes-0.21.0
 release-notes-0.20.0
 release-notes-0.19.0
