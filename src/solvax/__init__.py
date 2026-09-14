@@ -178,7 +178,7 @@ from solvax.tridiagonal import (
     tridiagonal_solve_checked,
 )
 
-__version__ = "0.21.0"
+__version__ = "0.22.0"
 
 __all__ = [
     "RECYCLE_DRIFT_ADVISORY",
