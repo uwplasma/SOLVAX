@@ -163,8 +163,11 @@ Two storage options compose. `factor_dtype=jnp.float32` puts the Schur factors
 in single precision under working-precision substitution. `store="inverse"`
 keeps `Delta_k^{-1}` instead of LU factors and pivots, so each solve step is a
 matrix product instead of two triangular solves. Both storages hold the same
-number of values, and both lose accuracy together as `Delta_k` becomes
-ill-conditioned.
+number of values. The explicit inverse is not backward stable on nearly
+singular chains: in a DKX coarse preconditioner with block condition numbers
+near $10^{16}$, its backward error reached $10^{-1}$ where LU storage stayed at
+$4 \times 10^{-10}$. Prefer `store="lu"` unless the blocks are known to be well
+conditioned.
 
 Reproduce the comparison with the stored-band route on a kinetic-shaped system
 (a periodic central-difference angular stencil and dense diagonal blocks) with:
