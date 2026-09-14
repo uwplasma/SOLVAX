@@ -128,6 +128,65 @@ it when the factors, not the sweep, are what does not fit.
 `block_fn` must be a pure function of its index: the substitution assumes a
 regenerated block equals the one the factorization saw.
 
+## Operator couplings
+
+When the off-diagonal blocks are cheap operators rather than dense matrices,
+for example `a_k S + b_k diag(mu)` with one sparse stencil `S` shared by every
+row, pass their action instead of their bands:
+
+```python
+def couple(params, k, z, *, which, transpose):
+    """Return C z for C = L_k (which="lower") or U_k, transposed on request."""
+    stencil, coef = params  # z has shape (m, r)
+    column = 0 if which == "lower" else 1
+    return coef[k, column] * (stencil.T @ z if transpose else stencil @ z)
+
+factors = sx.block_thomas_factor_ops(diag, couple, (stencil, coef))
+x = sx.block_thomas_solve_ops(factors, rhs)
+x_t = sx.block_thomas_solve_ops(factors, adjoint_rhs, transpose=True)
+```
+
+Here `stencil` stands for any linear action on the columns of `z`; in practice
+it is sparse or matrix-free. The factorization runs the Schur recurrence of
+`block_thomas_factor`, but forms `U_k Delta_{k+1}^{-1} L_{k+1}` by applying
+`U_k` to a matrix, so no band is materialized and the dense $m^3$ coupling
+product becomes the cost of the action. The factors keep `n_blocks * m^2`
+values, a third of `BlockTridiagFactors`, and carry `params` as pytree data, so
+factors built under `vmap` cross `jit` boundaries.
+
+The action must be linear in `z` and a pure function of `(params, k)`, with
+`which` and `transpose` static. `L_0` and `U_{N-1}` act only on zeros but must
+be finite. Transposed actions are needed by `transpose=True` solves, and hence
+by `jax.linear_transpose` and reverse mode, and by `store="inverse"`.
+
+Two storage options compose. `factor_dtype=jnp.float32` puts the Schur factors
+in single precision under working-precision substitution. `store="inverse"`
+keeps `Delta_k^{-1}` instead of LU factors and pivots, so each solve step is a
+matrix product instead of two triangular solves. Both storages hold the same
+number of values, and both lose accuracy together as `Delta_k` becomes
+ill-conditioned.
+
+Reproduce the comparison with the stored-band route on a kinetic-shaped system
+(a periodic central-difference angular stencil and dense diagonal blocks) with:
+
+```bash
+PYTHONPATH=src python benchmarks/benchmark_operator_couplings.py --T 21 --Z 37 --out result.json
+```
+
+For `m = 777`, 16 blocks and a batch of 2 in float64, on four pinned cores of an
+Intel Xeon W-2295 with one BLAS thread and other jobs on the host:
+
+| Route | Factor per block | Apply per block | Stored factors | Solve temporaries |
+|---|---:|---:|---:|---:|
+| `block_thomas_factor` | 66.8 ms | 5.47 ms | 464 MB | 445 MB |
+| `block_thomas_factor_ops`, `store="lu"` | 47.4 ms | 5.60 ms | 155 MB | 10.0 MB |
+| `block_thomas_factor_ops`, `store="inverse"` | 50.9 ms | 0.90 ms | 155 MB | 10.0 MB |
+
+All three agree to $3 \times 10^{-15}$. Timings are best-of-three on a shared
+machine and indicate ratios, not device speeds.
+`benchmarks/results/operator-couplings-cpu-x64-m777.json` and `-m165.json`
+record the software versions and source commit.
+
 ## Checkpoint one generated solve
 
 When the blocks are cheap to regenerate and the system is solved once, retain
@@ -501,6 +560,9 @@ defect corrections recover accuracy when the conditioning permits. See
 - {func}`solvax.direct.block_thomas_factor`
 - {func}`solvax.direct.block_thomas_factor_fn`
 - {class}`solvax.direct.GeneratedBlockTridiagFactors`
+- {func}`solvax.direct.block_thomas_factor_ops`
+- {class}`solvax.direct.OperatorBlockTridiagFactors`
+- {func}`solvax.direct.block_thomas_solve_ops`
 - {func}`solvax.direct.block_thomas_solve`
 - {func}`solvax.direct.block_thomas_selected_tail_fn`
 - {func}`solvax.direct.block_thomas_truncated`

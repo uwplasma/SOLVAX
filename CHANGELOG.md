@@ -13,6 +13,9 @@
   factors under float64 substitution) and `store="inverse"`, which keeps
   `Delta_k^{-1}` and applies each block as a matrix product instead of two
   triangular solves. `store="inverse"` requires transposed coupling actions.
+- Document operator-coupled block Thomas in `docs/solvers/block_tridiagonal.md`
+  and add `benchmarks/benchmark_operator_couplings.py`, which compares the
+  stored-band route with both storages on a kinetic-shaped stencil system.
 
 ## 0.21.0 - 2026-09-13
 

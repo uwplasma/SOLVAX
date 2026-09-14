@@ -77,6 +77,7 @@ jobs:
               tests/test_pcg.py tests/test_propagator.py tests/test_sharding.py
               tests/test_generated_block_benchmark.py
               tests/test_checkpointed_block_benchmark.py tests/test_native.py
+              tests/test_operator_couplings_benchmark.py
           - os: ubuntu-latest
             python: "3.10"
             stack: minimum

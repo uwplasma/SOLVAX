@@ -1,0 +1,42 @@
+{
+ "solvax": "0.21.0",
+ "git_commit": "b865dcd",
+ "jax": "0.10.2",
+ "device": "cpu",
+ "host": "pop-os",
+ "threads": {
+  "OMP_NUM_THREADS": "1",
+  "OPENBLAS_NUM_THREADS": "1"
+ },
+ "T": 11,
+ "Z": 15,
+ "m": 165,
+ "blocks": 16,
+ "batch": 2,
+ "routes": {
+  "dense": {
+   "factor_s_per_block": 0.001907511250465177,
+   "apply_s_per_block": 0.00034653077455004677,
+   "stored_factor_bytes": 20929920,
+   "solve_temp_bytes": 20085280,
+   "rel_diff_vs_dense": 0.0,
+   "max_rel_residual": 1.577761644386914e-15
+  },
+  "lu": {
+   "factor_s_per_block": 0.0016092170044430532,
+   "apply_s_per_block": 0.00047980493400245905,
+   "stored_factor_bytes": 6999680,
+   "solve_temp_bytes": 501920,
+   "rel_diff_vs_dense": 4.880949269895301e-16,
+   "max_rel_residual": 1.5145372579333176e-15
+  },
+  "inverse": {
+   "factor_s_per_block": 0.0014676273422082886,
+   "apply_s_per_block": 6.645581015618518e-05,
+   "stored_factor_bytes": 6978560,
+   "solve_temp_bytes": 499920,
+   "rel_diff_vs_dense": 8.824697504183098e-16,
+   "max_rel_residual": 2.2616234623786488e-15
+  }
+ }
+}
