@@ -17,6 +17,7 @@ jax.config.update("jax_enable_x64", True)
 
 T, Z = 5, 4
 M = T * Z
+STORES = ["lu", "inverse"]
 
 
 def _stencil(weights, u, transpose):
@@ -82,15 +83,19 @@ def test_stencil_transpose_action_is_the_transpose():
         assert rel(t, band[1].T) <= 1e-14
 
 
+@pytest.mark.parametrize("store", STORES)
 @pytest.mark.parametrize("kind", ["stencil", "dense"])
 @pytest.mark.parametrize("n_rhs", [None, 3])
 @pytest.mark.parametrize("n_blocks", [1, 6])
-def test_matches_stored_band_route(kind, n_rhs, n_blocks):
+def test_matches_stored_band_route(store, kind, n_rhs, n_blocks):
     couple, params, bands, rhs = make_problem(kind, n_blocks, n_rhs, seed=1)
-    factors = block_thomas_factor_ops(bands[1], couple, params)
+    factors = block_thomas_factor_ops(bands[1], couple, params, store=store)
     reference = block_thomas_factor(*bands)
     assert factors.blocks.shape == (n_blocks, M, M)
-    assert factors.pivots.shape == (n_blocks, M)
+    if store == "lu":
+        assert factors.pivots.shape == (n_blocks, M)
+    else:
+        assert factors.pivots is None
     for transpose in (False, True):
         actual = block_thomas_solve_ops(factors, rhs, transpose=transpose)
         expected = block_thomas_solve(reference, rhs, transpose=transpose)
@@ -100,17 +105,19 @@ def test_matches_stored_band_route(kind, n_rhs, n_blocks):
     assert float(jnp.max(residual)) <= 1e-13
 
 
-def test_callable_diag_matches_array():
+@pytest.mark.parametrize("store", STORES)
+def test_callable_diag_matches_array(store):
     couple, params, bands, rhs = make_problem("stencil", 5, seed=2)
     diag = bands[1]
-    from_fn = block_thomas_factor_ops(lambda k: diag[k], couple, params, n_blocks=5)
-    from_array = block_thomas_factor_ops(diag, couple, params)
+    from_fn = block_thomas_factor_ops(lambda k: diag[k], couple, params, n_blocks=5, store=store)
+    from_array = block_thomas_factor_ops(diag, couple, params, store=store)
     assert rel(from_fn.blocks, from_array.blocks) <= 1e-14
     with pytest.raises(ValueError, match="n_blocks is required"):
         block_thomas_factor_ops(lambda k: diag[k], couple, params)
 
 
-def test_jit_vmap_factors_cross_transformation_boundaries():
+@pytest.mark.parametrize("store", STORES)
+def test_jit_vmap_factors_cross_transformation_boundaries(store):
     """Batched coefficients live in ``params``, so factors leave ``jit(vmap)``."""
     n_blocks, batch = 5, 3
     scales = jnp.asarray([0.5, 1.0, 1.5])
@@ -119,7 +126,7 @@ def test_jit_vmap_factors_cross_transformation_boundaries():
     rhs = jnp.stack([p[3] for p in problems])
 
     def factor(scale):
-        return block_thomas_factor_ops(diag, couple, (*base[:3], scale))
+        return block_thomas_factor_ops(diag, couple, (*base[:3], scale), store=store)
 
     factors = jax.jit(jax.vmap(factor))(scales)
     assert factors.blocks.shape == (batch, n_blocks, M, M)
@@ -131,10 +138,11 @@ def test_jit_vmap_factors_cross_transformation_boundaries():
             assert rel(actual[i], expected) <= 1e-12
 
 
+@pytest.mark.parametrize("store", STORES)
 @pytest.mark.parametrize("n_rhs", [None, 2])
-def test_linear_transpose_and_grad_match_dense_route(n_rhs):
+def test_linear_transpose_and_grad_match_dense_route(store, n_rhs):
     couple, params, bands, rhs = make_problem("stencil", 6, n_rhs, seed=4)
-    factors = block_thomas_factor_ops(bands[1], couple, params)
+    factors = block_thomas_factor_ops(bands[1], couple, params, store=store)
     reference = block_thomas_factor(*bands)
     cotangent = jnp.asarray(np.random.default_rng(5).standard_normal(rhs.shape))
 
@@ -160,13 +168,28 @@ def test_linear_transpose_and_grad_match_dense_route(n_rhs):
         assert rel(jax.jit(jax.grad(loss), static_argnums=1)(rhs, ops_route), expected) <= 1e-12
 
 
-def test_solve_temporaries_stay_below_one_factor_band():
+@pytest.mark.parametrize("store", STORES)
+def test_float32_factors(store):
+    couple, params, bands, rhs = make_problem("stencil", 6, 2, seed=6)
+    factors = block_thomas_factor_ops(
+        bands[1], couple, params, factor_dtype=jnp.float32, store=store
+    )
+    assert factors.blocks.dtype == jnp.float32
+    x = block_thomas_solve_ops(factors, rhs)
+    assert x.dtype == jnp.float64
+    assert float(jnp.max(block_tridiag_relative_residual(*bands, x, rhs))) <= 1e-5
+    expected = block_thomas_solve(block_thomas_factor(*bands), rhs, transpose=True)
+    assert rel(block_thomas_solve_ops(factors, rhs, transpose=True), expected) <= 1e-5
+
+
+@pytest.mark.parametrize("store", STORES)
+def test_solve_temporaries_stay_below_one_factor_band(store):
     """Neither vmap nor linear_transpose nor reverse mode may copy the band."""
     couple, params, bands, rhs = make_problem("stencil", 40, seed=8)
-    factors = block_thomas_factor_ops(bands[1], couple, params)
-    batched = jax.vmap(lambda s: block_thomas_factor_ops(bands[1], couple, (*params[:3], s)))(
-        jnp.asarray([1.0, 2.0])
-    )
+    factors = block_thomas_factor_ops(bands[1], couple, params, store=store)
+    batched = jax.vmap(
+        lambda s: block_thomas_factor_ops(bands[1], couple, (*params[:3], s), store=store)
+    )(jnp.asarray([1.0, 2.0]))
     cases = {
         "vmap": (jax.vmap(block_thomas_solve_ops), (batched, jnp.stack([rhs, -rhs]))),
         "linear_transpose": (
@@ -188,6 +211,8 @@ def test_solve_temporaries_stay_below_one_factor_band():
 
 def test_rejects_bad_arguments():
     couple, params, bands, rhs = make_problem("dense", 3, seed=7)
+    with pytest.raises(ValueError, match="store"):
+        block_thomas_factor_ops(bands[1], couple, params, store="qr")
     with pytest.raises(ValueError, match="n_blocks disagrees"):
         block_thomas_factor_ops(bands[1], couple, params, n_blocks=4)
     factors = block_thomas_factor_ops(bands[1], couple, params)

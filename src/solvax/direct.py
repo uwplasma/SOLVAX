@@ -715,6 +715,9 @@ def block_thomas_solve(
     return jnp.stack(solution)
 
 
+_STORES = ("lu", "inverse")
+
+
 @jax.tree_util.register_pytree_node_class
 @dataclasses.dataclass(frozen=True, eq=False)
 class OperatorBlockTridiagFactors:
@@ -725,22 +728,26 @@ class OperatorBlockTridiagFactors:
     solve applies ``L_k`` and ``U_k`` through ``couple``.
 
     Attributes:
-        blocks: ``(n_blocks, m, m)`` LU factors of ``Delta_k``.
-        pivots: ``(n_blocks, m)`` LU pivots.
+        blocks: ``(n_blocks, m, m)``; LU factors of ``Delta_k`` for
+            ``store="lu"``, or ``Delta_k^{-1}`` for ``store="inverse"``, in the
+            factor precision.
+        pivots: ``(n_blocks, m)`` LU pivots, or ``None`` for ``"inverse"``.
         params: coupling parameters passed to ``couple``. A pytree *child*,
             so batched or traced coefficients can cross ``jit``/``vmap``.
         couple: the coupling action (static; see :func:`block_thomas_factor_ops`).
         work_dtype: working precision of the diagonal blocks (static).
+        store: ``"lu"`` or ``"inverse"`` (static).
     """
 
     blocks: jax.Array
-    pivots: jax.Array
+    pivots: jax.Array | None
     params: object
     couple: Callable
     work_dtype: object
+    store: str
 
     def tree_flatten(self):
-        return (self.blocks, self.pivots, self.params), (self.couple, self.work_dtype)
+        return (self.blocks, self.pivots, self.params), (self.couple, self.work_dtype, self.store)
 
     @classmethod
     def tree_unflatten(cls, aux_data, children):
@@ -753,6 +760,8 @@ def block_thomas_factor_ops(
     params=None,
     *,
     n_blocks: int | None = None,
+    factor_dtype=None,
+    store: str = "lu",
 ) -> OperatorBlockTridiagFactors:
     """Schur sweep for block-tridiagonal systems whose couplings are operators.
 
@@ -770,16 +779,20 @@ def block_thomas_factor_ops(
     and ``transpose`` are static Python values. It must be linear in ``Z`` and a
     pure function of ``(params, k)``. ``L_0`` and ``U_{n-1}`` never affect the
     result but are applied to exact zeros, so they must be finite. Transposed
-    actions are required only by ``transpose=True`` solves, hence by
-    :func:`jax.linear_transpose` and reverse mode of the solve. Batched or
-    traced coefficients belong in ``params``, which the factors carry as data;
+    actions are required by ``store="inverse"`` and by ``transpose=True``
+    solves, hence by :func:`jax.linear_transpose` and reverse mode of the solve;
+    ``store="lu"`` primal solves never request them. Batched or traced
+    coefficients belong in ``params``, which the factors carry as data;
     ``couple`` itself is static, so pass the same function object each time to
     avoid recompiling.
 
-    Storage. The LU factors and pivots of ``Delta_k`` are kept: one
+    Storage. ``store="lu"`` keeps LU factors and pivots of ``Delta_k``: one
     ``lu_solve`` of the materialized ``L_{k+1}`` plus one ``lu_factor`` per
-    step, and two triangular solves per block per application. That is
-    ``n_blocks * m^2`` values, a third of the stored-band factors.
+    step, and two triangular solves per block per application.
+    ``store="inverse"`` keeps ``Delta_k^{-1}``: the step applies ``L_{k+1}^T``
+    to ``Delta_{k+1}^{-T}`` and inverts ``Delta_k``, and each application is a
+    matrix product. Both store ``n_blocks * m^2`` values, a third of the
+    stored-band factors.
 
     Args:
         diag: ``(n_blocks, m, m)`` diagonal blocks, or ``diag(k) -> (m, m)``
@@ -787,10 +800,17 @@ def block_thomas_factor_ops(
         couple: coupling action, contract above.
         params: pytree passed as the first argument of ``couple``.
         n_blocks: static block count; inferred from an array ``diag``.
+        factor_dtype: optional lower precision for the Schur factorizations or
+            inverses, with the contract of :func:`block_thomas_factor`
+            (practically ``jnp.float32``). Coupling actions and the
+            substitution accumulate in the working precision of ``diag``.
+        store: ``"lu"`` or ``"inverse"``.
 
     Returns:
         :class:`OperatorBlockTridiagFactors` for :func:`block_thomas_solve_ops`.
     """
+    if store not in _STORES:
+        raise ValueError(f"store must be one of {_STORES}, got {store!r}")
     if callable(diag):
         if n_blocks is None:
             raise ValueError("n_blocks is required when diag is callable")
@@ -805,21 +825,40 @@ def block_thomas_factor_ops(
 
     d_last = diag_fn(jnp.int32(n_blocks - 1))
     work = jnp.result_type(d_last)
+    fdt = work if factor_dtype is None else factor_dtype
     apply = partial(couple, params)
-    eye = jnp.eye(d_last.shape[-1], dtype=work)
+    indices = jnp.arange(n_blocks - 1, dtype=jnp.int32)
+    pivots: jax.Array | None
 
-    def step(delta_next, k):
-        solved = lu_solve(delta_next, apply(k + 1, eye, which="lower", transpose=False))
-        delta = lu_factor(diag_fn(k) - apply(k, solved, which="upper", transpose=False))
-        return delta, delta
+    if store == "lu":
+        eye = jnp.eye(d_last.shape[-1], dtype=work)
 
-    last = lu_factor(d_last)
-    _, (lus, pivs) = jax.lax.scan(
-        step, last, jnp.arange(n_blocks - 1, dtype=jnp.int32), reverse=True
-    )
-    blocks = jnp.concatenate([lus, last[0][None]], axis=0)
-    pivots = jnp.concatenate([pivs, last[1][None]], axis=0)
-    return OperatorBlockTridiagFactors(blocks, pivots, params, couple, work)
+        def step(delta_next, k):
+            lower_next = apply(k + 1, eye, which="lower", transpose=False)
+            solved = lu_solve(delta_next, lower_next.astype(fdt)).astype(work)
+            product = apply(k, solved, which="upper", transpose=False)
+            delta = lu_factor((diag_fn(k) - product).astype(fdt))
+            return delta, delta
+
+        last = lu_factor(d_last.astype(fdt))
+        _, (lus, pivs) = jax.lax.scan(step, last, indices, reverse=True)
+        blocks = jnp.concatenate([lus, last[0][None]], axis=0)
+        pivots = jnp.concatenate([pivs, last[1][None]], axis=0)
+    else:
+        swap = partial(jnp.swapaxes, axis1=-1, axis2=-2)
+
+        def step_inverse(inv_next, k):
+            # Delta_{k+1}^{-1} L_{k+1} = (L_{k+1}^T Delta_{k+1}^{-T})^T: one action,
+            # no dense L and no m^3 product.
+            solved = swap(apply(k + 1, swap(inv_next).astype(work), which="lower", transpose=True))
+            product = apply(k, solved, which="upper", transpose=False)
+            inv = jnp.linalg.inv((diag_fn(k) - product).astype(fdt))
+            return inv, inv
+
+        last_inverse = jnp.linalg.inv(d_last.astype(fdt))
+        _, inverses = jax.lax.scan(step_inverse, last_inverse, indices, reverse=True)
+        blocks, pivots = jnp.concatenate([inverses, last_inverse[None]], axis=0), None
+    return OperatorBlockTridiagFactors(blocks, pivots, params, couple, work, store)
 
 
 def block_thomas_solve_ops(
@@ -855,6 +894,7 @@ def block_thomas_solve_ops(
     n_blocks = int(blocks.shape[0])
     if int(rhs.shape[0]) != n_blocks:
         raise ValueError("rhs leading dimension must equal n_blocks")
+    fdt = blocks.dtype
     work = jnp.result_type(rhs, factors.work_dtype)
     apply = partial(factors.couple, factors.params)
     vector = rhs.ndim == 2
@@ -862,8 +902,18 @@ def block_thomas_solve_ops(
     read = lambda values, k: jax.lax.dynamic_index_in_dim(values, k, 0, keepdims=False)  # noqa: E731
     write = lambda values, v, k: jax.lax.dynamic_update_index_in_dim(values, v, k, 0)  # noqa: E731
 
-    def inverse(k, v):
-        return lu_solve((read(blocks, k), read(pivots, k)), v, trans=int(transpose))
+    if factors.store == "lu":
+
+        def inverse(k, v):
+            factor = (read(blocks, k), read(pivots, k))
+            return lu_solve(factor, v.astype(fdt), trans=int(transpose)).astype(work)
+
+    else:
+
+        def inverse(k, v):
+            block = read(blocks, k)
+            block = jnp.swapaxes(block, -1, -2) if transpose else block
+            return (block @ v.astype(fdt)).astype(work)
 
     # Without this, reverse mode saves every per-step block read as a stacked
     # scan residual (a copy of the band per scan). Rematerializing leaves the
