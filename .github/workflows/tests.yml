@@ -120,9 +120,14 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
       - run: pip install -e '.[dev]'
+      # adv-jax-math 1.2 imports VJPHiPrimitive from jax.experimental.hijax, which
+      # JAX 0.11.2 no longer provides, so the backend installs and then fails to
+      # import. The library must not cap the JAX of the codes that depend on it,
+      # so the cap lives here, on the one job that tests the optional backend.
+      # Remove it when an adv-jax-math release imports under current JAX.
       - name: Install the optional chunking backend
         if: matrix.stack == 'adv'
-        run: pip install -e '.[adv]'
+        run: pip install -e '.[adv]' 'jax<0.11.2' 'jaxlib<0.11.2'
       - name: Pin supported-minimum numerical stack
         if: matrix.stack == 'minimum'
         run: >-
