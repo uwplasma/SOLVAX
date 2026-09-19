@@ -11,4 +11,8 @@
 .. automodule:: solvax.compression
    :members:
    :member-order: bysource
+
+.. automodule:: solvax.equilibration
+   :members:
+   :member-order: bysource
 ```

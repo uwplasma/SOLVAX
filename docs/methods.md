@@ -78,6 +78,21 @@ the recovered matrix factors successfully and answers a different question — s
 `verify_products` compares the recovered matrix against the operator on random
 vectors, and callers assembling an operator they did not write should use it.
 
+## Scaling before factorization
+
+A factorization chooses its pivots from the matrix it is given, so rows spanning
+many orders of magnitude make it choose badly. `equilibrate` applies Ruiz's
+algorithm: scale rows and columns alternately by the square root of their
+largest entry, until every row and column maximum is near one. The scaling is
+diagonal, so `A x = b` becomes `D_r A D_c y = D_r b` with `x = D_c y`, and
+`Equilibration` carries both diagonals and the two helpers that apply them.
+
+Solvers that pivot completely scale internally. A static-pivoting factorization
+does not: it perturbs the pivots it cannot use and returns a factorization of a
+different matrix, which no amount of refinement repairs. On a drift-kinetic
+operator of 66,004 unknowns, equilibrating first took the factorization from
+201 s to 103 s and the solution from a relative residual of 9.4e-2 to 1.2e-10.
+
 ## Static iteration storage
 
 JAX compilation benefits from static shapes. Consequently:
