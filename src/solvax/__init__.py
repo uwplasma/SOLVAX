@@ -24,6 +24,7 @@ from solvax.banded import (
     lu_solve_banded,
     lu_solve_banded_periodic,
 )
+from solvax.compression import column_groups, matrix_from_products, verify_products
 from solvax.direct import (
     BlockTridiagFactors,
     ChainWindowPlan,
@@ -85,7 +86,6 @@ from solvax.least_squares import (
     implicit_least_squares,
     least_squares_stationarity,
 )
-from solvax.compression import column_groups, matrix_from_products, verify_products
 from solvax.native import SpluFactorization, splu_solve
 from solvax.native_eigen import (
     SparseEigenSolution,

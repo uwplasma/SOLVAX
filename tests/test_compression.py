@@ -13,11 +13,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-jax.config.update("jax_enable_x64", True)
-
-scipy_sparse = pytest.importorskip("scipy.sparse")
-
 from solvax.compression import column_groups, matrix_from_products, verify_products
+
+jax.config.update("jax_enable_x64", True)
+scipy_sparse = pytest.importorskip("scipy.sparse")
 
 
 def _random_sparse(rows: int, columns: int, density: float, seed: int):
@@ -105,4 +104,5 @@ def test_a_pattern_missing_an_entry_is_caught_by_the_products() -> None:
     pattern.eliminate_zeros()
     recovered = matrix_from_products(_apply_of(matrix), pattern)
     assert verify_products(recovered, _apply_of(matrix)) > 1e-8
-    assert verify_products(matrix_from_products(_apply_of(matrix), matrix), _apply_of(matrix)) < 1e-12
+    exact = matrix_from_products(_apply_of(matrix), matrix)
+    assert verify_products(exact, _apply_of(matrix)) < 1e-12
