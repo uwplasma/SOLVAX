@@ -58,6 +58,26 @@ outside repeated application loops when the operator is unchanged. Refactor
 when coefficients change; reusing stale factors changes the preconditioner or
 solved system.
 
+## Matrix recovery from products
+
+A factorization needs a matrix; a matrix-free operator supplies only products.
+Reading the matrix out one column at a time costs `n` products, which is what
+`sparse_operator_matrix` does and why it is confined to small problems.
+
+`matrix_from_products` pays one product per *group* of columns instead. If no
+two columns of a group share a row, the product with the sum of their unit
+vectors carries every entry of each of them, since each row receives a
+contribution from at most one. The groups come from a distance-2 colouring of
+the column intersection graph (`column_groups`), and their number cannot fall
+below the count of entries in the densest row.
+
+The pattern passed in must be a superset of the operator's nonzeros. An entry
+outside it is not merely missed: it lands in a row where another column of the
+same group also contributes, and the two are summed. That failure is silent —
+the recovered matrix factors successfully and answers a different question — so
+`verify_products` compares the recovered matrix against the operator on random
+vectors, and callers assembling an operator they did not write should use it.
+
 ## Static iteration storage
 
 JAX compilation benefits from static shapes. Consequently:

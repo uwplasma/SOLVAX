@@ -85,6 +85,7 @@ from solvax.least_squares import (
     implicit_least_squares,
     least_squares_stationarity,
 )
+from solvax.compression import column_groups, matrix_from_products, verify_products
 from solvax.native import SpluFactorization, splu_solve
 from solvax.native_eigen import (
     SparseEigenSolution,
@@ -329,5 +330,8 @@ __all__ = [
     "splu_solve",
     "sparse_eigenpairs",
     "sparse_operator_matrix",
+    "column_groups",
+    "matrix_from_products",
+    "verify_products",
     "__version__",
 ]
