@@ -61,6 +61,7 @@ from solvax.elliptic import (
     solve_periodic_poisson,
     solve_periodic_poisson_spectral,
 )
+from solvax.equilibration import Equilibration, equilibrate
 from solvax.fixed_point import (
     FixedPointSolution,
     affine_fixed_point_gmres,
@@ -333,5 +334,7 @@ __all__ = [
     "column_groups",
     "matrix_from_products",
     "verify_products",
+    "Equilibration",
+    "equilibrate",
     "__version__",
 ]

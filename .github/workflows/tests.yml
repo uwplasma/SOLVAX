@@ -60,7 +60,7 @@ jobs:
               tests/test_transfer.py tests/test_dot_precision.py tests/test_chunk_backends.py
               tests/test_eigen.py tests/test_precond_alfven.py tests/test_native_eigen.py
               tests/test_refine.py tests/test_pcg_benchmark.py tests/test_packaging.py
-              tests/test_least_squares.py tests/test_compression.py
+              tests/test_least_squares.py tests/test_compression.py tests/test_equilibration.py
           - os: ubuntu-latest
             python: "3.12"
             stack: current
