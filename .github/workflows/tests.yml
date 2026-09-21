@@ -40,6 +40,36 @@ jobs:
       - run: pip install mypy==1.20.0 jax numpy
       - run: mypy
 
+  mumps:
+    name: MUMPS backend (Ubuntu)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install MUMPS and OpenMPI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libmumps-dev libopenmpi-dev
+      - name: Install SOLVAX and PyMUMPS
+        run: |
+          pip install -e '.[dev]'
+          pip install -Ccmake.define.MUMPS_ROOT=/usr 'pymumps==0.4.0'
+      - name: Verify all MUMPS contexts and MPI runtime
+        run: |
+          python - <<'PY'
+          import scipy.sparse
+          from mpi4py import MPI
+          from mumps import CMumpsContext, DMumpsContext, SMumpsContext, ZMumpsContext
+          assert all((SMumpsContext, DMumpsContext, CMumpsContext, ZMumpsContext))
+          assert "Open MPI" in MPI.Get_library_version(), MPI.Get_library_version()
+          PY
+      - name: Run native protocol and real-binding tests
+        run: pytest -q -rs tests/test_native.py tests/test_native_eigen.py
+
   test:
     name: test (${{ matrix.label }})
     strategy:

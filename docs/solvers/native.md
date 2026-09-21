@@ -1,14 +1,27 @@
-# Native SuperLU bridge
+# Native sparse-direct bridge
 
-The native bridge solves general SciPy sparse matrices with SuperLU on the host
-CPU. It is an explicit escape hatch for systems that do not fit SOLVAX's JAX
-structured or matrix-free methods.
+The native bridge solves general SciPy sparse matrices on the host CPU. SuperLU
+remains the default. MUMPS is an explicit optional backend for callers that need
+symbolic memory admission before numerical factorization.
 
 Install the optional dependency:
 
 ```bash
 pip install "solvax[native]"
 ```
+
+For MUMPS, first provide compatible MUMPS and MPI libraries, then install the
+Python binding and SciPy integration:
+
+```bash
+pip install "solvax[mumps]"
+```
+
+PyMUMPS, mpi4py, and the MUMPS libraries must use a compatible MPI ABI. SOLVAX
+does not install or configure those system libraries.
+
+The MUMPS adapter always uses one process through `MPI.COMM_SELF`; it does not
+expose parallel MUMPS execution or distributed matrix input.
 
 ## Factor once
 
@@ -20,6 +33,50 @@ factorization = sx.SpluFactorization(A)
 x1 = factorization.solve(b1)
 x2 = factorization.solve(b2)
 ```
+
+MUMPS selection and its memory budget are explicit:
+
+```python
+with sx.SpluFactorization(
+    A,
+    backend="mumps",
+    memory_limit_bytes=8_000_000_000,
+    memory_safety_factor=1.2,
+) as factorization:
+    x = factorization.solve(b)
+    xt = factorization.solve(b_many, trans="T")
+    xh = factorization.solve(b_many, trans="H")
+```
+
+The MUMPS adapter runs symbolic analysis first and reads `INFOG(16)`, the
+maximum estimated in-core working memory. In this single-rank adapter, that is
+the estimate for the sole participating process. It multiplies that estimate by
+`memory_safety_factor` and refuses numerical factorization when the result
+exceeds `memory_limit_bytes`. It also gives MUMPS the budget through
+`ICNTL(23)`, which caps MUMPS internal integer and real or complex workspace.
+The [official MUMPS users' guide](https://mumps-solver.org/doc/userguide_5.9.1.pdf)
+defines `INFOG(16)` and `INFOG(21)` in decimal megabytes (millions of bytes).
+The negative-value convention used by some entry-count fields does not apply to
+these memory fields. After factorization,
+`effective_memory_bytes` exposes `INFOG(21)` and
+`symbolic_memory_bytes` exposes the unpadded `INFOG(16)` estimate.
+
+This budget is not a process-RSS limit. It excludes the input SciPy matrix, the
+COO conversion retained by PyMUMPS, Python and JAX objects, MPI runtime storage,
+and memory used by symbolic analysis before `ICNTL(23)` takes effect. Leave
+headroom for those allocations outside `memory_limit_bytes`.
+
+The adapter uses the public PyMUMPS context API with `MPI.COMM_SELF`:
+`set_centralized_sparse`, `run(job=1/2/3)`, `set_rhs`, `set_icntl`,
+`get_infog`, and `destroy`.
+
+Both backends accept vector or matrix right-hand sides and `trans="N"`, `"T"`,
+or `"H"`. PyMUMPS exposes a vector right-hand side through its public API, so
+the adapter solves matrix columns in sequence while reusing one factorization.
+Use the context manager or call `close()` to release native MUMPS storage
+promptly. Input-validation errors leave the factorization usable; an exception
+from a native MUMPS solve closes it because the binding does not guarantee that
+the context remains reusable after such a failure.
 
 ## One-shot solve
 
@@ -50,13 +107,13 @@ bridge inside a jitted outer function.
 
 ## Comparison with JAX-native methods
 
-| Property | SuperLU bridge | FGMRES | structured direct |
+| Property | SuperLU/MUMPS bridge | FGMRES | structured direct |
 |---|---|---|---|
 | matrix representation | SciPy sparse | callable | bands/blocks |
 | pivoting | sparse pivoted LU | not applicable | method dependent |
 | accelerator | no | yes | yes |
 | `jit`/`vmap`/`grad` | no | yes | yes |
-| repeated RHS | excellent after factorization | repeated iteration | excellent after factorization |
+| repeated RHS | factorization reused | repeated iteration | factorization reused |
 
 Sparse LU fill-in can dominate memory even when the input matrix is sparse.
 For large PDEs, a matrix-free Krylov method with a structured preconditioner may
