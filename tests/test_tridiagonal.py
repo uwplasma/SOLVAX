@@ -14,8 +14,11 @@ import pytest
 import solvax
 from solvax import (
     cyclic_tridiagonal_solve,
+    tridiagonal_factor,
     tridiagonal_solve,
     tridiagonal_solve_checked,
+    tridiagonal_solve_factored,
+    tridiagonal_solve_factored_checked,
 )
 
 jax.config.update("jax_enable_x64", True)
@@ -109,6 +112,147 @@ def test_thomas_matches_textbook_reference():
     x = tridiagonal_solve(lower, diag, upper, rhs, method="thomas")
     x_ref = numpy_thomas(lower, diag, upper, rhs)
     assert np.allclose(np.asarray(x), x_ref, atol=1e-13)
+
+
+def test_factored_solve_reuses_bands_for_multiple_right_hand_sides():
+    lower, diag, upper, rhs = make_tridiag(12, (3,), 2, seed=31)
+    factors = jax.jit(tridiagonal_factor)(lower, diag, upper)
+    solve = jax.jit(lambda value: tridiagonal_solve_factored(factors, value))
+
+    first = solve(rhs)
+    second_rhs = (1.5 - 0.2j) * rhs
+    second = solve(second_rhs)
+    assert first == pytest.approx(
+        tridiagonal_solve(lower, diag, upper, rhs, method="thomas"), abs=1.0e-13
+    )
+    assert second == pytest.approx(
+        dense_solve(lower, diag, upper, second_rhs), abs=1.0e-12
+    )
+    checked = tridiagonal_solve_factored_checked(factors, second_rhs)
+    assert checked.solution == pytest.approx(second, abs=1.0e-12)
+    assert not np.any(np.asarray(checked.diagnostics.fallback_used))
+
+
+def test_factored_solve_preserves_vmap_and_grad_through_factors():
+    systems = [make_tridiag(9, (), None, seed=seed) for seed in range(3)]
+    stacked = [jnp.stack(items) for items in zip(*systems, strict=True)]
+    lower, diag, upper, rhs = stacked
+
+    def solve(lo, di, up, value):
+        return tridiagonal_solve_factored(tridiagonal_factor(lo, di, up), value)
+
+    actual = jax.jit(jax.vmap(solve))(lower, diag, upper, rhs)
+    expected = jax.vmap(
+        lambda lo, di, up, value: tridiagonal_solve(
+            lo, di, up, value, method="thomas"
+        )
+    )(lower, diag, upper, rhs)
+    np.testing.assert_array_equal(actual, expected)
+
+    factored_loss = lambda d: jnp.sum(solve(lower[0], d, upper[0], rhs[0]) ** 2)  # noqa: E731
+    direct_loss = lambda d: jnp.sum(  # noqa: E731
+        tridiagonal_solve(lower[0], d, upper[0], rhs[0], method="thomas") ** 2
+    )
+    np.testing.assert_allclose(
+        jax.grad(factored_loss)(diag[0]),
+        jax.grad(direct_loss)(diag[0]),
+        rtol=1.0e-12,
+        atol=1.0e-12,
+    )
+
+
+def test_factored_solve_degenerate_and_invalid_rhs_shapes():
+    empty = jnp.zeros((0, 2))
+    factors = tridiagonal_factor(empty, empty, empty)
+    assert tridiagonal_solve_factored(factors, empty).shape == (0, 2)
+
+    lower, diag, upper, _ = make_tridiag(5, (2,), seed=32)
+    factors = tridiagonal_factor(lower, diag, upper)
+    with pytest.raises(ValueError, match="factor shape"):
+        tridiagonal_solve_factored(factors, jnp.ones((5, 3)))
+    with pytest.raises(ValueError, match="pivot_rtol"):
+        tridiagonal_solve_factored_checked(factors, jnp.ones((5, 2)), pivot_rtol=-1.0)
+
+
+def test_factor_rejects_integer_bands_like_the_one_shot_thomas_solve():
+    lower = jnp.asarray([0, 1, 1])
+    diag = jnp.asarray([4, 4, 4])
+    upper = jnp.asarray([1, 1, 0])
+    rhs = jnp.asarray([1, 2, 3])
+
+    with pytest.raises(ValueError, match="not inexact|not compatible with finfo"):
+        tridiagonal_solve(lower, diag, upper, rhs, method="thomas")
+    with pytest.raises(ValueError, match="not inexact|not compatible with finfo"):
+        tridiagonal_factor(lower, diag, upper)
+
+
+def test_factored_checked_solve_preserves_singular_column_fallback():
+    lower = jnp.asarray([[0.0, 0.0], [1.0, -0.2], [1.0, -0.2], [1.0, -0.2]])
+    diag = jnp.asarray([[1.0, 4.0], [1.0, 4.0], [2.0, 4.0], [2.0, 4.0]])
+    upper = jnp.asarray([[1.0, -0.2], [1.0, -0.2], [1.0, -0.2], [0.0, 0.0]])
+    rhs = jnp.arange(16.0).reshape(4, 2, 2) + 1.0
+
+    result = tridiagonal_solve_factored_checked(
+        tridiagonal_factor(lower, diag, upper), rhs, fallback="identity"
+    )
+    reference = tridiagonal_solve_checked(
+        lower, diag, upper, rhs, method="thomas", fallback="identity"
+    )
+    np.testing.assert_array_equal(result.solution, reference.solution)
+    np.testing.assert_array_equal(result.diagnostics, reference.diagnostics)
+
+
+def test_factored_checked_certifies_exact_bands_under_cancellation():
+    lower = jnp.asarray([[0.0], [1.0e10], [1.0]], dtype=jnp.float32)
+    diag = jnp.asarray([[1.0], [1.0], [4.0]], dtype=jnp.float32)
+    upper = jnp.asarray([[1.0e10], [1.0], [0.0]], dtype=jnp.float32)
+    rhs = jnp.asarray([[1.0], [2.0], [3.0]], dtype=jnp.float32)
+    factors = tridiagonal_factor(lower, diag, upper)
+
+    # Reconstructing diag[1] as pivot[1] + lower[1] * c'[0] loses the input
+    # value completely (it becomes zero in float32), so checked reuse must
+    # retain and certify against the original bands.
+    reconstructed = factors.unregularized_pivots.at[1:].add(
+        factors.lower[1:] * factors.normalized_upper[:-1]
+    )
+    assert reconstructed[1, 0] == 0.0
+    np.testing.assert_array_equal(factors.diagonal, diag)
+    np.testing.assert_array_equal(factors.upper, upper)
+
+    actual = tridiagonal_solve_factored_checked(
+        factors, rhs, residual_rtol=0.0, fallback="identity"
+    )
+    reference = tridiagonal_solve_checked(
+        lower, diag, upper, rhs, method="thomas", residual_rtol=0.0,
+        fallback="identity",
+    )
+    np.testing.assert_array_equal(actual.solution, reference.solution)
+    np.testing.assert_array_equal(
+        actual.diagnostics.fallback_used, reference.diagnostics.fallback_used
+    )
+    np.testing.assert_array_equal(
+        actual.diagnostics.relative_residual,
+        reference.diagnostics.relative_residual,
+    )
+
+
+def test_factored_checked_broadcasts_diagnostics_over_multiple_rhs_axes():
+    lower, diag, upper, _ = make_tridiag(8, (2,), seed=33)
+    lower = lower.at[:, 0].set(jnp.asarray([0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0]))
+    diag = diag.at[:, 0].set(jnp.asarray([1.0, 1.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]))
+    upper = upper.at[:, 0].set(jnp.asarray([1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]))
+    rhs = jnp.arange(8 * 2 * 2 * 3.0).reshape(8, 2, 2, 3) + 1.0
+
+    result = tridiagonal_solve_factored_checked(
+        tridiagonal_factor(lower, diag, upper), rhs, fallback="identity"
+    )
+    reference = tridiagonal_solve_checked(
+        lower, diag, upper, rhs, method="thomas", fallback="identity"
+    )
+    assert result.diagnostics.fallback_used.shape == (2,)
+    np.testing.assert_array_equal(result.solution, reference.solution)
+    np.testing.assert_array_equal(result.diagnostics, reference.diagnostics)
+    np.testing.assert_array_equal(result.solution[:, 0], rhs[:, 0])
 
 
 def test_auto_is_thomas_on_cpu_bit_identical():

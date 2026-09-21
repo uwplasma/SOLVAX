@@ -173,11 +173,15 @@ from solvax.transfer import (
     restriction_matrix,
 )
 from solvax.tridiagonal import (
+    TridiagonalFactors,
     TridiagonalSolveDiagnostics,
     TridiagonalSolveResult,
     cyclic_tridiagonal_solve,
+    tridiagonal_factor,
     tridiagonal_solve,
     tridiagonal_solve_checked,
+    tridiagonal_solve_factored,
+    tridiagonal_solve_factored_checked,
 )
 
 __version__ = "0.24.0"
@@ -230,8 +234,12 @@ __all__ = [
     "solve_fourier_helmholtz",
     "solve_periodic_poisson",
     "solve_periodic_poisson_spectral",
+    "TridiagonalFactors",
+    "tridiagonal_factor",
     "tridiagonal_solve",
     "tridiagonal_solve_checked",
+    "tridiagonal_solve_factored",
+    "tridiagonal_solve_factored_checked",
     "TridiagonalSolveDiagnostics",
     "TridiagonalSolveResult",
     "cyclic_tridiagonal_solve",
