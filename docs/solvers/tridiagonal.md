@@ -84,6 +84,27 @@ The fused primitive is wrapped in an implicit linear solve, supplying forward-
 and reverse-mode derivatives even on supported JAX versions whose primitive
 does not define its own differentiation rule.
 
+## Reusing unchanged factors
+
+When only the right-hand side changes, split the CPU Thomas factorization from
+the solves:
+
+```python
+factors = sx.tridiagonal_factor(lower, diag, upper)
+x0 = sx.tridiagonal_solve_factored(factors, rhs0)
+x1 = sx.tridiagonal_solve_factored(factors, rhs1)
+checked = sx.tridiagonal_solve_factored_checked(factors, rhs1)
+```
+
+The factor object contains arrays only, so it can cross `jit` and `vmap`
+boundaries and remains differentiable. A factored solve uses the stored
+modified pivots and normalized upper band, avoiding coefficient elimination.
+It also retains the exact input bands so checked applications certify the
+original operator without reconstructing coefficients through cancellation.
+Build new factors whenever any coefficient band changes. The factored API uses
+portable Thomas scans; accelerator callers should benchmark it against the
+fused `tridiagonal_solve(method="lax")` path for their batch shape.
+
 ## Boundary entries
 
 For `tridiagonal_solve`, `lower[0]` and `upper[-1]` do not correspond to matrix
@@ -208,6 +229,10 @@ gradient = jax.grad(loss)(diag)
 
 ## API summary
 
+- {class}`solvax.tridiagonal.TridiagonalFactors`
+- {func}`solvax.tridiagonal.tridiagonal_factor`
+- {func}`solvax.tridiagonal.tridiagonal_solve_factored`
+- {func}`solvax.tridiagonal.tridiagonal_solve_factored_checked`
 - {func}`solvax.tridiagonal.tridiagonal_solve`
 - {func}`solvax.tridiagonal.tridiagonal_solve_checked`
 - {func}`solvax.tridiagonal.cyclic_tridiagonal_solve`

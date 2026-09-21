@@ -123,6 +123,151 @@ class TridiagonalSolveResult(NamedTuple):
     diagnostics: TridiagonalSolveDiagnostics
 
 
+class TridiagonalFactors(NamedTuple):
+    """Reusable Thomas factors from :func:`tridiagonal_factor`.
+
+    Every array has the coefficient-system shape ``(n, *columns)``. The exact
+    broadcast coefficient bands are retained so a checked factored solve
+    certifies the operator supplied by the caller rather than a
+    floating-point reconstruction of it. Keeping only arrays in the factor
+    object makes it transparent to ``jit``, ``vmap``, and differentiation.
+    """
+
+    lower: jax.Array
+    diagonal: jax.Array
+    upper: jax.Array
+    normalized_upper: jax.Array
+    pivots: jax.Array
+    unregularized_pivots: jax.Array
+
+
+def tridiagonal_factor(
+    lower: jax.Array,
+    diag: jax.Array,
+    upper: jax.Array,
+) -> TridiagonalFactors:
+    """Factor a batched scalar tridiagonal system for repeated solves.
+
+    The system follows :func:`tridiagonal_solve`'s leading-axis layout. The
+    returned Thomas factors can be applied to any number of right-hand sides
+    with :func:`tridiagonal_solve_factored`, avoiding the elimination sweep
+    whenever the coefficient bands are unchanged.
+    """
+    lower, diag, upper = map(jnp.asarray, (lower, diag, upper))
+    lower = jnp.broadcast_to(lower, diag.shape)
+    upper = jnp.broadcast_to(upper, diag.shape)
+    dtype = jnp.result_type(lower, diag, upper)
+    lower, diag, upper = (value.astype(dtype) for value in (lower, diag, upper))
+    if diag.shape[0] == 0:
+        return TridiagonalFactors(lower, diag, upper, upper, diag, diag)
+
+    eps = _pivot_guard(diag, lower, upper)
+    pivot0 = jnp.where(diag[0] != 0.0, diag[0], eps)
+    upper0 = upper[0] / pivot0
+
+    def eliminate(previous, values):
+        upper_j, diagonal_j, lower_j = values
+        unregularized = diagonal_j - previous * lower_j
+        pivot = jnp.where(unregularized != 0.0, unregularized, eps)
+        normalized = upper_j / pivot
+        return normalized, (normalized, pivot, unregularized)
+
+    _, (upper_rest, pivot_rest, unregularized_rest) = _sweep(
+        eliminate, upper0, (upper[1:], diag[1:], lower[1:])
+    )
+    normalized_upper = jnp.concatenate((upper0[None], upper_rest))
+    pivots = jnp.concatenate((pivot0[None], pivot_rest))
+    unregularized_pivots = jnp.concatenate((diag[:1], unregularized_rest))
+    return TridiagonalFactors(
+        lower, diag, upper, normalized_upper, pivots, unregularized_pivots
+    )
+
+
+def tridiagonal_solve_factored(
+    factors: TridiagonalFactors,
+    rhs: jax.Array,
+) -> jax.Array:
+    """Solve with reusable factors returned by :func:`tridiagonal_factor`.
+
+    ``rhs`` must begin with the factor-system shape and may append any number
+    of trailing right-hand-side axes. The solve is a pair of linear scans and
+    remains compatible with ``jit``, ``vmap``, and differentiation through
+    both the factors and the right-hand side.
+    """
+    lower, _, _, normalized_upper, pivots, _ = map(jnp.asarray, factors)
+    rhs = jnp.asarray(rhs)
+    if rhs.ndim < pivots.ndim or rhs.shape[: pivots.ndim] != pivots.shape:
+        raise ValueError("rhs must begin with the tridiagonal factor shape")
+    if rhs.shape[0] == 0:
+        return rhs
+
+    dtype = jnp.result_type(lower, normalized_upper, pivots, rhs)
+    lower = lower.astype(dtype)
+    normalized_upper = normalized_upper.astype(dtype)
+    pivots = pivots.astype(dtype)
+    rhs = rhs.astype(dtype)
+    if rhs.ndim > pivots.ndim:
+        expand = (1,) * (rhs.ndim - pivots.ndim)
+        lower = lower.reshape(lower.shape + expand)
+        normalized_upper = normalized_upper.reshape(normalized_upper.shape + expand)
+        pivots = pivots.reshape(pivots.shape + expand)
+
+    first = rhs[0] / pivots[0]
+
+    def forward(previous, values):
+        lower_j, pivot_j, rhs_j = values
+        result = (rhs_j - previous * lower_j) / pivot_j
+        return result, result
+
+    _, rest = _sweep(forward, first, (lower[1:], pivots[1:], rhs[1:]))
+    values = jnp.concatenate((first[None], rest))
+
+    def backward(following, values):
+        upper_j, value_j = values
+        result = value_j - upper_j * following
+        return result, result
+
+    _, body = _sweep(
+        backward,
+        values[-1],
+        (normalized_upper[:-1], values[:-1]),
+        reverse=True,
+    )
+    return jnp.concatenate((body, values[-1:]))
+
+
+def tridiagonal_solve_factored_checked(
+    factors: TridiagonalFactors,
+    rhs: jax.Array,
+    *,
+    pivot_rtol: float = 1.0e-8,
+    residual_rtol: float = 1.0e-8,
+    fallback: str = "identity",
+) -> TridiagonalSolveResult:
+    """Solve from reusable factors and certify the original system.
+
+    This is the repeated-right-hand-side counterpart of
+    :func:`tridiagonal_solve_checked`. The factor object retains the exact
+    coefficient bands and unregularized modified pivots for the same pivot and
+    backward-residual checks, without repeating coefficient elimination.
+    """
+    _validate_checked_policy(pivot_rtol, residual_rtol, fallback)
+    lower, diagonal, upper, _, _, unregularized_pivots = map(jnp.asarray, factors)
+    rhs = jnp.asarray(rhs)
+    solution = tridiagonal_solve_factored(factors, rhs)
+    return _checked_tridiagonal_result(
+        solution,
+        lower,
+        diagonal,
+        upper,
+        rhs,
+        unregularized_pivots,
+        pivot_rtol=pivot_rtol,
+        residual_rtol=residual_rtol,
+        fallback=fallback,
+    )
+
+
 def tridiagonal_solve(
     lower: jax.Array,
     diag: jax.Array,
@@ -238,6 +383,25 @@ def tridiagonal_solve_checked(
     compatible with ``jit``, ``vmap``, and differentiation away from the
     discrete fallback boundary.
     """
+    _validate_checked_policy(pivot_rtol, residual_rtol, fallback)
+    lower, diag, upper, rhs = map(jnp.asarray, (lower, diag, upper, rhs))
+    solution = tridiagonal_solve(lower, diag, upper, rhs, method=method)
+    pivots = _thomas_pivots(lower, diag, upper) if rhs.shape[0] else diag
+    return _checked_tridiagonal_result(
+        solution,
+        lower,
+        diag,
+        upper,
+        rhs,
+        pivots,
+        pivot_rtol=pivot_rtol,
+        residual_rtol=residual_rtol,
+        fallback=fallback,
+    )
+
+
+def _validate_checked_policy(pivot_rtol, residual_rtol, fallback):
+    """Reject invalid checked-solve policy arguments before doing any work."""
     if pivot_rtol < 0.0:
         raise ValueError("pivot_rtol must be non-negative")
     if residual_rtol < 0.0:
@@ -245,7 +409,20 @@ def tridiagonal_solve_checked(
     if fallback not in ("identity", "nan", "none"):
         raise ValueError("fallback must be 'identity', 'nan', or 'none'")
 
-    lower, diag, upper, rhs = map(jnp.asarray, (lower, diag, upper, rhs))
+
+def _checked_tridiagonal_result(
+    solution,
+    lower,
+    diag,
+    upper,
+    rhs,
+    pivots,
+    *,
+    pivot_rtol,
+    residual_rtol,
+    fallback,
+):
+    """Apply the shared pivot, residual, and fallback policy."""
     if rhs.shape[0] == 0:
         empty_columns = jnp.ones(diag.shape[1:], dtype=bool)
         empty_values = jnp.full(diag.shape[1:], jnp.inf, dtype=jnp.float32)
@@ -258,8 +435,6 @@ def tridiagonal_solve_checked(
         )
         return TridiagonalSolveResult(rhs, diagnostics)
 
-    solution = tridiagonal_solve(lower, diag, upper, rhs, method=method)
-    pivots = _thomas_pivots(lower, diag, upper)
     abs_pivots = jnp.abs(pivots)
     abs_diagonal = jnp.abs(diag)
     pivot_threshold = jnp.asarray(pivot_rtol, dtype=abs_pivots.dtype) * abs_diagonal
@@ -533,41 +708,10 @@ def _reusable_tridiagonal_solver(lower, diag, upper):
     band_dtype = jnp.result_type(lower, diag, upper)
     lower, diag, upper = (value.astype(band_dtype)
         for value in (lower, diag, upper))
-    eps = _pivot_guard(diag, lower, upper)
-    pivot0 = jnp.where(diag[0] != 0.0, diag[0], eps)
-    upper0 = upper[0] / pivot0
-
-    def eliminate(previous, values):
-        upper_j, diagonal_j, lower_j = values
-        pivot = diagonal_j - previous * lower_j
-        pivot = jnp.where(pivot != 0.0, pivot, eps)
-        normalized = upper_j / pivot
-        return normalized, (normalized, pivot)
-
-    _, (upper_rest, pivot_rest) = lax.scan(
-        eliminate, upper0, (upper[1:], diag[1:], lower[1:]))
-    normalized_upper = jnp.concatenate((upper0[None], upper_rest))
-    pivots = jnp.concatenate((pivot0[None], pivot_rest))
+    factors = tridiagonal_factor(lower, diag, upper)
 
     def thomas(rhs):
-        first = rhs[0] / pivots[0]
-
-        def forward(previous, values):
-            lower_j, pivot_j, rhs_j = values
-            result = (rhs_j - previous * lower_j) / pivot_j
-            return result, result
-
-        _, rest = lax.scan(forward, first, (lower[1:], pivots[1:], rhs[1:]))
-        values = jnp.concatenate((first[None], rest))
-
-        def backward(following, values):
-            upper_j, value_j = values
-            result = value_j - upper_j * following
-            return result, result
-
-        _, body = lax.scan(backward, values[-1],
-            (normalized_upper[:-1], values[:-1]), reverse=True)
-        return jnp.concatenate((body, values[-1:]))
+        return tridiagonal_solve_factored(factors, rhs)
 
     def solve(rhs):
         rhs = jnp.asarray(rhs)
