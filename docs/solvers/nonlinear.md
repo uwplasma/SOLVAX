@@ -160,7 +160,7 @@ $$
 $$
 
 ```python
-config = sx.LeastSquaresConfig(max_steps=20, gradient_rtol=1e-8)
+config = sx.LeastSquaresConfig(max_steps=20, rtol=1e-8)
 solution = sx.gauss_newton_least_squares(
     residual,
     initial,
@@ -172,8 +172,17 @@ solution = sx.gauss_newton_least_squares(
 
 The solver forms neither `J` nor `J.T J`. JVP and VJP actions define the normal
 operator used by PCG; Levenberg damping and trust-ratio acceptance globalize
-the step. Inspect both `converged` and `linear_converged`, together with the
-accepted/rejected counts and gradient-norm history.
+the step. By default, an inexact PCG direction may still be accepted when its
+measured trust ratio is good. Inspect both `converged` and `linear_converged`,
+the final `linear_relative_residual_norm`, and the corresponding fixed-shape
+history. These are PCG-reported values from its recursively updated residual,
+not a fresh application of the normal operator. Set
+`require_linear_convergence=True` when every accepted nonlinear step must meet
+the configured `linear_rtol`/`linear_atol` test; an incomplete inner solve is
+then rejected and increases the Levenberg damping through the usual
+trust-region policy. `linear_converged=True` is vacuous when the initial point
+is already stationary; in that case `linear_relative_residual_norm=0` and no
+per-step history entry is populated.
 
 `implicit_least_squares` differentiates the converged stationarity equation,
 not the iteration history. Its linearization includes the residual-weighted

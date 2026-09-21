@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Report least-squares inner-PCG convergence and relative residuals, and add an
+  opt-in policy requiring an inner solve to meet its configured tolerance
+  before its nonlinear trial can be accepted.
+
 ## 0.22.0 - 2026-09-14
 
 - Add `block_thomas_factor_ops` / `block_thomas_solve_ops` for block-tridiagonal
