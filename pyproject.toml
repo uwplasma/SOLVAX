@@ -35,6 +35,7 @@ Documentation = "https://solvax.readthedocs.io"
 # fails on an API it never had, at import time, far from the cause.
 adv = ["adv-jax-math>=1.1"]
 native = ["scipy"]
+mumps = ["scipy", "pymumps>=0.4"]
 dev = ["pytest", "pytest-cov", "pytest-xdist", "scipy", "numpy", "ruff"]
 bench = ["lineax", "scipy"]
 docs = [
