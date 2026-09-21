@@ -70,6 +70,58 @@ def test_nonlinear_least_squares_rejects_then_recovers() -> None:
     np.testing.assert_allclose(result.x, [1.0, 2.0], rtol=2.0e-6, atol=2.0e-6)
 
 
+def test_inexact_linear_step_is_reported_and_can_be_required() -> None:
+    matrix = jnp.asarray([[1.0, 0.0], [0.0, 1.0e-4], [1.0, 1.0e-4]])
+    right_hand_side = jnp.asarray([1.0, 1.0, 0.0])
+    initial = jnp.zeros((2,))
+    common = dict(
+        rtol=1.0e-12,
+        max_steps=1,
+        initial_damping=1.0e-12,
+        linear_rtol=1.0e-8,
+        linear_max_steps=1,
+    )
+
+    def solve(require_linear_convergence: bool):
+        return gauss_newton_least_squares(
+            lambda value: matrix @ value - right_hand_side,
+            initial,
+            config=LeastSquaresConfig(
+                **common,
+                require_linear_convergence=require_linear_convergence,
+            ),
+        )
+
+    inexact = solve(False)
+    assert not inexact.linear_converged
+    assert inexact.linear_relative_residual_norm > common["linear_rtol"]
+    assert inexact.accepted_steps == 1
+    assert not inexact.history.linear_converged[0]
+    np.testing.assert_allclose(
+        inexact.history.linear_relative_residual_norm[0],
+        inexact.linear_relative_residual_norm,
+    )
+
+    strict = solve(True)
+    assert not strict.linear_converged
+    assert strict.accepted_steps == 0
+    assert strict.rejected_steps == 1
+    np.testing.assert_allclose(strict.x, initial)
+    np.testing.assert_allclose(strict.damping, 4.0e-12)
+
+
+def test_stationary_initial_point_reports_no_inner_solve() -> None:
+    result = gauss_newton_least_squares(lambda value: value, jnp.zeros((2,)))
+
+    assert result.converged
+    assert result.steps == 0
+    assert result.linear_iterations == 0
+    assert result.linear_converged
+    assert result.linear_relative_residual_norm == 0.0
+    assert not np.any(result.history.linear_converged)
+    assert np.all(np.isnan(result.history.linear_relative_residual_norm))
+
+
 def test_implicit_least_squares_uses_stationary_point_derivative() -> None:
     config = LeastSquaresConfig(
         rtol=1.0e-12,

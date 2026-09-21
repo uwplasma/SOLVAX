@@ -22,7 +22,14 @@ NormalPreconditioner = Callable[[Array, Array, Array], Array]
 
 @dataclass(frozen=True)
 class LeastSquaresConfig:
-    """Static controls for :func:`gauss_newton_least_squares`."""
+    """Static controls for :func:`gauss_newton_least_squares`.
+
+    ``linear_rtol`` and ``linear_atol`` define the PCG convergence test.
+    Inexact Gauss--Newton steps remain eligible for trust-ratio acceptance by
+    default. Set ``require_linear_convergence`` to reject a trial when PCG
+    does not meet that test; the existing rejection path then increases the
+    Levenberg damping before the next attempt.
+    """
 
     rtol: float = 1.0e-6
     atol: float = 0.0
@@ -38,6 +45,7 @@ class LeastSquaresConfig:
     linear_rtol: float = 1.0e-3
     linear_atol: float = 0.0
     linear_max_steps: int = 200
+    require_linear_convergence: bool = False
 
     def __post_init__(self) -> None:
         finite = (
@@ -90,10 +98,18 @@ class LeastSquaresHistory(NamedTuple):
     ratio: Array
     accepted: Array
     linear_iterations: Array
+    linear_converged: Array
+    linear_relative_residual_norm: Array
 
 
 class LeastSquaresSolution(NamedTuple):
-    """Result and diagnostics of a matrix-free least-squares solve."""
+    """Result and diagnostics of a matrix-free least-squares solve.
+
+    ``linear_converged`` is true when every attempted inner solve met its
+    configured tolerance. ``linear_relative_residual_norm`` is the value from
+    the final attempted inner solve, as reported by PCG from its recursively
+    updated residual. Per-step values are retained in ``history``.
+    """
 
     x: Array
     residual_norm: Array
@@ -103,6 +119,8 @@ class LeastSquaresSolution(NamedTuple):
     accepted_steps: Array
     rejected_steps: Array
     linear_iterations: Array
+    linear_converged: Array
+    linear_relative_residual_norm: Array
     converged: Array
     damping: Array
     history: LeastSquaresHistory
@@ -133,7 +151,10 @@ def gauss_newton_least_squares(
     solves ``(J.T J + damping I) step = -J.T residual`` with PCG. A trust ratio
     accepts or rejects the trial state and adapts the Levenberg damping. The
     routine is compatible with :func:`jax.jit`; its fixed-size history avoids
-    host callbacks or dynamic allocation.
+    host callbacks or dynamic allocation. An inexact PCG direction may be a
+    valid Gauss--Newton step and is eligible for acceptance by default. Set
+    ``config.require_linear_convergence`` when accepted steps must meet the
+    configured inner tolerance.
 
     This is a primal solver. Use :func:`implicit_least_squares` when derivatives
     of the converged stationary point are required.
@@ -176,6 +197,10 @@ def gauss_newton_least_squares(
         ratio=jnp.full((config.max_steps,), jnp.nan, dtype=scalar_dtype),
         accepted=jnp.zeros((config.max_steps,), dtype=bool),
         linear_iterations=jnp.zeros((config.max_steps,), dtype=jnp.int32),
+        linear_converged=jnp.zeros((config.max_steps,), dtype=bool),
+        linear_relative_residual_norm=jnp.full(
+            (config.max_steps,), jnp.nan, dtype=scalar_dtype
+        ),
     )
     initial = (
         jnp.int32(0),
@@ -187,12 +212,14 @@ def gauss_newton_least_squares(
         jnp.int32(0),
         jnp.int32(0),
         jnp.int32(0),
+        jnp.asarray(True),
+        jnp.asarray(0.0, dtype=scalar_dtype),
         converged0,
         history,
     )
 
     def cond_fun(state):
-        step, _, _, _, _, _, _, _, _, converged, _ = state
+        step, _, _, _, _, _, _, _, _, _, _, converged, _ = state
         return (step < config.max_steps) & ~converged
 
     def body_fun(state):
@@ -206,6 +233,8 @@ def gauss_newton_least_squares(
             accepted_steps,
             rejected_steps,
             linear_iterations,
+            all_linear_converged,
+            _,
             _,
             history,
         ) = state
@@ -248,6 +277,11 @@ def gauss_newton_least_squares(
             & (predicted > 0.0)
             & (ratio >= config.acceptance_ratio)
             & admissible(trial)
+            & (
+                linear.converged
+                if config.require_linear_convergence
+                else jnp.asarray(True)
+            )
         )
         x_next = jnp.where(accept, trial, x)
         value_next = jnp.where(accept, trial_value, value)
@@ -283,6 +317,14 @@ def gauss_newton_least_squares(
             linear_iterations=history.linear_iterations.at[step].set(
                 linear.iterations
             ),
+            linear_converged=history.linear_converged.at[step].set(
+                linear.converged
+            ),
+            linear_relative_residual_norm=(
+                history.linear_relative_residual_norm.at[step].set(
+                    linear.relative_residual_norm
+                )
+            ),
         )
         return (
             next_step,
@@ -294,6 +336,8 @@ def gauss_newton_least_squares(
             accepted_steps + accept.astype(jnp.int32),
             rejected_steps + (~accept).astype(jnp.int32),
             linear_iterations + linear.iterations,
+            all_linear_converged & linear.converged,
+            linear.relative_residual_norm,
             converged,
             history,
         )
@@ -308,6 +352,8 @@ def gauss_newton_least_squares(
         accepted_steps,
         rejected_steps,
         linear_iterations,
+        linear_converged,
+        linear_relative_residual_norm,
         converged,
         history,
     ) = lax.while_loop(cond_fun, body_fun, initial)
@@ -320,6 +366,8 @@ def gauss_newton_least_squares(
         accepted_steps=accepted_steps,
         rejected_steps=rejected_steps,
         linear_iterations=linear_iterations,
+        linear_converged=linear_converged,
+        linear_relative_residual_norm=linear_relative_residual_norm,
         converged=converged,
         damping=damping,
         history=history,
