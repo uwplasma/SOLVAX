@@ -80,3 +80,25 @@ def test_an_empty_row_does_not_divide_by_zero() -> None:
 def test_it_refuses_a_dense_array() -> None:
     with pytest.raises(TypeError, match="scipy sparse"):
         equilibrate(np.eye(3))
+
+
+@pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
+@pytest.mark.parametrize("format", ["csr", "csc"])
+def test_complex_scaling_preserves_phase_and_solution(dtype, format) -> None:
+    matrix = scipy_sparse.csr_matrix(
+        np.array([[1e-6 + 1j, 2j], [0.0, 3e3 - 4e3j]], dtype=dtype)
+    ).asformat(format)
+    original = matrix.toarray().copy()
+    result = equilibrate(matrix)
+    magnitudes = equilibrate(abs(matrix).astype(np.float64))
+    np.testing.assert_allclose(result.row_scale, magnitudes.row_scale, rtol=1e-7)
+    np.testing.assert_allclose(result.column_scale, magnitudes.column_scale, rtol=1e-7)
+    np.testing.assert_allclose(
+        result.matrix.toarray(),
+        result.row_scale[:, None] * original * result.column_scale,
+        rtol=1e-14,
+    )
+    x = np.array([[1 + 2j, -3j], [2 - 1j, 4 + 1j]])
+    y = scipy_linalg.spsolve(result.matrix.tocsc(), result.scale_rhs(matrix @ x))
+    np.testing.assert_allclose(result.unscale_solution(y), x, rtol=1e-12, atol=1e-12)
+    np.testing.assert_array_equal(matrix.toarray(), original)
