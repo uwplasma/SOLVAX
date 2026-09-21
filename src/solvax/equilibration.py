@@ -93,7 +93,7 @@ def equilibrate(matrix, *, sweeps: int = 30, tolerance: float = 1.0e-2) -> Equil
     """Scale rows and columns toward unit maximum magnitude.
 
     Args:
-        matrix: scipy sparse matrix to scale.
+        matrix: real or complex scipy sparse matrix; scaling preserves phase.
         sweeps: maximum number of Ruiz sweeps. Convergence is linear, so a
             matrix spanning sixteen orders of magnitude needs tens of them; the
             sweeps are cheap next to the factorization they prepare.
@@ -108,7 +108,7 @@ def equilibrate(matrix, *, sweeps: int = 30, tolerance: float = 1.0e-2) -> Equil
     sparse = _import_scipy_sparse()
     if not sparse.issparse(matrix):
         raise TypeError(f"matrix must be a scipy sparse matrix, got {type(matrix).__name__}")
-    scaled = matrix.tocsr().astype(np.float64)
+    scaled = matrix.tocsr().astype(np.result_type(matrix.dtype, np.float64))
     original_spread = _spread(scaled)
     rows = np.ones(scaled.shape[0], dtype=np.float64)
     columns = np.ones(scaled.shape[1], dtype=np.float64)
