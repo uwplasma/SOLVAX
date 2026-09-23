@@ -71,8 +71,11 @@ The adapter uses the public PyMUMPS context API with `MPI.COMM_SELF`:
 `get_infog`, and `destroy`.
 
 Both backends accept vector or matrix right-hand sides and `trans="N"`, `"T"`,
-or `"H"`. PyMUMPS exposes a vector right-hand side through its public API, so
-the adapter solves matrix columns in sequence while reusing one factorization.
+or `"H"`. PyMUMPS's `set_rhs` takes one vector, so for a matrix right-hand side
+the adapter sets the right-hand-side count and leading dimension on the MUMPS
+structure (`id.nrhs`, `id.lrhs`) and runs one solve phase for every column,
+resetting the count afterwards. A binding without that structure falls back to
+solving the columns in sequence against the same factorization.
 Use the context manager or call `close()` to release native MUMPS storage
 promptly. Input-validation errors leave the factorization usable; an exception
 from a native MUMPS solve closes it because the binding does not guarantee that
@@ -148,8 +151,68 @@ come from the implicit eigenpair equations rather than from SciPy or the LU
 iteration tape. Always certify a dropped sparse approximation against the
 original application operator.
 
+## Traced solves and eigenvalues
+
+{mod}`solvax.sparse_direct` puts the same host factorizations behind
+`jax.pure_callback`, so they can sit inside `jit`, `vmap` and `grad`. The
+matrix is a static {class}`solvax.CsrPattern` plus traced values:
+
+```python
+pattern, values = sx.CsrPattern.from_scipy(A, include_diagonal=True)
+options = sx.HostFactorOptions(backend="mumps", memory_limit_bytes=8_000_000_000)
+
+@jax.jit
+def loss(values, b):
+    x = sx.sparse_solve(pattern, values, b, options=options)
+    return jnp.vdot(x, x).real
+
+value, (d_values, d_b) = jax.value_and_grad(loss, argnums=(0, 1))(values, b)
+```
+
+`sparse_solve` is a `jax.lax.custom_linear_solve` whose product is the traced
+CSR product, so derivatives are implicit. The factorizations are cached by a
+digest of the values: the tangent solve and the transposed solve of reverse
+mode find the forward factorization in the cache, and the whole
+`value_and_grad` above factors once. `vmap` over the right-hand side is one
+multi-right-hand-side solve; `vmap` over the values factors each matrix. The
+cache is process-global, holds two factorizations by default
+(`set_factor_cache_size`), and `clear_factor_cache` releases them.
+
+`sparse_eigenvalue` differentiates an eigenvalue without differentiating the
+factorization. Given a matrix-free `operator(params, x)` and the values of its
+matrix at `params`, it factors `A - sigma I` once, finds the eigenvalues nearest
+`sigma` by shift-invert Arnoldi, selects one (the largest real part, or the
+nearest), and finds the left eigenvector with conjugate-transposed solves on the
+same factorization. The derivative is
+$\mathrm{d}\lambda = y^H (\mathrm{d}A)\, x / (y^H x)$, one `jax.jvp` of
+`operator` at the right eigenvector, so reverse mode costs one operator VJP:
+
+```python
+groups = sx.column_groups(pattern.to_scipy(np.ones(pattern.nnz)))
+seeds = ...  # (len(groups), n) 0/1 seed of each group
+
+def growth_rate(params):
+    products = jax.vmap(lambda s: operator(params, s))(seeds)
+    values = sx.csr_data_from_products(pattern, groups, products)
+    result = sx.sparse_eigenvalue(operator, params, pattern, values, sigma)
+    return result.value.real
+```
+
+`csr_data_from_products` assembles the values inside the trace from compressed
+products; `sparse_eigenvalue` stops their gradient, since the derivative comes
+from `operator`. The value is NaN when the right or left residual misses
+`residual_tolerance`. The eigenvectors are returned under `stop_gradient`; for
+eigenvector sensitivities use `eigenpair_reverse`.
+
+The numerics still run on the host CPU. Under `jit` on an accelerator, values
+and right-hand sides are copied to the host and back on every call.
+
 ## API summary
 
+- {func}`solvax.sparse_direct.sparse_solve`
+- {func}`solvax.sparse_direct.sparse_eigenvalue`
+- {func}`solvax.sparse_direct.csr_data_from_products`
+- {class}`solvax.sparse_direct.CsrPattern`
 - {class}`solvax.native.SpluFactorization`
 - {func}`solvax.native.splu_solve`
 - {func}`solvax.native_eigen.sparse_operator_matrix`

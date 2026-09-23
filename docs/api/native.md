@@ -4,6 +4,10 @@
 .. automodule:: solvax.native
    :members:
 
+.. automodule:: solvax.sparse_direct
+   :members:
+   :member-order: bysource
+
 .. automodule:: solvax.native_eigen
    :members:
    :member-order: bysource

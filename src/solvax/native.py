@@ -180,10 +180,31 @@ class _MumpsFactorization:
             context.run(job=3)
             return np.conjugate(solution) if conjugate else solution
 
+        def solve_block(block: np.ndarray) -> np.ndarray:
+            # One MUMPS solve phase for every column: PyMUMPS's ``set_rhs`` takes
+            # a single vector, so the right-hand-side count and leading dimension
+            # are set on the MUMPS structure directly, and reset afterwards
+            # because ``set_rhs`` does not reset them.
+            solution = np.array(
+                np.conjugate(block) if conjugate else block, order="F", copy=True
+            )
+            try:
+                context._refs.update(rhs=solution)
+                context.id.nrhs = solution.shape[1]
+                context.id.lrhs = self._size
+                context.id.rhs = context.cast_array(solution)
+                context.run(job=3)
+            finally:
+                context.id.nrhs = 1
+            return np.conjugate(solution) if conjugate else solution
+
+        multi_rhs = all(hasattr(context, name) for name in ("id", "_refs", "cast_array"))
         try:
             context.set_icntl(9, 1 if trans == "N" else 0)
             if rhs.ndim == 1:
                 return solve_column(rhs)
+            if multi_rhs:
+                return solve_block(rhs)
             return np.column_stack(
                 [solve_column(rhs[:, index]) for index in range(rhs.shape[1])]
             )
