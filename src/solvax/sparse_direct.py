@@ -1,44 +1,22 @@
-"""Traced sparse-direct solves and eigenvalues on host factors, with adjoints that reuse them.
+"""Host sparse-direct factors (SuperLU/MUMPS) behind ``jax.pure_callback``.
 
-:mod:`solvax.native` factors a SciPy sparse matrix with SuperLU or MUMPS but
-runs eagerly: it refuses tracers and defines no derivative. This module puts
-those factors behind ``jax.pure_callback`` so they can be staged under ``jit``
-and ``vmap`` and differentiated:
+* :func:`sparse_solve`: ``A x = b`` for a static :class:`CsrPattern` and traced
+  values, as a ``custom_linear_solve``; tangent and transposed (reverse-mode)
+  solves reuse the forward factorization, cached by a digest of the values.
+* :func:`sparse_eigenvalue`: an eigenvalue from one factorization of
+  ``A - sigma I`` with right and left eigenvectors; its derivative
+  ``y^H (dA) x / (y^H x)`` is one JVP of the caller's matrix-free operator.
+* :func:`csr_data_from_products`: CSR values from compressed products, traced.
 
-* :func:`sparse_solve` solves ``A x = b`` for ``A`` given as a static
-  :class:`CsrPattern` plus traced values. It is a ``jax.lax.custom_linear_solve``
-  whose matrix-vector product is the traced CSR product, so forward- and
-  reverse-mode derivatives with respect to both the values and ``b`` follow
-  from implicit differentiation. The tangent solve and the transposed solve of
-  reverse mode go to the *same* host factorization as the forward solve: the
-  factors are cached by a digest of the values, so a ``value_and_grad`` factors
-  once. Several right-hand sides, and ``vmap`` over the right-hand side, are one
-  multi-right-hand-side solve against one factorization.
-* :func:`sparse_eigenvalue` returns the eigenvalue of ``A(params)`` selected
-  among those nearest a shift, with the right and left eigenvectors from one
-  shifted factorization (the left vector from conjugate-transposed solves on
-  it). Its derivative is the standard first-order perturbation
-  ``d lambda = y^H (dA) x / (y^H x)``, evaluated as *one* forward-mode product
-  of the caller's matrix-free operator, so differentiating does not
-  differentiate the factorization or the sparse assembly.
-* :func:`csr_data_from_products` recovers CSR values from a traced batch of
-  compressed products (see :mod:`solvax.compression`), so the values the host
-  factors can be assembled from a matrix-free operator inside the same trace.
-
-Everything numerical runs on the host CPU. On an accelerator the values and
-right-hand sides are copied to the host and the solution copied back, per call.
-
-The factor cache is process-global and holds at most
-:func:`set_factor_cache_size` factorizations (default 2), least recently used
-first out; :func:`clear_factor_cache` releases them. Cached factors hold native
-memory, so a large cache is a memory decision.
+Numerics run on the host CPU. The cache is process-global and holds at most
+:func:`set_factor_cache_size` factorizations (default 2); each holds native
+memory, so size it for the problem and :func:`clear_factor_cache` when done.
 
 References
 ----------
-- J. H. Wilkinson, *The Algebraic Eigenvalue Problem*, Oxford (1965), ch. 2:
-  first-order perturbation of a simple eigenvalue.
-- P. R. Amestoy, I. S. Duff, J.-Y. L'Excellent, and J. Koster, SIAM J. Matrix
-  Anal. Appl. 23(1), 15 (2001), DOI 10.1137/S0895479899358194 (MUMPS).
+- J. H. Wilkinson, *The Algebraic Eigenvalue Problem*, Oxford (1965), ch. 2.
+- P. R. Amestoy et al., SIAM J. Matrix Anal. Appl. 23(1), 15 (2001),
+  DOI 10.1137/S0895479899358194 (MUMPS).
 """
 
 from __future__ import annotations
