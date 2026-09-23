@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Add `solvax.sparse_direct`: host SuperLU/MUMPS factorizations behind
+  `jax.pure_callback`, usable under `jit`, `vmap` and `grad`.
+  `sparse_solve(pattern, values, b)` is a `custom_linear_solve` over a static
+  `CsrPattern` and traced values; its tangent and transposed (reverse-mode)
+  solves reuse the forward factorization through a digest-keyed cache, and
+  `vmap` over the right-hand side is one multi-right-hand-side solve.
+  `sparse_eigenvalue(operator, params, pattern, values, shift)` factors
+  `A - shift I` once, returns the selected eigenvalue with right and left
+  eigenvectors (the left from conjugate-transposed solves on the same factor),
+  and differentiates the eigenvalue as `y^H dA x / y^H x` through one JVP of the
+  matrix-free operator. `csr_data_from_products` assembles CSR values from
+  compressed products inside a trace.
+- The MUMPS adapter solves a matrix right-hand side in one MUMPS solve phase
+  (`id.nrhs`/`id.lrhs`) instead of one phase per column.
+
 - Report least-squares inner-PCG convergence and relative residuals, and add an
   opt-in policy requiring an inner solve to meet its configured tolerance
   before its nonlinear trial can be accepted.

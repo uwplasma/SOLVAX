@@ -168,6 +168,60 @@ def test_mumps_transpose_modes_and_reuse(fake_mumps, dtype, trans):
         factor.solve(rhs)
 
 
+class FakeMumpsStructContext(FakeMumpsContext):
+    """Also exposes PyMUMPS's ``id``/``_refs``/``cast_array`` surface for multi-RHS."""
+
+    def __init__(self, *, par, sym, comm):
+        super().__init__(par=par, sym=sym, comm=comm)
+        self.id = SimpleNamespace(nrhs=1, lrhs=0, rhs=None)
+        self._refs = {}
+        self.block_shapes = []
+
+    @staticmethod
+    def cast_array(array):
+        return array
+
+    def set_rhs(self, rhs):
+        super().set_rhs(rhs)
+        self.id.rhs = rhs
+
+    def run(self, *, job):
+        if job == 3 and self.id.nrhs > 1:
+            self.calls.append(("run", job))
+            block = self.id.rhs
+            assert block.flags.f_contiguous and self.id.lrhs == block.shape[0]
+            self.block_shapes.append(block.shape)
+            operator = self.matrix if self.icntl[9] == 1 else self.matrix.T
+            block[...] = np.linalg.solve(operator, block)
+            return
+        super().run(job=job)
+
+
+@pytest.mark.parametrize("trans", ["N", "T", "H"])
+def test_mumps_multiple_rhs_is_one_solve_phase(monkeypatch, trans):
+    FakeMumpsStructContext.instances = []
+    monkeypatch.setattr(
+        native_module,
+        "_import_mumps",
+        lambda dtype: (FakeMumpsStructContext, "COMM_SELF"),
+    )
+    matrix = np.array([[4.0 + 0.5j, 1.0 - 0.25j], [2.0 + 0.75j, 3.0 - 0.5j]])
+    rhs = np.array([[1.0 + 0.25j, 2.0, 0.5j], [-1.0j, 3.0 - 0.5j, 1.0]])
+    factor = SpluFactorization(
+        scipy_sparse.csr_matrix(matrix), backend="mumps", memory_limit_bytes=8_000_000
+    )
+    solution = np.asarray(factor.solve(rhs, trans=trans))
+    operator = {"N": matrix, "T": matrix.T, "H": matrix.conj().T}[trans]
+    assert np.allclose(operator @ solution, rhs)
+    context = FakeMumpsStructContext.instances[-1]
+    assert context.calls.count(("run", 3)) == 1
+    assert context.block_shapes == [rhs.shape]
+    assert context.id.nrhs == 1  # reset, so a later single solve reads one column
+    single = np.asarray(factor.solve(rhs[:, 0], trans=trans))
+    assert np.allclose(operator @ single, rhs[:, 0])
+    factor.close()
+
+
 def test_mumps_symbolic_memory_refusal_destroys_context(fake_mumps):
     matrix = scipy_sparse.eye(3, dtype=np.float64, format="csr")
     with pytest.raises(MemoryError, match="safety factor 1.5"):

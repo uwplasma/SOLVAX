@@ -24,6 +24,7 @@ requirements. No solver is uniformly best.
 | Affine (linearized) fixed-point map | `affine_fixed_point_gmres` | Anderson mixing | mapping must be affine; derivatives use one tangent/transposed FGMRES solve |
 | Large nonlinear implicit system | `newton_krylov` | Anderson mixing | Jacobian-free, but needs a good Jacobian preconditioner for mesh independence |
 | General sparse CPU solve outside JAX | native SuperLU | FGMRES | no `jit`, `vmap`, or `grad` |
+| General sparse CPU solve inside `jit`/`grad`, or an eigenvalue gradient | `sparse_solve` / `sparse_eigenvalue` (host factor) | FGMRES / `eigenpair_reverse` | host CPU only; values and right-hand sides cross to the host per call |
 
 ## Direct versus iterative
 

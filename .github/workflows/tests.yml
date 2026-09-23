@@ -68,7 +68,7 @@ jobs:
           assert "Open MPI" in MPI.Get_library_version(), MPI.Get_library_version()
           PY
       - name: Run native protocol and real-binding tests
-        run: pytest -q -rs tests/test_native.py tests/test_native_eigen.py
+        run: pytest -q -rs tests/test_native.py tests/test_native_eigen.py tests/test_sparse_direct.py
 
   test:
     name: test (${{ matrix.label }})
@@ -107,6 +107,7 @@ jobs:
               tests/test_pcg.py tests/test_propagator.py tests/test_sharding.py
               tests/test_generated_block_benchmark.py
               tests/test_checkpointed_block_benchmark.py tests/test_native.py
+              tests/test_sparse_direct.py
               tests/test_operator_couplings_benchmark.py
           - os: ubuntu-latest
             python: "3.10"
@@ -142,7 +143,7 @@ jobs:
         tests/test_pcg.py tests/test_nonlinear.py tests/test_implicit.py
         tests/test_autodiff.py tests/test_fixed_point.py tests/test_precond.py
         tests/test_multigrid.py tests/test_eigen.py tests/test_sharding.py
-        tests/test_least_squares.py
+        tests/test_least_squares.py tests/test_sparse_direct.py
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
