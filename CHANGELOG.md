@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- The host factorization cache is keyed on a structural digest of the
+  pattern (`CsrPattern.structure_digest`) instead of object identity, so
+  separately built identical patterns reuse one factorization.
 - `iterative_refinement` and `as_low_precision` (and so `mixed_precision`)
   keep complex systems complex: a real precision is applied as the matching
   complex width. Previously the default float64 residual dropped imaginary

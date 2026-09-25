@@ -375,3 +375,22 @@ def test_sparse_eigenvalue_validation():
     bare, _ = sd.CsrPattern.from_scipy(scipy_sparse.csr_matrix(np.eye(12)[::-1]))
     with pytest.raises(ValueError, match="diagonal"):
         sd.sparse_eigenvalue(operator, p, bare, jnp.ones(12), 0.0)
+
+
+def test_separately_built_identical_patterns_share_one_factorization():
+    matrix = scipy_sparse.random(30, 30, density=0.1, random_state=4) + 5 * scipy_sparse.eye(30)
+    matrix = matrix.tocsr()
+    b = jnp.ones(30)
+    sd.clear_factor_cache()
+    before = sd.factor_cache_info()["misses"]
+    solutions = []
+    for _ in range(3):
+        pattern, values = sd.CsrPattern.from_scipy(matrix)
+        solutions.append(np.asarray(sd.sparse_solve(pattern, jnp.asarray(values), b)))
+    info = sd.factor_cache_info()
+    assert info["misses"] == before + 1
+    np.testing.assert_allclose(solutions[0], solutions[2], rtol=0, atol=0)
+    other, other_values = sd.CsrPattern.from_scipy(matrix + scipy_sparse.eye(30, k=1))
+    assert other.structure_digest != sd.CsrPattern.from_scipy(matrix)[0].structure_digest
+    sd.sparse_solve(other, jnp.asarray(other_values), b)
+    assert sd.factor_cache_info()["misses"] == before + 2
