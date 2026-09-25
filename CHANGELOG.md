@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `matrix_from_products` keeps complex products instead of silently casting
+  them to float64, and `verify_products` compares complex matrices with
+  complex probes without discarding imaginary parts (previously a real
+  recovery of a complex operator passed verification at 1e-16).
 - `column_groups` forms the column-intersection graph with one compiled sparse
   product instead of a Python loop over every row of every column, returning
   identical groups 4.7-13x faster (12.4 s to 1.46 s on a 1.06M-nnz

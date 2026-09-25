@@ -108,6 +108,56 @@ def test_a_pattern_missing_an_entry_is_caught_by_the_products() -> None:
     assert verify_products(exact, _apply_of(matrix)) < 1e-12
 
 
+def _complex_banded(n: int = 40):
+    rng = np.random.default_rng(3)
+    real = scipy_sparse.random(n, n, density=0.08, random_state=1, format="csr")
+    real = real + scipy_sparse.eye(n, format="csr")
+    matrix = real.astype(np.complex128)
+    matrix.data = matrix.data + 1j * rng.standard_normal(matrix.nnz)
+    return matrix
+
+
+def test_a_complex_operator_is_recovered_with_its_imaginary_part() -> None:
+    matrix = _complex_banded()
+    dense = jnp.asarray(matrix.toarray())
+    recovered = matrix_from_products(lambda v: dense @ v, abs(matrix))
+    assert np.iscomplexobj(recovered.data)
+    np.testing.assert_allclose(recovered.toarray(), matrix.toarray(), rtol=0.0, atol=1e-14)
+    assert verify_products(recovered, lambda v: dense @ v) < 1e-14
+    assert verify_products(recovered, lambda v: dense @ v, dtype=np.complex128) < 1e-14
+
+
+def test_verification_catches_a_wrong_imaginary_part() -> None:
+    matrix = _complex_banded()
+    dense = jnp.asarray(matrix.toarray())
+    corrupted = matrix.copy()
+    corrupted.data = corrupted.data.real + 0j
+    assert verify_products(corrupted, lambda v: dense @ v) > 1e-2
+    assert verify_products(corrupted.real, lambda v: dense @ v) > 1e-2
+
+
+def test_recovery_widens_when_a_later_product_is_complex() -> None:
+    matrix = _complex_banded()
+    dense = matrix.toarray()
+    groups = column_groups(abs(matrix))
+    first = set(groups[0].tolist())
+
+    def apply(v):
+        # The first group's columns are real; complex entries appear later.
+        product = np.asarray(dense @ np.asarray(v))
+        return jnp.asarray(product.real if set(np.flatnonzero(np.asarray(v))) == first else product)
+
+    recovered = matrix_from_products(apply, abs(matrix), groups=groups)
+    assert np.iscomplexobj(recovered.data)
+    expected = matrix.toarray()
+    expected[:, groups[0]] = expected[:, groups[0]].real
+    np.testing.assert_allclose(recovered.toarray(), expected, rtol=0.0, atol=1e-14)
+
+
+def test_an_empty_pattern_recovers_an_empty_matrix() -> None:
+    empty = scipy_sparse.csr_matrix((3, 0))
+    recovered = matrix_from_products(lambda v: jnp.zeros(3), empty, groups=[])
+    assert recovered.shape == (3, 0) and recovered.nnz == 0
 def _reference_column_groups(pattern):
     """The previous row-by-row greedy colouring, kept as an oracle."""
     csc, csr = pattern.tocsc(), pattern.tocsr()
