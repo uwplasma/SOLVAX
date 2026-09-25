@@ -63,11 +63,12 @@ def column_groups(pattern) -> list[np.ndarray]:
 
     Greedy largest-first distance-2 colouring of the column intersection graph:
     columns are visited densest first, and each takes the lowest group not used
-    by a column it shares a row with. The work is
-    ``sum_j sum_{i in column j} (entries in row i)``, so it is proportional to
-    the pattern's row density times its nonzero count; for a structured operator
-    whose groups follow from its stencil, pass them to
-    :func:`matrix_from_products` directly instead of paying for this.
+    by a column it shares a row with. The intersection graph ``|P|^T |P|`` is
+    formed once by a compiled sparse product, so the Python loop visits each
+    column's neighbours once; its memory is the graph's edge count (each column
+    times the columns it shares a row with). For a structured operator whose
+    groups follow from its stencil, pass them to :func:`matrix_from_products`
+    directly instead of paying for this.
 
     Args:
         pattern: scipy sparse matrix whose nonzeros are the entries to recover.
@@ -79,20 +80,24 @@ def column_groups(pattern) -> list[np.ndarray]:
     if not sparse.issparse(pattern):
         raise TypeError(f"pattern must be a scipy sparse matrix, got {type(pattern).__name__}")
     csc = pattern.tocsc()
-    csr = pattern.tocsr()
     n_columns = csc.shape[1]
+    structure = sparse.csc_matrix(
+        (np.ones(csc.nnz, dtype=np.int32), csc.indices, csc.indptr), shape=csc.shape
+    )
+    # Column j's neighbours: every column sharing a row with it (itself included,
+    # harmlessly, since it is still uncoloured when visited).
+    graph = (structure.T @ structure).tocsr()
     group_of_column = np.full(n_columns, -1, dtype=np.int64)
-    # Timestamps, so the forbidden set is cleared in O(1) per column.
+    # Timestamps, so the forbidden set is cleared in O(1) per column; a column
+    # with d neighbours always finds a free group among the first d + 1.
     forbidden = np.full(n_columns + 1, -1, dtype=np.int64)
     counts = np.diff(csc.indptr)
     for column in np.argsort(-counts, kind="stable"):
-        rows = csc.indices[csc.indptr[column] : csc.indptr[column + 1]]
-        for row in rows:
-            neighbours = csr.indices[csr.indptr[row] : csr.indptr[row + 1]]
-            used = group_of_column[neighbours]
-            forbidden[used[used >= 0]] = column
-        group = int(np.argmax(forbidden[: n_columns + 1] != column))
-        group_of_column[column] = group
+        neighbours = graph.indices[graph.indptr[column] : graph.indptr[column + 1]]
+        used = group_of_column[neighbours]
+        forbidden[used[used >= 0]] = column
+        window = forbidden[: neighbours.size + 1]
+        group_of_column[column] = int(np.argmax(window != column))
     order = np.argsort(group_of_column, kind="stable")
     boundaries = np.flatnonzero(np.diff(group_of_column[order])) + 1
     return [np.asarray(part) for part in np.split(order, boundaries)]
@@ -132,12 +137,18 @@ def matrix_from_products(
     if groups is None:
         groups = column_groups(csc)
     probe_dtype = np.float64 if dtype is None else dtype
-    values = np.zeros(csc.nnz, dtype=probe_dtype)
+    values = None
     for group in groups:
         group = np.asarray(group, dtype=np.int64)
         seed = np.zeros(columns, dtype=probe_dtype)
         seed[group] = 1.0
-        result = np.asarray(apply(jnp.asarray(seed)), dtype=probe_dtype).reshape(-1)
+        result = np.asarray(apply(jnp.asarray(seed))).reshape(-1)
+        if values is None:
+            # A complex operator probed with real seeds returns complex
+            # products; keep them instead of discarding the imaginary part.
+            values = np.zeros(csc.nnz, dtype=np.result_type(probe_dtype, result.dtype))
+        elif not np.can_cast(result.dtype, values.dtype, casting="same_kind"):
+            values = values.astype(np.result_type(values.dtype, result.dtype))
         if result.size != rows:
             raise ValueError(
                 f"apply returned {result.size} values for a {rows}-row pattern"
@@ -156,6 +167,8 @@ def matrix_from_products(
         for j in group:
             span = slice(csc.indptr[j], csc.indptr[j + 1])
             values[span] = result[csc.indices[span]]
+    if values is None:
+        values = np.zeros(csc.nnz, dtype=probe_dtype)
     recovered = sparse.csc_matrix((values, csc.indices, csc.indptr), shape=csc.shape)
     return recovered.tocsr()
 
@@ -180,18 +193,24 @@ def verify_products(
         apply: the operator it should reproduce.
         samples: how many random vectors to compare on.
         seed: seed of the random vectors.
-        dtype: dtype of the random vectors; float64 by default.
+        dtype: dtype of the random vectors; float64 by default, complex128
+            when ``matrix`` is complex so imaginary parts are compared too.
 
     Returns:
         The largest relative difference over the samples, in the 2-norm.
     """
     rng = np.random.default_rng(seed)
-    probe_dtype = np.float64 if dtype is None else dtype
+    if dtype is None:
+        probe_dtype = np.result_type(np.float64, matrix.dtype)
+    else:
+        probe_dtype = np.dtype(dtype)
     worst = 0.0
     for _ in range(int(samples)):
         v = rng.standard_normal(matrix.shape[1]).astype(probe_dtype)
-        reference = np.asarray(apply(jnp.asarray(v)), dtype=np.float64).reshape(-1)
-        recovered = np.asarray(matrix @ v, dtype=np.float64).reshape(-1)
+        if np.issubdtype(probe_dtype, np.complexfloating):
+            v = v + 1j * rng.standard_normal(matrix.shape[1])
+        reference = np.asarray(apply(jnp.asarray(v))).reshape(-1)
+        recovered = np.asarray(matrix @ v).reshape(-1)
         scale = float(np.linalg.norm(reference))
         difference = float(np.linalg.norm(recovered - reference))
         worst = max(worst, difference / scale if scale > 0.0 else difference)

@@ -6,6 +6,21 @@
   `A x0` when `x0` defaults to zero, nor a final one re-deriving the residual
   already recomputed exactly at the last cycle boundary. With a near-exact
   preconditioner (4 iterations) this is 5 instead of 7 matvecs.
+- `matrix_from_products` keeps complex products instead of silently casting
+  them to float64, and `verify_products` compares complex matrices with
+  complex probes without discarding imaginary parts (previously a real
+  recovery of a complex operator passed verification at 1e-16).
+- `column_groups` forms the column-intersection graph with one compiled sparse
+  product instead of a Python loop over every row of every column, returning
+  identical groups 4.7-13x faster (12.4 s to 1.46 s on a 1.06M-nnz
+  block-banded pattern), and bounds each free-group search by the column degree.
+- The host factorization cache is keyed on a structural digest of the
+  pattern (`CsrPattern.structure_digest`) instead of object identity, so
+  separately built identical patterns reuse one factorization.
+- `iterative_refinement` and `as_low_precision` (and so `mixed_precision`)
+  keep complex systems complex: a real precision is applied as the matching
+  complex width. Previously the default float64 residual dropped imaginary
+  parts and refinement of a complex system diverged with only a ComplexWarning.
 - Add `solvax.sparse_direct`: host SuperLU/MUMPS factorizations behind
   `jax.pure_callback`, usable under `jit`, `vmap` and `grad`.
   `sparse_solve(pattern, values, b)` is a `custom_linear_solve` over a static
