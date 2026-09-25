@@ -46,6 +46,7 @@ __all__ = [
     "csr_matvec",
     "factor_cache_info",
     "set_factor_cache_size",
+    "sparse_backward_error",
     "sparse_eigenvalue",
     "sparse_solve",
 ]
@@ -153,15 +154,28 @@ class CsrPattern:
 
 @dataclass(frozen=True)
 class HostFactorOptions:
-    """How the host factors a matrix: see :class:`solvax.SpluFactorization`."""
+    """How the host factors a matrix: see :class:`solvax.SpluFactorization`.
+
+    ``refine_steps`` adds at most that many sweeps of fixed-precision iterative
+    refinement on the host, ``x += A^{-1}(b - A x)`` with the cached factors,
+    stopping early once the componentwise backward error
+    ``max_i |b - A x|_i / (|A| |x| + |b|)_i`` reaches a few ulps or stops
+    halving (the LAPACK ``xGERFS`` rule; Skeel 1980, Arioli-Demmel-Duff 1989).
+    It repairs small components that a pivoted factorization of a badly scaled
+    matrix gets wrong, at one matvec and one solve per sweep. Zero, the
+    default, is a single solve.
+    """
 
     backend: str = "superlu"
     memory_limit_bytes: int | None = None
     memory_safety_factor: float | None = None
+    refine_steps: int = 0
 
     def __post_init__(self):
         if self.backend not in {"superlu", "mumps"}:
             raise ValueError("backend must be 'superlu' or 'mumps'")
+        if int(self.refine_steps) < 0:
+            raise ValueError("refine_steps must be non-negative")
 
 
 # --------------------------------------------------------------------------
@@ -211,7 +225,8 @@ def _factor(pattern: CsrPattern, options: HostFactorOptions, values: np.ndarray)
     """The factorization of ``pattern`` with ``values``, from the cache if present."""
     values = np.ascontiguousarray(values)
     digest = hashlib.blake2b(values.tobytes(), digest_size=16).digest()
-    key = (pattern.structure_digest, options, values.dtype.str, digest)
+    factor_options = (options.backend, options.memory_limit_bytes, options.memory_safety_factor)
+    key = (pattern.structure_digest, factor_options, values.dtype.str, digest)
     with _CACHE_LOCK:
         cached = _CACHE.get(key)
         if cached is not None:
@@ -235,6 +250,34 @@ def _factor(pattern: CsrPattern, options: HostFactorOptions, values: np.ndarray)
 # --------------------------------------------------------------------------
 # Traced pieces
 # --------------------------------------------------------------------------
+
+
+def sparse_backward_error(
+    pattern: CsrPattern, values: jax.Array, x: jax.Array, b: jax.Array
+) -> tuple[jax.Array, jax.Array]:
+    """Componentwise and normwise backward error of ``x`` for ``A x = b``.
+
+    ``componentwise = max_i |r|_i / (|A| |x| + |b|)_i`` (Oettli-Prager; the
+    LAPACK ``BERR``) and ``normwise = ||r||_inf / (||A||_inf ||x||_inf +
+    ||b||_inf)``, with ``r = b - A x`` and ``||A||_inf`` exact from the stored
+    rows. A small value certifies that ``x`` solves a nearby system; it is not
+    a forward-error bound, which also needs the condition number. ``x`` and
+    ``b`` have shape ``(n,)`` or ``(n, k)``; the result is per column. Traceable.
+    """
+    values = jnp.asarray(values)
+    x = jnp.asarray(x)
+    b = jnp.asarray(b)
+    residual = jnp.abs(b - csr_matvec(pattern, values, x))
+    scale = csr_matvec(pattern, jnp.abs(values), jnp.abs(x)) + jnp.abs(b)
+    safe = jnp.where(scale > 0, scale, 1)
+    componentwise = jnp.max(jnp.where(scale > 0, residual / safe, 0), axis=0)
+    row_sums = jax.ops.segment_sum(
+        jnp.abs(values), jnp.asarray(pattern.rows), num_segments=pattern.shape[0],
+        indices_are_sorted=True,
+    )
+    denominator = jnp.max(row_sums) * jnp.max(jnp.abs(x), axis=0) + jnp.max(jnp.abs(b), axis=0)
+    normwise = jnp.max(residual, axis=0) / jnp.where(denominator > 0, denominator, 1)
+    return componentwise, normwise
 
 
 def csr_matvec(pattern: CsrPattern, values: jax.Array, x: jax.Array) -> jax.Array:
@@ -282,6 +325,42 @@ def csr_data_from_products(
     return products[entry_group, pattern.rows]
 
 
+def _componentwise_backward_error(matrix, x, b, residual):
+    """Columnwise ``max_i |r|_i / (|A| |x| + |b|)_i`` (zero rows count as exact)."""
+    scale = abs(matrix) @ np.abs(x) + np.abs(b)
+    ratio = np.divide(np.abs(residual), scale, out=np.zeros(residual.shape), where=scale > 0)
+    return ratio.max(axis=0) if ratio.size else np.zeros(x.shape[1:])
+
+
+def _refined(factor, pattern, values, columns, trans, steps):
+    """Solve ``op(A) X = B`` and apply up to ``steps`` refinement sweeps."""
+    solution = np.asarray(factor._solve_numpy(columns, trans=trans))
+    if steps == 0:
+        return solution
+    matrix = pattern.to_scipy(values)
+    operator = matrix if trans == "N" else (matrix.T if trans == "T" else matrix.conj().T)
+    eps = np.finfo(np.result_type(values.dtype, columns.dtype)).eps
+    residual = columns - operator @ solution
+    error = _componentwise_backward_error(operator, solution, columns, residual)
+    for _ in range(steps):
+        if np.all(error <= 2.0 * eps):
+            break
+        candidate = solution + np.asarray(factor._solve_numpy(residual, trans=trans))
+        candidate_residual = columns - operator @ candidate
+        candidate_error = _componentwise_backward_error(
+            operator, candidate, columns, candidate_residual
+        )
+        improved = candidate_error < error
+        # Keep each column's better iterate; stop once no column halves.
+        solution = np.where(improved, candidate, solution)
+        residual = np.where(improved, candidate_residual, residual)
+        halved = np.any(candidate_error <= 0.5 * error)
+        error = np.minimum(candidate_error, error)
+        if not halved:
+            break
+    return solution
+
+
 def _host_solve(pattern, options, core_ndim, trans, values, rhs):
     """Host callback: one factorization per distinct batch of values, multi-RHS solves."""
     values = np.asarray(values)
@@ -297,17 +376,21 @@ def _host_solve(pattern, options, core_ndim, trans, values, rhs):
     if int(np.prod(value_batch, dtype=np.int64)) == 1:
         factor = _factor(pattern, options, values.reshape(-1).astype(dtype))
         columns = np.moveaxis(stacked, 0, -1).reshape(n, -1)
-        solved = np.asarray(factor._solve_numpy(columns, trans=trans))
+        flat_values = values.reshape(-1).astype(dtype)
+        solved = _refined(factor, pattern, flat_values, columns, trans, int(options.refine_steps))
         solved = np.moveaxis(solved.reshape(core + (count,)), -1, 0)
     else:
         per_value = np.broadcast_to(values, batch + values.shape[-1:]).reshape(count, -1)
         solved = np.stack(
             [
-                np.asarray(
-                    _factor(pattern, options, per_value[i].astype(dtype))._solve_numpy(
-                        stacked[i], trans=trans
-                    )
-                )
+                _refined(
+                    _factor(pattern, options, per_value[i].astype(dtype)),
+                    pattern,
+                    per_value[i].astype(dtype),
+                    stacked[i].reshape(n, -1),
+                    trans,
+                    int(options.refine_steps),
+                ).reshape(stacked[i].shape)
                 for i in range(count)
             ]
         )
