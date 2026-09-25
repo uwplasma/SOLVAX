@@ -129,5 +129,5 @@ def test_colouring_reproduces_the_greedy_reference(shape, density, seed) -> None
     expected = _reference_column_groups(pattern)
     actual = column_groups(pattern)
     assert len(actual) == len(expected)
-    for a, b in zip(actual, expected):
+    for a, b in zip(actual, expected, strict=True):
         np.testing.assert_array_equal(a, b)

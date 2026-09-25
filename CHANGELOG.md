@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `column_groups` forms the column-intersection graph with one compiled sparse
+  product instead of a Python loop over every row of every column, returning
+  identical groups 4.7-13x faster (12.4 s to 1.46 s on a 1.06M-nnz
+  block-banded pattern), and bounds each free-group search by the column degree.
 - Add `solvax.sparse_direct`: host SuperLU/MUMPS factorizations behind
   `jax.pure_callback`, usable under `jit`, `vmap` and `grad`.
   `sparse_solve(pattern, values, b)` is a `custom_linear_solve` over a static
