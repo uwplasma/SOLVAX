@@ -543,14 +543,16 @@ def _restarted(
     recycling: str,
     *,
     fixed_work: bool,
+    zero_initial: bool = False,
 ):
     """Outer restart loop shared by :func:`gmres` (k = 0) and :func:`gcrot`.
 
     The residual is carried by exact recurrences (``r -= C C^H r`` after the
     outer projection, ``r -= A dx`` after each cycle, with ``A dx``
     reconstructed from the Arnoldi relation), so each cycle costs no extra
-    matvec; the true residual is recomputed once at the end for honest
-    reporting.
+    matvec. The carried residual is recomputed exactly as ``b - A x`` at every
+    cycle boundary, so it is reported directly; ``zero_initial`` (a static
+    flag set when ``x0`` defaulted to zero) skips the initial ``A x0``.
 
     Args:
         matvec, b, x0, precond, m, tol, max_restarts: as in :func:`gmres`.
@@ -567,7 +569,7 @@ def _restarted(
     dtype = b.dtype
     eps = jnp.finfo(dtype).eps
     k = C.shape[1]
-    r0 = b - _gmres_matvec(matvec, x0)
+    r0 = b if zero_initial else b - _gmres_matvec(matvec, x0)
 
     def cond_fun(state):
         _, _, res, _, cycles, _, _, _ = state
@@ -630,11 +632,12 @@ def _restarted(
             return lax.cond(active, body_fun, lambda value: value, state), None
 
         final, _ = lax.scan(scan_body, init, xs=None, length=max_restarts)
-        x, _, _, iters, _, C, U, fill = final
     else:
-        x, _, _, iters, _, C, U, fill = lax.while_loop(cond_fun, body_fun, init)
-
-    res = _array_norm(b - _gmres_matvec(matvec, x))
+        final = lax.while_loop(cond_fun, body_fun, init)
+    # final[2] is the norm of the exact residual b - A x recomputed at the last
+    # cycle boundary (or of r0 when no cycle ran); recomputing it here only
+    # cost another operator application.
+    x, _, res, iters, _, C, U, fill = final
     return x, res, iters, res <= tol, C, U, fill
 
 
@@ -900,6 +903,7 @@ def gmres(
 
     b = jnp.asarray(b)
     n = b.shape[0]
+    zero_initial = x0 is None
     x0 = jnp.zeros_like(b) if x0 is None else jnp.asarray(x0)
     precond = _identity if precond is None else precond
     tol = jnp.maximum(atol, rtol * _array_norm(b))
@@ -908,7 +912,7 @@ def gmres(
     x, res, iters, converged, _, _, _ = _restarted(
         matvec, b, x0, precond, restart, tol, max_restarts,
         empty, empty, jnp.int32(0), recycling="none",
-        fixed_work=fixed_work,
+        fixed_work=fixed_work, zero_initial=zero_initial,
     )
     return KrylovSolution(x, res, iters, converged, None)
 
@@ -1006,6 +1010,7 @@ def gcrot(
         x0 = None if x0 is None else jnp.asarray(x0).reshape(-1)
     n = b.shape[0]
     dtype = b.dtype
+    zero_initial = x0 is None
     x0 = jnp.zeros_like(b) if x0 is None else jnp.asarray(x0)
     precond = _identity if precond is None else precond
     tol = jnp.maximum(atol, rtol * _array_norm(b))
@@ -1065,6 +1070,6 @@ def gcrot(
 
     x, res, iters, converged, C, U, _ = _restarted(
         matvec, b, x0, precond, m, tol, max_restarts, C, U, fill,
-        recycling=recycle_strategy, fixed_work=False,
+        recycling=recycle_strategy, fixed_work=False, zero_initial=zero_initial,
     )
     return KrylovSolution(x.reshape(shape), res, iters, converged, (C, U), drift)

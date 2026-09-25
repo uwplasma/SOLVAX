@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Flat-array `gmres` and `gcrot` no longer spend an operator application on
+  `A x0` when `x0` defaults to zero, nor a final one re-deriving the residual
+  already recomputed exactly at the last cycle boundary. With a near-exact
+  preconditioner (4 iterations) this is 5 instead of 7 matvecs.
 - Add `solvax.sparse_direct`: host SuperLU/MUMPS factorizations behind
   `jax.pure_callback`, usable under `jit`, `vmap` and `grad`.
   `sparse_solve(pattern, values, b)` is a `custom_linear_solve` over a static
