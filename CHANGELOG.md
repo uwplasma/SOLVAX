@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- The host factorization cache is keyed on a structural digest of the
+  pattern (`CsrPattern.structure_digest`) instead of object identity, so
+  separately built identical patterns reuse one factorization.
 - Add `solvax.sparse_direct`: host SuperLU/MUMPS factorizations behind
   `jax.pure_callback`, usable under `jit`, `vmap` and `grad`.
   `sparse_solve(pattern, values, b)` is a `custom_linear_solve` over a static
