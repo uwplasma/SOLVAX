@@ -61,7 +61,7 @@ class CsrPattern:
     row of stored entry ``e``.
     """
 
-    __slots__ = ("indptr", "indices", "rows", "shape", "_token")
+    __slots__ = ("indptr", "indices", "rows", "shape", "_token", "_structure")
 
     def __init__(self, indptr, indices, shape: tuple[int, int]):
         indptr = np.asarray(indptr, dtype=np.int64)
@@ -78,6 +78,22 @@ class CsrPattern:
         self.rows = np.repeat(np.arange(n_rows, dtype=np.int64), np.diff(indptr))
         self.shape = (n_rows, n_cols)
         self._token = next(_TOKENS)
+        self._structure: bytes | None = None
+
+    @property
+    def structure_digest(self) -> bytes:
+        """Digest of shape, ``indptr`` and ``indices``, computed once.
+
+        Keys the factorization cache, so separately built but identical
+        patterns share factors while jit still hashes patterns by identity.
+        """
+        if self._structure is None:
+            digest = hashlib.blake2b(digest_size=16)
+            digest.update(np.asarray(self.shape, dtype=np.int64).tobytes())
+            digest.update(self.indptr.tobytes())
+            digest.update(self.indices.tobytes())
+            self._structure = digest.digest()
+        return self._structure
 
     @property
     def nnz(self) -> int:
@@ -195,7 +211,7 @@ def _factor(pattern: CsrPattern, options: HostFactorOptions, values: np.ndarray)
     """The factorization of ``pattern`` with ``values``, from the cache if present."""
     values = np.ascontiguousarray(values)
     digest = hashlib.blake2b(values.tobytes(), digest_size=16).digest()
-    key = (pattern._token, options, values.dtype.str, digest)
+    key = (pattern.structure_digest, options, values.dtype.str, digest)
     with _CACHE_LOCK:
         cached = _CACHE.get(key)
         if cached is not None:
@@ -330,7 +346,9 @@ def sparse_solve(
     are implicit: ``dx = A^{-1} (db - dA x)`` and, in reverse mode, a solve with
     ``A^T`` on the same cached factors. ``vmap`` over ``b`` alone is one
     multi-right-hand-side solve; ``vmap`` over ``values`` factors each distinct
-    matrix once.
+    matrix once while the batch fits in the factor cache
+    (:func:`set_factor_cache_size`); a reverse-mode pass over a larger batch
+    refactors evicted matrices for its transposed solves.
     """
     options = HostFactorOptions() if options is None else options
     if pattern.shape[0] != pattern.shape[1]:

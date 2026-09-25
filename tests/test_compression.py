@@ -158,3 +158,26 @@ def test_an_empty_pattern_recovers_an_empty_matrix() -> None:
     empty = scipy_sparse.csr_matrix((3, 0))
     recovered = matrix_from_products(lambda v: jnp.zeros(3), empty, groups=[])
     assert recovered.shape == (3, 0) and recovered.nnz == 0
+def _reference_column_groups(pattern):
+    """The previous row-by-row greedy colouring, kept as an oracle."""
+    csc, csr = pattern.tocsc(), pattern.tocsr()
+    n = csc.shape[1]
+    group_of_column = np.full(n, -1, dtype=np.int64)
+    forbidden = np.full(n + 1, -1, dtype=np.int64)
+    for column in np.argsort(-np.diff(csc.indptr), kind="stable"):
+        for row in csc.indices[csc.indptr[column] : csc.indptr[column + 1]]:
+            used = group_of_column[csr.indices[csr.indptr[row] : csr.indptr[row + 1]]]
+            forbidden[used[used >= 0]] = column
+        group_of_column[column] = int(np.argmax(forbidden != column))
+    order = np.argsort(group_of_column, kind="stable")
+    return np.split(order, np.flatnonzero(np.diff(group_of_column[order])) + 1)
+
+
+@pytest.mark.parametrize("shape, density, seed", [((300, 300), 0.03, 1), ((900, 200), 0.02, 2)])
+def test_colouring_reproduces_the_greedy_reference(shape, density, seed) -> None:
+    pattern = _random_sparse(*shape, density, seed)
+    expected = _reference_column_groups(pattern)
+    actual = column_groups(pattern)
+    assert len(actual) == len(expected)
+    for a, b in zip(actual, expected, strict=True):
+        np.testing.assert_array_equal(a, b)

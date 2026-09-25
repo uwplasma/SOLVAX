@@ -78,3 +78,28 @@ def test_refinement_jit_compatible():
     x, history = run(b)
     assert float(jnp.linalg.norm(b - a @ x)) < 1e-12
     assert history.shape == (4,)
+
+
+def _complex_system(n: int = 40):
+    rng = np.random.default_rng(5)
+    a = rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n)) + 3 * n * np.eye(n)
+    b = rng.standard_normal(n) + 1j * rng.standard_normal(n)
+    return jnp.asarray(a), jnp.asarray(b)
+
+
+def test_refinement_keeps_a_complex_system_complex():
+    a, b = _complex_system()
+    low = as_low_precision(lambda r: jnp.linalg.solve(a, r), jnp.float32)
+    x, norms = iterative_refinement(lambda v: a @ v, b, low, iterations=4)
+    assert jnp.iscomplexobj(x)
+    assert float(jnp.linalg.norm(a @ x - b) / jnp.linalg.norm(b)) < 1e-13
+    assert float(norms[-1]) < float(norms[0])
+
+
+def test_low_precision_complex_solve_stays_complex():
+    a, b = _complex_system()
+    low = as_low_precision(lambda r: jnp.linalg.solve(a, r), jnp.float32)
+    x = low(b)
+    assert x.dtype == jnp.complex128
+    exact = jnp.linalg.solve(a, b)
+    assert float(jnp.linalg.norm(x - exact) / jnp.linalg.norm(exact)) < 1e-5
