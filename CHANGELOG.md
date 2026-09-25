@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Flat-array `gmres` and `gcrot` no longer spend an operator application on
+  `A x0` when `x0` defaults to zero, nor a final one re-deriving the residual
+  already recomputed exactly at the last cycle boundary. With a near-exact
+  preconditioner (4 iterations) this is 5 instead of 7 matvecs.
 - `matrix_from_products` keeps complex products instead of silently casting
   them to float64, and `verify_products` compares complex matrices with
   complex probes without discarding imaginary parts (previously a real

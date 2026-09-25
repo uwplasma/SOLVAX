@@ -608,3 +608,42 @@ def test_recycle_drift_endpoints():
 
     assert drift(same, same) == pytest.approx(0.0, abs=1e-12)
     assert drift(same, orthogonal) == pytest.approx(1.0, abs=1e-12)
+
+
+def _counting_system(n: int = 60):
+    rng = np.random.default_rng(12)
+    a = jnp.asarray(rng.standard_normal((n, n)) / np.sqrt(n) + 3.0 * np.eye(n))
+    b = jnp.asarray(rng.standard_normal(n))
+    calls = []
+
+    def matvec(v):
+        jax.debug.callback(lambda: calls.append(1))
+        return a @ v
+
+    return a, b, matvec, calls
+
+
+@pytest.mark.parametrize("solver", ["gmres", "gcrot"])
+def test_a_zero_start_spends_no_matvec_outside_the_cycles(solver):
+    a, b, matvec, calls = _counting_system()
+    exact = jnp.linalg.inv(a)
+
+    def precond(r):
+        return exact @ r
+
+    if solver == "gmres":
+        solution = gmres(matvec, b, precond=precond, rtol=1e-12, restart=20)
+    else:
+        solution = gcrot(matvec, b, precond=precond, rtol=1e-12, m=20, k=2)
+    jax.block_until_ready(solution.x)
+    jax.effects_barrier()  # debug callbacks may still be in flight
+    cycles = 1
+    # One Arnoldi matvec per iteration plus the exact residual per cycle.
+    assert len(calls) == int(solution.iterations) + cycles
+    true = float(jnp.linalg.norm(b - a @ solution.x))
+    assert abs(float(solution.residual_norm) - true) <= 1e-12 * float(jnp.linalg.norm(b))
+    calls.clear()
+    started = gmres(matvec, b, x0=jnp.zeros_like(b), precond=precond, rtol=1e-12, restart=20)
+    jax.block_until_ready(started.x)
+    jax.effects_barrier()
+    assert len(calls) == int(solution.iterations) + cycles + 1
