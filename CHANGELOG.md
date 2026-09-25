@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `matrix_from_products` keeps complex products instead of silently casting
+  them to float64, and `verify_products` compares complex matrices with
+  complex probes without discarding imaginary parts (previously a real
+  recovery of a complex operator passed verification at 1e-16).
 - Add `solvax.sparse_direct`: host SuperLU/MUMPS factorizations behind
   `jax.pure_callback`, usable under `jit`, `vmap` and `grad`.
   `sparse_solve(pattern, values, b)` is a `custom_linear_solve` over a static
