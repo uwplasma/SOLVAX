@@ -37,13 +37,28 @@ import jax
 import jax.numpy as jnp
 
 
+def _same_kind(precision, like):
+    """Return ``precision`` as a complex dtype when ``like`` is complex.
+
+    A requested precision names a width (float32, float64); applying it to a
+    complex value must keep the value complex, or the imaginary part is lost.
+    """
+
+    precision = jnp.dtype(precision)
+    if jnp.issubdtype(jnp.dtype(like), jnp.complexfloating) and not jnp.issubdtype(
+        precision, jnp.complexfloating
+    ):
+        return jnp.result_type(precision, jnp.complex64)
+    return precision
+
+
 def iterative_refinement(
     matvec: Callable,
     b: jax.Array,
     approx_solve: Callable,
     *,
     iterations: int = 3,
-    residual_dtype=jnp.float64,
+    residual_dtype=None,
 ) -> tuple[jax.Array, jax.Array]:
     """Refine an approximate solve of ``matvec(x) = b`` by defect correction.
 
@@ -60,7 +75,9 @@ def iterative_refinement(
         approx_solve: callable ``approx_solve(r) -> d`` applying an
             approximate inverse of ``A``; may be low precision internally.
         iterations: number of correction sweeps (static Python int).
-        residual_dtype: precision for iterates and residual accumulation.
+        residual_dtype: precision for iterates and residual accumulation;
+            float64 by default. A real width applied to a complex ``b`` keeps
+            it complex (float64 becomes complex128).
 
     Returns:
         A pair ``(x, residual_norms)`` where ``x`` is the refined solution in
@@ -69,6 +86,8 @@ def iterative_refinement(
         solve and after each sweep, decreasing until it stalls at the
         ``residual_dtype`` roundoff floor.
     """
+    b = jnp.asarray(b)
+    residual_dtype = _same_kind(jnp.float64 if residual_dtype is None else residual_dtype, b.dtype)
     b = jnp.asarray(b, residual_dtype)
     x = jnp.asarray(approx_solve(b), residual_dtype)
     norms = []
@@ -92,7 +111,8 @@ def as_low_precision(solve: Callable, dtype=jnp.float32) -> Callable:
     Args:
         solve: callable taking one or more arrays and returning an array
             (or pytree of arrays).
-        dtype: precision to run ``solve`` in.
+        dtype: precision to run ``solve`` in; complex arrays keep their kind
+            (float32 becomes complex64 for a complex argument).
 
     Returns:
         A callable with the same signature operating in ``dtype`` internally.
@@ -102,7 +122,7 @@ def as_low_precision(solve: Callable, dtype=jnp.float32) -> Callable:
         if hasattr(value, "dtype") and jnp.issubdtype(
             value.dtype, jnp.inexact
         ):
-            return jnp.asarray(value, dtype)
+            return jnp.asarray(value, _same_kind(dtype, value.dtype))
         return value
 
     # Explicit PyTree callables (for example Equinox preconditioners) expose
