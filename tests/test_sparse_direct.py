@@ -394,3 +394,79 @@ def test_separately_built_identical_patterns_share_one_factorization():
     assert other.structure_digest != sd.CsrPattern.from_scipy(matrix)[0].structure_digest
     sd.sparse_solve(other, jnp.asarray(other_values), b)
     assert sd.factor_cache_info()["misses"] == before + 2
+
+
+def _badly_scaled_kkt(seed=7, spread=1e10):
+    """[[D H D, C^T], [C, 0]] with row/column scales spread over ``spread``."""
+    rng = np.random.default_rng(seed)
+    n, q = 120, 20
+    h = scipy_sparse.random(n, n, density=0.05, random_state=seed)
+    h = (h @ h.T + scipy_sparse.eye(n)).tocsr()
+    d = scipy_sparse.diags(np.logspace(0, np.log10(spread), n)[rng.permutation(n)])
+    c = scipy_sparse.random(q, n, density=0.2, random_state=seed + 1)
+    kkt = scipy_sparse.bmat([[d @ h @ d, c.T], [c, None]], format="csr")
+    pattern, values = sd.CsrPattern.from_scipy(kkt, include_diagonal=True)
+    return pattern, jnp.asarray(values), pattern.to_scipy(values)
+
+
+@pytest.mark.parametrize("trans", ["N", "T"])
+def test_host_refinement_reaches_componentwise_backward_stability(trans):
+    pattern, values, kkt = _badly_scaled_kkt()
+    rng = np.random.default_rng(3)
+    b = jnp.asarray(rng.standard_normal(kkt.shape[0]))
+    matrix = pattern.to_scipy(np.asarray(values))
+    operator = matrix if trans == "N" else matrix.T
+    refined_options = sd.HostFactorOptions(refine_steps=4)
+    plain, refined = [
+        np.asarray(sd._host_solve(pattern, options, 1, trans, np.asarray(values), np.asarray(b)))
+        for options in (sd.HostFactorOptions(), refined_options)
+    ]
+
+    def berr(x):
+        r = np.asarray(b) - operator @ x
+        return float(np.max(np.abs(r) / (abs(operator) @ np.abs(x) + np.abs(np.asarray(b)))))
+
+    assert berr(refined) <= 10 * np.finfo(float).eps
+    assert berr(refined) <= berr(plain)
+    # Refinement reuses the one cached factorization.
+    sd.clear_factor_cache()
+    before = sd.factor_cache_info()["misses"]
+    sd.sparse_solve(pattern, values, b, options=refined_options)
+    sd.sparse_solve(pattern, values, b)
+    assert sd.factor_cache_info()["misses"] == before + 1
+
+
+def test_traced_backward_error_matches_numpy():
+    pattern, values, kkt = _badly_scaled_kkt(spread=1e4)
+    rng = np.random.default_rng(9)
+    x = rng.standard_normal((kkt.shape[0], 2))
+    exact = kkt @ x
+    b = exact + 1e-6 * np.max(np.abs(exact)) * rng.standard_normal(x.shape)
+    componentwise, normwise = jax.jit(
+        lambda v, xx, bb: sd.sparse_backward_error(pattern, v, xx, bb)
+    )(jnp.asarray(values), jnp.asarray(x), jnp.asarray(b))
+    r = np.abs(b - kkt @ x)
+    expected_c = np.max(r / (abs(kkt) @ np.abs(x) + np.abs(b)), axis=0)
+    norm_a = np.max(np.asarray(abs(kkt).sum(axis=1)).ravel())
+    denominator = norm_a * np.max(np.abs(x), axis=0) + np.max(np.abs(b), axis=0)
+    expected_n = np.max(r, axis=0) / denominator
+    # r = b - A x cancels (|b| up to ~1e4 * |r|), so the two summation orders
+    # agree only to ~1e-10 relative.
+    np.testing.assert_allclose(componentwise, expected_c, rtol=1e-8)
+    np.testing.assert_allclose(normwise, expected_n, rtol=1e-8)
+
+
+def test_refinement_leaves_gradients_consistent():
+    pattern, values, kkt = _badly_scaled_kkt(spread=1e3)
+    b = jnp.asarray(np.random.default_rng(1).standard_normal(kkt.shape[0]))
+    options = sd.HostFactorOptions(refine_steps=2)
+
+    def loss(v, opts):
+        return jnp.sum(sd.sparse_solve(pattern, v, b, options=opts) ** 2)
+
+    np.testing.assert_allclose(
+        jax.grad(loss)(values, options), jax.grad(loss)(values, sd.HostFactorOptions()),
+        rtol=1e-8, atol=1e-12,
+    )
+    with pytest.raises(ValueError, match="refine_steps"):
+        sd.HostFactorOptions(refine_steps=-1)

@@ -171,6 +171,7 @@ from solvax.sparse_direct import (
     csr_matvec,
     factor_cache_info,
     set_factor_cache_size,
+    sparse_backward_error,
     sparse_eigenvalue,
     sparse_solve,
 )
@@ -358,6 +359,7 @@ __all__ = [
     "csr_matvec",
     "factor_cache_info",
     "set_factor_cache_size",
+    "sparse_backward_error",
     "sparse_eigenvalue",
     "sparse_solve",
     "sparse_operator_matrix",
