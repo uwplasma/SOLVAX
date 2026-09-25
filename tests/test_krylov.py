@@ -636,11 +636,14 @@ def test_a_zero_start_spends_no_matvec_outside_the_cycles(solver):
     else:
         solution = gcrot(matvec, b, precond=precond, rtol=1e-12, m=20, k=2)
     jax.block_until_ready(solution.x)
+    jax.effects_barrier()  # debug callbacks may still be in flight
     cycles = 1
     # One Arnoldi matvec per iteration plus the exact residual per cycle.
     assert len(calls) == int(solution.iterations) + cycles
     true = float(jnp.linalg.norm(b - a @ solution.x))
     assert abs(float(solution.residual_norm) - true) <= 1e-12 * float(jnp.linalg.norm(b))
     calls.clear()
-    gmres(matvec, b, x0=jnp.zeros_like(b), precond=precond, rtol=1e-12, restart=20)
+    started = gmres(matvec, b, x0=jnp.zeros_like(b), precond=precond, rtol=1e-12, restart=20)
+    jax.block_until_ready(started.x)
+    jax.effects_barrier()
     assert len(calls) == int(solution.iterations) + cycles + 1
