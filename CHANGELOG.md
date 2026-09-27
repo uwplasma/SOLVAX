@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Declare dependency floors: `equinox>=0.13.3`, `jax>=0.4.38`,
+  `jaxlib>=0.4.38`, `numpy>=1.24`. With bare `equinox`, installing SOLVAX into
+  an environment that already had equinox 0.11-0.13.0 kept it, and
+  `import solvax` then failed under jax >= 0.10 on the removed
+  `jax.interpreters.batching.NotMapped`.
 - `HostFactorOptions(refine_steps=k)` applies up to k sweeps of host-side
   iterative refinement on the cached factors, stopping on the LAPACK xGERFS
   rule; on a KKT matrix scaled over 1e10 the componentwise backward error

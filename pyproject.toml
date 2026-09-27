@@ -10,7 +10,11 @@ license = { text = "MIT" }
 authors = [{ name = "UW Plasma", email = "rogerio.jorge@wisc.edu" }]
 requires-python = ">=3.10"
 dynamic = ["version"]
-dependencies = ["equinox", "jax"]
+# Floors are the "minimum" CI lane's pins (tests/test_packaging.py checks it).
+# equinox < 0.13.1 fails to import under jax >= 0.9.2 (batching.NotMapped), and
+# 0.13.1-0.13.2 import but fail at trace time under jax 0.11 (core.mapped_aval),
+# so an older equinox already in the environment must be upgraded, not kept.
+dependencies = ["equinox>=0.13.3", "jax>=0.4.38", "jaxlib>=0.4.38", "numpy>=1.24"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Science/Research",
