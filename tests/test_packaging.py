@@ -1,5 +1,4 @@
 import re
-import tomllib
 from pathlib import Path
 
 import solvax
@@ -20,8 +19,9 @@ def test_pep561_marker_is_present() -> None:
 def test_minimum_ci_lane_pins_the_declared_floors() -> None:
     """A floor nothing installs is untested; the minimum lane pins each one."""
     root = Path(__file__).parents[1]
-    deps = tomllib.loads((root / "pyproject.toml").read_text())["project"]["dependencies"]
-    floors = dict(re.fullmatch(r"([a-z]+)>=(\S+)", dep).groups() for dep in deps)
-    pins = dict(re.findall(r"'([a-z]+)==([^']+)'", (root / ".github/workflows/tests.yml").read_text()))
+    project = (root / "pyproject.toml").read_text()
+    floors = dict(re.findall(r'"([a-z]+)>=([^"]+)"', project.split("[project.urls]")[0]))
+    workflow = (root / ".github/workflows/tests.yml").read_text()
+    pins = dict(re.findall(r"'([a-z]+)==([^']+)'", workflow))
     for name in ("jax", "jaxlib", "equinox"):
         assert floors[name] == pins[name], name
