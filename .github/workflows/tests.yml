@@ -162,8 +162,7 @@ jobs:
       - name: Pin supported-minimum numerical stack
         if: matrix.stack == 'minimum'
         run: >-
-          pip install 'jax==0.4.38' 'jaxlib==0.4.38'
-          'equinox>=0.11,<0.12' 'lineax>=0.0.7,<0.1'
+          pip install 'jax==0.4.38' 'jaxlib==0.4.38' 'equinox==0.13.3'
       - run: python -c "import jax, solvax; print(jax.__version__, solvax.__version__, solvax.__file__)"
       - name: Confirm the optional backend is actually present
         if: matrix.stack == 'adv'
