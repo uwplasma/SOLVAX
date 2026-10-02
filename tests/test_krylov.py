@@ -610,6 +610,90 @@ def test_recycle_drift_endpoints():
     assert drift(same, orthogonal) == pytest.approx(1.0, abs=1e-12)
 
 
+@pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64, jnp.complex64, jnp.complex128])
+def test_gcrot_drift_with_padded_recycles_and_continuation(dtype):
+    """Known subspace rotations exercise the actual diagnostic, including early exits."""
+    n, k = 12, 3
+    complex_dtype = jnp.issubdtype(dtype, jnp.complexfloating)
+    phase = np.exp(0.7j) if complex_dtype else 1.0
+    angles = np.array([0.2, 0.0, 0.6])
+    rtol = 5e-6 if jnp.finfo(dtype).eps > 1e-10 else 1e-11
+
+    def rotation(offset, orthogonal=False):
+        a = np.eye(n, dtype=np.dtype(dtype))
+        for i, angle in enumerate(angles + offset):
+            if orthogonal and i == k - 1:
+                angle = np.pi / 2
+            c, s = np.cos(angle), np.sin(angle)
+            a[i, i] = a[k + i, k + i] = c
+            a[k + i, i], a[i, k + i] = phase * s, -np.conj(phase) * s
+        return jnp.asarray(a)
+
+    @jax.jit
+    def solve(a, rhs, pair, x0):
+        return gcrot(
+            lambda v: a @ v, rhs, recycle=pair, x0=x0,
+            m=8, k=k, rtol=rtol, atol=rtol, max_restarts=4,
+        )
+
+    a, next_a = rotation(0.0), rotation(0.025)
+    rhs = jnp.arange(1, n + 1, dtype=jnp.real(a).dtype).astype(dtype)
+    if complex_dtype:
+        rhs = rhs + 0.2j * rhs[::-1]
+    for active in (0, 1, k):
+        c = jnp.eye(n, k, dtype=dtype) * (jnp.arange(k) < active)
+        expected = np.mean(np.sin(angles[:active])) if active else 0.0
+        for mode in ("zero", "exact", "solve"):
+            b = jnp.zeros_like(rhs) if mode == "zero" else rhs
+            reference = a.conj().T @ b
+            guess = reference if mode == "exact" else jnp.zeros_like(b)
+            result = solve(a, b, (c, c), guess)
+            assert result.x.dtype == dtype
+            assert bool(result.converged)
+            assert float(result.recycle_drift) == pytest.approx(expected, abs=4 * rtol)
+            np.testing.assert_allclose(result.x, reference, rtol=4 * rtol, atol=4 * rtol)
+            assert np.linalg.norm(a @ result.x - b) <= 4 * rtol * max(1, np.linalg.norm(b))
+            if mode != "solve":
+                assert int(result.iterations) == 0
+        continued = solve(next_a, rhs, result.recycle, result.x)
+        assert bool(continued.converged)
+        np.testing.assert_allclose(
+            continued.x, next_a.conj().T @ rhs, rtol=4 * rtol, atol=4 * rtol
+        )
+        updated_c, updated_u = continued.recycle
+        np.testing.assert_allclose(next_a @ updated_u, updated_c, atol=10 * rtol)
+        assert 0 <= float(continued.recycle_drift) <= 1 + 4 * rtol
+    # The orthogonal endpoint is a diagnostic check, independent of iteration breakdowns.
+    a = rotation(0.0, orthogonal=True)
+    c = jnp.eye(n, k, dtype=dtype)
+    for b in (jnp.zeros_like(rhs), rhs):
+        exact = a.conj().T @ b
+        result = solve(a, b, (c, c), exact)
+        assert bool(result.converged) and int(result.iterations) == 0
+        assert float(result.recycle_drift) == pytest.approx((np.sin(0.2) + 1) / k, abs=4 * rtol)
+
+
+def test_gcrot_recycle_diagnostic_workspace_is_not_square():
+    """A tall warm-start diagnostic must not allocate a dense n-by-n workspace."""
+    n, k = 1024, 4
+    diagonal = jnp.linspace(1.0, 2.0, n)
+    pair = (jnp.eye(n, k), jnp.eye(n, k))
+    diagnostic = jax.jit(
+        lambda recycle: gcrot(
+            lambda v: diagonal * v, jnp.zeros(n), recycle=recycle, m=8, k=k
+        ).recycle_drift
+    )
+    try:
+        compiled = diagnostic.lower(pair).compile()
+        analysis = compiled.memory_analysis()
+    except AttributeError:
+        pytest.skip("this JAX has no compiled memory analysis")
+    if analysis is None:
+        pytest.skip("backend reports no memory analysis")
+    assert analysis.temp_size_in_bytes < n * n * diagonal.dtype.itemsize // 2
+    assert float(compiled(pair)) < 1e-12
+
+
 def _counting_system(n: int = 60):
     rng = np.random.default_rng(12)
     a = jnp.asarray(rng.standard_normal((n, n)) / np.sqrt(n) + 3.0 * np.eye(n))
