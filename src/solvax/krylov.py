@@ -1045,8 +1045,8 @@ def gcrot(
         # not -- mix the columns by a unitary and the subspace is unchanged
         # while that average moves. Measured on random 4-dimensional subspaces
         # of R^40, a unitary remixing shifted the per-column average by 1e-4
-        # while the singular-value form held to 1e-16. The cost is one SVD of a
-        # k-by-k matrix, with k the recycle dimension.
+        # while the singular-value form held to 1e-16. A reduced SVD of the
+        # n-by-k residual avoids n-by-n workspace, with k the recycle dimension.
         C_in = jnp.asarray(recycle[0], dtype)
         filled = jnp.linalg.norm(C_in, axis=0) > 0.5
         # Zero-padded columns must not enter the overlap; they would register
@@ -1061,7 +1061,7 @@ def gcrot(
         # cancellation and stays basis-independent, because right-multiplying
         # by a unitary leaves singular values alone.
         residual_cols = masked - C @ (_adjoint(C) @ masked)
-        sines = jnp.linalg.svd(residual_cols, compute_uv=False)
+        sines = jnp.linalg.svd(residual_cols, compute_uv=False, full_matrices=False)
         count = jnp.maximum(jnp.sum(filled), 1)
         # Only the leading `count` values belong to filled columns; the rest
         # are structural zeros from the padding.
