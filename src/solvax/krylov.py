@@ -252,6 +252,32 @@ def _complex_givens(a: jax.Array, b: jax.Array):
     return c, s, r
 
 
+_ORTHO_CHUNK = 32
+
+
+def _filled_cgs(V: jax.Array, w: jax.Array, rows: jax.Array):
+    """One classical Gram-Schmidt pass against the first ``rows`` rows of ``V``.
+
+    ``V`` has a row count that is a multiple of ``_ORTHO_CHUNK``; only the
+    chunks holding filled rows are touched, so step ``j`` costs O(j n)
+    instead of O(m n) against the whole zero-padded basis.
+    """
+    c = _ORTHO_CHUNK
+    chunks = (rows + c - 1) // c
+
+    def project(i, h):
+        block = lax.dynamic_slice_in_dim(V, i * c, c)
+        return lax.dynamic_update_slice_in_dim(h, jnp.conj(block) @ w, i * c, 0)
+
+    h = lax.fori_loop(0, chunks, project, jnp.zeros((V.shape[0],), w.dtype))
+
+    def subtract(i, w):
+        block = lax.dynamic_slice_in_dim(V, i * c, c)
+        return w - lax.dynamic_slice_in_dim(h, i * c, c) @ block
+
+    return h, lax.fori_loop(0, chunks, subtract, w)
+
+
 def _fgmres_cycle(
     matvec: MatVec,
     precond: MatVec,
@@ -263,6 +289,7 @@ def _fgmres_cycle(
     U: jax.Array,
     *,
     fixed_work: bool,
+    store_z: bool = True,
 ):
     """One flexible Arnoldi cycle of size ``m`` on the deflated operator.
 
@@ -282,6 +309,10 @@ def _fgmres_cycle(
         C: orthonormal recycle image basis, shape ``(n, k)`` (``k`` may
             be 0); zero columns are inert.
         U: recycle source basis with ``A U = C``, shape ``(n, k)``.
+        store_z: keep ``Z = M^{-1} V``. With a fixed preconditioner it is
+            dropped and ``dx`` is formed as ``M^{-1} (V y)``, one extra
+            preconditioner application per cycle for half the basis memory
+            (the returned factorization then carries an empty ``Z``).
 
     Returns:
         Tuple ``(dx, adx, k_done, res_est, factorization)``: the correction
@@ -296,8 +327,12 @@ def _fgmres_cycle(
     k = C.shape[1]
 
     beta_safe = jnp.where(beta > 0, beta, 1.0)
-    V = jnp.zeros((m + 1, n), dtype).at[0].set(r0 / beta_safe)
-    Z = jnp.zeros((m, n), dtype)
+    # Long cycles orthogonalize against the filled rows only, chunk by chunk;
+    # the basis is padded to whole chunks (rows past m stay zero).
+    partial = not fixed_work and m + 1 > 2 * _ORTHO_CHUNK
+    rows = -(-(m + 1) // _ORTHO_CHUNK) * _ORTHO_CHUNK if partial else m + 1
+    V = jnp.zeros((rows, n), dtype).at[0].set(r0 / beta_safe)
+    Z = jnp.zeros((m if store_z else 0, n), dtype)
     H = jnp.zeros((m + 1, m), dtype)  # Hessenberg (Arnoldi relation)
     R = jnp.zeros((m, m), dtype)  # Givens-rotated triangular factor
     B = jnp.zeros((k, m), dtype)
@@ -321,11 +356,16 @@ def _fgmres_cycle(
 
             # CGS2: two passes of classical Gram-Schmidt against the padded
             # basis (zero rows beyond j contribute nothing).
-            h1 = jnp.conj(V) @ w
-            w = w - h1 @ V
-            h2 = jnp.conj(V) @ w
-            w = w - h2 @ V
-            h = h1 + h2
+            if partial:
+                h1, w = _filled_cgs(V, w, j + 1)
+                h2, w = _filled_cgs(V, w, j + 1)
+                h = (h1 + h2)[: m + 1]
+            else:
+                h1 = jnp.conj(V) @ w
+                w = w - h1 @ V
+                h2 = jnp.conj(V) @ w
+                w = w - h2 @ V
+                h = h1 + h2
             h_next = _array_norm(w)
         V = V.at[j + 1].set(w / jnp.where(h_next > 0, h_next, 1.0))
         h = h.at[j + 1].set(h_next)
@@ -357,7 +397,8 @@ def _fgmres_cycle(
 
         R = R.at[:, j].set(h[:m])
         B = B.at[:, j].set(b_j)
-        Z = Z.at[j].set(z)
+        if store_z:
+            Z = Z.at[j].set(z)
         cs = cs.at[j].set(c_j)
         sn = sn.at[j].set(s_j)
         return (j + 1, V, Z, H, R, B, cs, sn, g, res_est)
@@ -389,7 +430,11 @@ def _fgmres_cycle(
     R = R + jnp.diag(jnp.where(used, 0.0, 1.0).astype(dtype))
     y = solve_triangular(R, jnp.where(used, g[:m], 0.0), lower=False)
 
-    dx = y @ Z - U @ (B @ y)
+    V = V[: m + 1]
+    if store_z:
+        dx = y @ Z - U @ (B @ y)
+    else:
+        dx = _gmres_precondition(precond, y @ V[:m]) - U @ (B @ y)
     adx = (H @ y) @ V
     return dx, adx, j_f, res_est, (V, Z, H, B)
 
@@ -544,6 +589,7 @@ def _restarted(
     *,
     fixed_work: bool,
     zero_initial: bool = False,
+    fixed_precond: bool = False,
 ):
     """Outer restart loop shared by :func:`gmres` (k = 0) and :func:`gcrot`.
 
@@ -585,7 +631,8 @@ def _restarted(
         beta = _array_norm(r)
 
         dx, adx, k_done, _, factorization = _fgmres_cycle(
-            matvec, precond, r, beta, tol, m, C, U, fixed_work=fixed_work
+            matvec, precond, r, beta, tol, m, C, U, fixed_work=fixed_work,
+            store_z=not fixed_precond or recycling == "harmonic",
         )
         x = x + dx
         # Recompute the residual exactly at the restart boundary (one extra
@@ -835,6 +882,7 @@ def gmres(
     atol: float = 0.0,
     max_restarts: int = 50,
     fixed_work: bool = False,
+    fixed_precond: bool = False,
 ) -> KrylovSolution:
     """Restarted flexible GMRES with right preconditioning.
 
@@ -870,6 +918,11 @@ def gmres(
             slot with converged updates masked. This replaces data-dependent
             ``while_loop`` control flow with reverse-mode-compatible
             ``scan`` control flow for bounded-cost embedding in an outer scan.
+        fixed_precond: declare ``precond`` a fixed linear map. The flat path
+            then keeps only the ``V`` basis and applies ``M^{-1}`` once more
+            per cycle to form the update, halving the basis memory; the
+            iterates match the flexible ones to roundoff. Leave ``False``
+            for a flexible (nonlinear or varying) preconditioner.
 
     Returns:
         A :class:`KrylovSolution` with ``recycle=None``.
@@ -913,6 +966,7 @@ def gmres(
         matvec, b, x0, precond, restart, tol, max_restarts,
         empty, empty, jnp.int32(0), recycling="none",
         fixed_work=fixed_work, zero_initial=zero_initial,
+        fixed_precond=fixed_precond,
     )
     return KrylovSolution(x, res, iters, converged, None)
 
@@ -930,6 +984,7 @@ def gcrot(
     max_restarts: int = 50,
     recycle: tuple[jax.Array, jax.Array] | None = None,
     recycle_strategy: str = "fifo",
+    fixed_precond: bool = False,
 ) -> KrylovSolution:
     """GCROT(m, k)-style FGMRES with Krylov subspace recycling.
 
@@ -982,6 +1037,12 @@ def gcrot(
         recycle: optional ``(C, U)`` pair of shape ``(n, k)`` from a
             previous :class:`KrylovSolution` to warm-start deflation.
         recycle_strategy: ``"fifo"`` or ``"harmonic"``, as above.
+        fixed_precond: declare ``precond`` a fixed linear map. The cycle
+            then keeps only the ``V`` basis and applies ``M^{-1}`` once more
+            per cycle to form the update, halving the basis memory (``"harmonic"``
+            still keeps ``Z`` for its eigenproblem); the
+            iterates match the flexible ones to roundoff. Leave ``False``
+            for a flexible (nonlinear or varying) preconditioner.
 
     Returns:
         A :class:`KrylovSolution` whose ``x`` has the shape of ``b`` and
@@ -1071,5 +1132,6 @@ def gcrot(
     x, res, iters, converged, C, U, _ = _restarted(
         matvec, b, x0, precond, m, tol, max_restarts, C, U, fill,
         recycling=recycle_strategy, fixed_work=False, zero_initial=zero_initial,
+        fixed_precond=fixed_precond,
     )
     return KrylovSolution(x.reshape(shape), res, iters, converged, (C, U), drift)

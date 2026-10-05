@@ -731,3 +731,23 @@ def test_a_zero_start_spends_no_matvec_outside_the_cycles(solver):
     jax.block_until_ready(started.x)
     jax.effects_barrier()
     assert len(calls) == int(solution.iterations) + cycles + 1
+
+
+@pytest.mark.parametrize("strategy", ["fifo", "harmonic"])
+def test_fixed_precond_single_basis_matches_flexible(strategy):
+    # restart 80 > 2 chunks exercises the filled-rows-only orthogonalization.
+    key = jax.random.PRNGKey(3)
+    n = 200
+    A = jnp.eye(n) * 4 + jax.random.normal(key, (n, n)) / jnp.sqrt(n)
+    b = jnp.ones(n)
+    d = jnp.diag(A)
+    precond = lambda v: v / d
+    kw = dict(precond=precond, m=80, k=4, rtol=1e-12, recycle_strategy=strategy)
+    flexible = gcrot(lambda v: A @ v, b, **kw)
+    fixed = gcrot(lambda v: A @ v, b, fixed_precond=True, **kw)
+    assert fixed.converged and int(fixed.iterations) == int(flexible.iterations)
+    assert jnp.linalg.norm(b - A @ fixed.x) <= 1e-12 * jnp.linalg.norm(b)
+    assert jnp.allclose(fixed.x, flexible.x, rtol=0, atol=1e-11)
+    plain = gmres(lambda v: A @ v, b, precond=precond, restart=80, rtol=1e-12,
+                  fixed_precond=True)
+    assert plain.converged and jnp.allclose(plain.x, flexible.x, atol=1e-11)
