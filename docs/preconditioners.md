@@ -391,6 +391,33 @@ Inputs are cast down for the preconditioner and results cast back. Flexible
 GMRES can tolerate this varying/inexact action. PCG requires additional care:
 the effective preconditioner must remain positive definite.
 
+## Float32 factors inside a float64 Krylov solve (GMRES-IR)
+
+Plain iterative refinement with float32 factors contracts the error by about
+`kappa * eps32` per sweep and stalls or diverges once that nears one. Used as the
+fixed preconditioner of a float64 GCROT/FGMRES solve, the same factors still
+reach a float64 residual, because the Krylov method only needs `M^{-1} A` to be
+well clustered:
+
+```python
+low = sx.direct.block_thomas_factor(*(a.astype(jnp.float32) for a in (lower, diag, upper)))
+precond = lambda r: sx.direct.block_thomas_solve(low, r.astype(jnp.float32)).astype(r.dtype)
+sol = sx.gcrot(apply, b, precond=precond, rtol=1e-12, fixed_precond=True)
+```
+
+Float32 values passed to `sparse_solve` give float32 SuperLU/MUMPS factors the
+same way. On GPUs JAX's default float32 matmul precision may be TF32; set
+`jax.config.update("jax_default_matmul_precision", "highest")` (or keep the bands
+in float64 with `block_thomas_factor(..., factor_dtype=jnp.float32)`), or the
+preconditioner is only about three digits accurate. Measured with
+`benchmarks/benchmark_gmres_ir.py`, 8 CPU cores and an RTX A4000: the float32
+preconditioner reaches 1e-12 in 9-21 GCROT iterations where two refinement sweeps
+stop between 1e-6 and 1e-11. It pays on the CPU only where the float64
+factorization dominates (128 blocks of 256: 3.9 s float64 factor against
+0.9 s + 1.7 s); on the A4000 the float32 factor is 2-3x faster but the Krylov
+iterations cost more than the float64 substitution (0.42 s against 0.21 s in
+total at 128 blocks of 256), so float64 block Thomas remains the faster route there.
+
 ## Constraint-aware preconditioning
 
 For bordered systems, use `schur_projected_precond`; see {doc}`operators`.

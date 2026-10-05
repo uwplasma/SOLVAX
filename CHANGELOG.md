@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Document and test GMRES-IR: float32 block-Thomas (or sparse LU) factors as the
+  fixed preconditioner of a float64 `gcrot`/`gmres` solve reach a 1e-12
+  residual in 9-21 iterations on block-tridiagonal systems where float32
+  iterative refinement stalls; `benchmarks/benchmark_gmres_ir.py` measures it on
+  CPU and GPU, including the TF32 default that degrades float32 factors on GPUs.
 - `gmres` and `gcrot` take `fixed_precond=True` for a fixed linear
   preconditioner: the cycle keeps only the `V` basis and forms the update as
   `M^{-1}(V y)`, one extra preconditioner application per cycle, instead of

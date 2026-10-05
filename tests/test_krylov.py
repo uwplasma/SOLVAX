@@ -752,3 +752,29 @@ def test_fixed_precond_single_basis_matches_flexible(strategy):
     plain = gmres(lambda v: A @ v, b, precond=precond, restart=80, rtol=1e-12,
                   fixed_precond=True)
     assert plain.converged and jnp.allclose(plain.x, flexible.x, atol=1e-11)
+
+
+def test_float32_block_thomas_preconditions_float64_gcrot():
+    # GMRES-IR: float32 factors, float64 Krylov reaches a float64 residual.
+    from solvax.direct import block_thomas_factor, block_thomas_solve, block_tridiag_matvec
+
+    rng = np.random.default_rng(0)
+    nb, m = 16, 24
+    noise = rng.standard_normal((3, nb, m, m)) / np.sqrt(m)
+    diag = jnp.asarray(1.8 * np.eye(m) + 0.5 * noise[0])
+    lower = jnp.asarray(-np.eye(m) + 0.05 * noise[1])
+    upper = jnp.asarray(-np.eye(m) + 0.05 * noise[2])
+    b = jnp.asarray(rng.standard_normal((nb, m)))
+    low = block_thomas_factor(*(a.astype(jnp.float32) for a in (lower, diag, upper)))
+
+    def apply(x):
+        return block_tridiag_matvec(lower, diag, upper, x)
+
+    def precond(r):
+        return block_thomas_solve(low, r.astype(jnp.float32)).astype(r.dtype)
+
+    sol = gcrot(apply, b, precond=precond, m=20, k=2, rtol=1e-11, fixed_precond=True)
+    exact = block_thomas_solve(block_thomas_factor(lower, diag, upper), b)
+    assert sol.converged and int(sol.iterations) < 20
+    assert jnp.linalg.norm(b - apply(sol.x)) <= 1e-11 * jnp.linalg.norm(b)
+    assert jnp.allclose(sol.x, exact, rtol=0, atol=1e-8 * jnp.max(jnp.abs(exact)))
