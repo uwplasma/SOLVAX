@@ -741,7 +741,8 @@ def test_fixed_precond_single_basis_matches_flexible(strategy):
     A = jnp.eye(n) * 4 + jax.random.normal(key, (n, n)) / jnp.sqrt(n)
     b = jnp.ones(n)
     d = jnp.diag(A)
-    precond = lambda v: v / d
+    def precond(v):
+        return v / d
     kw = dict(precond=precond, m=80, k=4, rtol=1e-12, recycle_strategy=strategy)
     flexible = gcrot(lambda v: A @ v, b, **kw)
     fixed = gcrot(lambda v: A @ v, b, fixed_precond=True, **kw)
