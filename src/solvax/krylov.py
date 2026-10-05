@@ -922,7 +922,9 @@ def gmres(
             then keeps only the ``V`` basis and applies ``M^{-1}`` once more
             per cycle to form the update, halving the basis memory; the
             iterates match the flexible ones to roundoff. Leave ``False``
-            for a flexible (nonlinear or varying) preconditioner.
+            for a flexible (nonlinear or varying) preconditioner, and for a
+            nearly singular one: forming ``M^{-1}(V y)`` amplifies roundoff
+            by ``||M^{-1}||`` (a 1e8 gain made a cycle diverge).
 
     Returns:
         A :class:`KrylovSolution` with ``recycle=None``.
@@ -1042,7 +1044,9 @@ def gcrot(
             per cycle to form the update, halving the basis memory (``"harmonic"``
             still keeps ``Z`` for its eigenproblem); the
             iterates match the flexible ones to roundoff. Leave ``False``
-            for a flexible (nonlinear or varying) preconditioner.
+            for a flexible (nonlinear or varying) preconditioner, and for a
+            nearly singular one: forming ``M^{-1}(V y)`` amplifies roundoff
+            by ``||M^{-1}||`` (a 1e8 gain made a cycle diverge).
 
     Returns:
         A :class:`KrylovSolution` whose ``x`` has the shape of ``b`` and
@@ -1122,7 +1126,11 @@ def gcrot(
         # cancellation and stays basis-independent, because right-multiplying
         # by a unitary leaves singular values alone.
         residual_cols = masked - C @ (_adjoint(C) @ masked)
-        sines = jnp.linalg.svd(residual_cols, compute_uv=False, full_matrices=False)
+        # Thin QR first, so the SVD only ever sees the k-by-k factor: a
+        # direct SVD of the n-by-k residual asked a backend for an n-by-n
+        # workspace (113 GB on a 119k-unknown deck). Same singular values.
+        _, r_cols = jnp.linalg.qr(residual_cols, mode="reduced")
+        sines = jnp.linalg.svd(r_cols, compute_uv=False)
         count = jnp.maximum(jnp.sum(filled), 1)
         # Only the leading `count` values belong to filled columns; the rest
         # are structural zeros from the padding.

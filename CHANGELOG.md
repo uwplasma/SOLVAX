@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `gcrot` warm starts (`recycle=`) no longer run an SVD on the n-by-k drift
+  residual, which some backends serve with an n-by-n workspace (113 GB on a
+  119k-unknown DKX deck): a thin QR reduces it to a k-by-k SVD with the same
+  singular values, so the diagnostic needs O(n k) memory.
 - Document and test GMRES-IR: float32 block-Thomas (or sparse LU) factors as the
   fixed preconditioner of a float64 `gcrot`/`gmres` solve reach a 1e-12
   residual in 9-21 iterations on block-tridiagonal systems where float32
