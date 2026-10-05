@@ -922,7 +922,9 @@ def gmres(
             then keeps only the ``V`` basis and applies ``M^{-1}`` once more
             per cycle to form the update, halving the basis memory; the
             iterates match the flexible ones to roundoff. Leave ``False``
-            for a flexible (nonlinear or varying) preconditioner.
+            for a flexible (nonlinear or varying) preconditioner, and for a
+            nearly singular one: forming ``M^{-1}(V y)`` amplifies roundoff
+            by ``||M^{-1}||`` (a 1e8 gain made a cycle diverge).
 
     Returns:
         A :class:`KrylovSolution` with ``recycle=None``.
@@ -1042,7 +1044,9 @@ def gcrot(
             per cycle to form the update, halving the basis memory (``"harmonic"``
             still keeps ``Z`` for its eigenproblem); the
             iterates match the flexible ones to roundoff. Leave ``False``
-            for a flexible (nonlinear or varying) preconditioner.
+            for a flexible (nonlinear or varying) preconditioner, and for a
+            nearly singular one: forming ``M^{-1}(V y)`` amplifies roundoff
+            by ``||M^{-1}||`` (a 1e8 gain made a cycle diverge).
 
     Returns:
         A :class:`KrylovSolution` whose ``x`` has the shape of ``b`` and
