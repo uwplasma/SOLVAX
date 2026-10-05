@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- `gmres` and `gcrot` take `fixed_precond=True` for a fixed linear
+  preconditioner: the cycle keeps only the `V` basis and forms the update as
+  `M^{-1}(V y)`, one extra preconditioner application per cycle, instead of
+  storing `Z = M^{-1} V` (`"harmonic"` recycling still keeps `Z`). Cycles longer
+  than 64 also orthogonalize against the filled basis rows only, in 32-row
+  chunks, instead of the whole zero-padded basis. On a 90,000-unknown
+  convection-diffusion solve at restart 1,000 (8 CPU cores, 663 iterations in
+  every case) the wall time falls from 211 s to 117 s (filled rows) and 70 s
+  (single basis), and peak memory from 2.83 GiB to 1.32 GiB.
 - Declare dependency floors: `equinox>=0.13.3`, `jax>=0.4.38`,
   `jaxlib>=0.4.38`, `numpy>=1.24`. With bare `equinox`, installing SOLVAX into
   an environment that already had equinox 0.11-0.13.0 kept it, and
