@@ -778,3 +778,27 @@ def test_float32_block_thomas_preconditions_float64_gcrot():
     assert sol.converged and int(sol.iterations) < 20
     assert jnp.linalg.norm(b - apply(sol.x)) <= 1e-11 * jnp.linalg.norm(b)
     assert jnp.allclose(sol.x, exact, rtol=0, atol=1e-8 * jnp.max(jnp.abs(exact)))
+
+
+def test_warm_start_svds_stay_k_sized():
+    # The recycle drift diagnostic must not SVD an n-row matrix (n-by-n workspace).
+    n, k = 500, 4
+    a, b = random_system(n)
+    first = gcrot(lambda v: a @ v, b, m=10, k=k, rtol=1e-6)
+
+    def warm(b):
+        return gcrot(lambda v: a @ v, b, m=10, k=k, rtol=1e-6, recycle=first.recycle).x
+
+    def walk(jaxpr):
+        for eqn in jaxpr.eqns:
+            if eqn.primitive.name == "svd":
+                assert max(eqn.invars[0].aval.shape) <= 2 * (10 + k)
+            for value in eqn.params.values():
+                for item in value if isinstance(value, tuple) else (value,):
+                    inner = getattr(item, "jaxpr", item)
+                    if hasattr(inner, "eqns"):
+                        walk(inner)
+
+    walk(jax.make_jaxpr(warm)(b).jaxpr)
+    sol = gcrot(lambda v: a @ v, b, m=10, k=k, rtol=1e-10, recycle=first.recycle)
+    assert sol.converged and 0.0 <= float(sol.recycle_drift) < 1e-6

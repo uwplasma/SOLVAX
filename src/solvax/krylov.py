@@ -1122,7 +1122,11 @@ def gcrot(
         # cancellation and stays basis-independent, because right-multiplying
         # by a unitary leaves singular values alone.
         residual_cols = masked - C @ (_adjoint(C) @ masked)
-        sines = jnp.linalg.svd(residual_cols, compute_uv=False, full_matrices=False)
+        # Thin QR first, so the SVD only ever sees the k-by-k factor: a
+        # direct SVD of the n-by-k residual asked a backend for an n-by-n
+        # workspace (113 GB on a 119k-unknown deck). Same singular values.
+        _, r_cols = jnp.linalg.qr(residual_cols, mode="reduced")
+        sines = jnp.linalg.svd(r_cols, compute_uv=False)
         count = jnp.maximum(jnp.sum(filled), 1)
         # Only the leading `count` values belong to filled columns; the rest
         # are structural zeros from the padding.
