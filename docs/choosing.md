@@ -39,6 +39,9 @@ factor and $O(Nm^2 n_{rhs})$ to solve. Dense LU on the assembled $Nm$ system
 costs $O(N^3m^3)$ and discards the radial or spectral structure. FGMRES avoids
 factorization, but stores $O(nm_r)$ basis data for restart size $m_r$ and pays
 one operator and preconditioner application per Arnoldi step.
+Flexible GMRES keeps two bases, $V$ and $Z = M^{-1}V$; when the preconditioner
+is a fixed linear map, pass `fixed_precond=True` to keep only $V$ and halve that
+storage at the price of one extra preconditioner application per cycle.
 
 ## PCG versus GMRES
 
