@@ -9,3 +9,6 @@ coverage:
         target: 90%
 comment:
   layout: "condensed_header, diff"
+
+# No PR comments: they only generated notification email.
+comment: false
