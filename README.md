@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/_static/solvax_logo_dark.png">
+    <img src="docs/_static/solvax_logo.png" alt="SOLVAX" width="520">
+  </picture>
+</p>
+
 # SOLVAX
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21651844.svg)](https://doi.org/10.5281/zenodo.21651844)

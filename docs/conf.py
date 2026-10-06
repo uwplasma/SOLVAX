@@ -23,7 +23,12 @@ myst_enable_extensions = ["dollarmath", "amsmath"]
 html_theme = "furo"
 html_title = "solvax"
 html_static_path = ["_static"]
-html_favicon = "_static/solvax.svg"
+html_favicon = "_static/solvax_mark.png"
+html_theme_options = {
+    "light_logo": "solvax_logo.png",
+    "dark_logo": "solvax_logo_dark.png",
+    "sidebar_hide_name": True,
+}
 
 # DOI targets are stable bibliography identifiers, but several publisher
 # endpoints reject automated HEAD/GET requests with HTTP 403. Keep the links in

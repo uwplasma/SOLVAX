@@ -1,5 +1,17 @@
 # SOLVAX
 
+```{image} _static/solvax_logo.png
+:alt: SOLVAX
+:width: 420px
+:class: only-light
+```
+
+```{image} _static/solvax_logo_dark.png
+:alt: SOLVAX
+:width: 420px
+:class: only-dark
+```
+
 **Differentiable structured solvers, preconditioners, and matrix-free methods
 for JAX.**
 
