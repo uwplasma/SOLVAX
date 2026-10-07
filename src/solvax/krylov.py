@@ -278,6 +278,20 @@ def _filled_cgs(V: jax.Array, w: jax.Array, rows: jax.Array):
     return h, lax.fori_loop(0, chunks, subtract, w)
 
 
+def _masked_rotations(apply_rotation, count, size, values):
+    """Apply rotations ``0..count-1`` with a static ``size``-trip loop.
+
+    Masking keeps every result bitwise identical to ``fori_loop(0, count)``.
+    The static bound matters on GPU: XLA executes a loop whose trip count is
+    a traced value as a while loop that copies its predicate to the host on
+    every trip, so one Arnoldi step paid ``count`` host round trips.
+    """
+    def body(i, current):
+        return jnp.where(i < count, apply_rotation(i, current), current)
+
+    return lax.fori_loop(0, size, body, values)
+
+
 def _fgmres_cycle(
     matvec: MatVec,
     precond: MatVec,
@@ -378,14 +392,11 @@ def _fgmres_cycle(
                 -jnp.conj(sn[i]) * hi + cs[i] * hi1
             )
 
-        if fixed_work:
-            def apply_masked_rotation(i, values):
-                rotated = apply_rotation(i, values)
-                return jnp.where(i < j, rotated, values)
-
-            h = lax.fori_loop(0, m, apply_masked_rotation, h)
-        else:
-            h = lax.fori_loop(0, j, apply_rotation, h)
+        # A static trip count with masked updates is bitwise identical to
+        # ``fori_loop(0, j, ...)``, but XLA:GPU runs a dynamic-bound loop as a
+        # host-synchronised while (one device->host copy per rotation), which
+        # dominated GPU FGMRES time.  See ``_masked_rotations``.
+        h = _masked_rotations(apply_rotation, j, m, h)
 
         # New rotation annihilating h[j + 1]; happy breakdown (rho == 0)
         # degenerates to the identity rotation.
@@ -743,14 +754,7 @@ def _pytree_fgmres_cycle(
                 -jnp.conj(sines[i]) * first_value + cosines[i] * second_value
             )
 
-        if fixed_work:
-            def apply_masked_rotation(i, values):
-                rotated = apply_rotation(i, values)
-                return jnp.where(i < index, rotated, values)
-
-            column = lax.fori_loop(0, restart, apply_masked_rotation, column)
-        else:
-            column = lax.fori_loop(0, index, apply_rotation, column)
+        column = _masked_rotations(apply_rotation, index, restart, column)
         cosine, sine, diagonal = _complex_givens(column[index], column[index + 1])
         column = column.at[index].set(diagonal).at[index + 1].set(0.0)
         rhs_value = rhs[index]
