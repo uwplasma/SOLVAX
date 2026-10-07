@@ -2,12 +2,160 @@
 
 from __future__ import annotations
 
+import math
+import operator
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+from solvax.autodiff import checkpointed_fori_loop
+
+
+@dataclass(frozen=True)
+class ExponentialActionPlan:
+    """Static Taylor schedule for ``exp(t*A)``, valid for ``0 <= t <= horizon``.
+
+    ``norm_bound`` must bound the induced Euclidean norm of ``A - shift*I``
+    throughout the parameter neighborhood. The caller supplies and verifies it;
+    neither Ritz values nor this plan validate that assumption. ``error_bound``
+    bounds exact-arithmetic truncation per input norm, excluding roundoff and
+    operator evaluation error. It is not a relative error bound on the output.
+    """
+
+    horizon: float
+    norm_bound: float
+    shift: complex
+    degree: int
+    substeps: int
+    tolerance: float
+    error_bound: float
+
+
+class ExponentialActionSolution(NamedTuple):
+    """Action, truncation bound, and finite/domain status (no roundoff certificate)."""
+
+    value: jax.Array
+    truncation_bound: jax.Array
+    valid: jax.Array
+    operator_applications: int
+
+
+def plan_exponential_action(
+    *,
+    horizon: float,
+    norm_bound: float,
+    tolerance: float = 1.0e-10,
+    shift: complex = 0.0,
+    max_degree: int = 55,
+    max_substeps: int = 4096,
+) -> ExponentialActionPlan:
+    r"""Minimize Taylor matvec count subject to a conservative norm tail bound.
+
+    For degree ``m``, ``s`` substeps, and ``rho >= ||A-shift*I||``, telescoping
+    the substep product gives ``s*exp(t*(rho+Re(shift)))*(t*rho/s)**(m+1)/(m+1)!``.
+    Select ``m,s`` on the host, bounding its maximum over the horizon interval.
+    This established Taylor-tail estimate can be much looser than adaptive
+    scaling--Taylor selection. Budget exhaustion raises rather than silently
+    returning an unqualified schedule. Plans are fixed during differentiation.
+    """
+    horizon, norm_bound, tolerance = float(horizon), float(norm_bound), float(tolerance)
+    shift = complex(shift)
+    max_degree, max_substeps = operator.index(max_degree), operator.index(max_substeps)
+    if not math.isfinite(horizon) or horizon < 0.0:
+        raise ValueError("horizon must be finite and nonnegative")
+    if not math.isfinite(norm_bound) or norm_bound < 0.0:
+        raise ValueError("norm_bound must be finite and nonnegative")
+    if not math.isfinite(tolerance) or not 0.0 < tolerance < 1.0:
+        raise ValueError("tolerance must be finite and in (0, 1)")
+    if not math.isfinite(shift.real) or not math.isfinite(shift.imag):
+        raise ValueError("shift must be finite")
+    if max_degree < 1 or max_substeps < 1:
+        raise ValueError("max_degree and max_substeps must be positive")
+    if horizon == 0.0 or norm_bound == 0.0:
+        return ExponentialActionPlan(horizon, norm_bound, shift, 1, 1, tolerance, 0.0)
+    candidates = []
+    growth = norm_bound + shift.real
+    for degree in range(1, max_degree + 1):
+        peak = min(horizon, (degree + 1) / -growth) if growth < 0.0 else horizon
+        log_tail = growth * peak + (degree + 1) * (math.log(peak) + math.log(norm_bound))
+        log_tail -= math.lgamma(degree + 2)
+        log_steps = max(0.0, (log_tail - math.log(tolerance)) / degree)
+        if log_steps > math.log(max_substeps):
+            continue
+        substeps = max(1, math.ceil(math.exp(log_steps)))
+        bound = math.nextafter(math.exp(log_tail - degree * math.log(substeps)), math.inf)
+        # Protect the integer choice at a floating-point boundary.
+        if bound > tolerance:
+            substeps += 1
+            bound = math.nextafter(math.exp(log_tail - degree * math.log(substeps)), math.inf)
+        if substeps <= max_substeps:
+            candidates.append((degree * substeps, substeps, degree, bound))
+    if not candidates:
+        raise ValueError("Taylor truncation budget exhausted; increase limits or use Krylov")
+    _, substeps, degree, bound = min(candidates)
+    return ExponentialActionPlan(horizon, norm_bound, shift, degree, substeps, tolerance, bound)
+
+
+def exponential_action(
+    apply: Callable[[jax.Array], jax.Array],
+    vector: jax.Array,
+    plan: ExponentialActionPlan,
+    *,
+    horizon: jax.Array | float | None = None,
+    checkpoint: bool = True,
+) -> ExponentialActionSolution:
+    """Apply a fixed shifted Taylor plan to an arbitrary real/complex array.
+
+    ``apply`` is a time-independent linear map preserving shape and dtype.
+    A block of RHSs is allowed when ``apply`` handles that block; norms then use
+    its flattened Euclidean/Frobenius pairing. Promote inputs explicitly before
+    calling if the operator or shift requires complex arithmetic. Numeric
+    operator parameters, the input, and ``horizon`` remain JIT/JVP/VJP/VMAP
+    operands; the host-selected plan is static. Derivatives are of this fixed
+    polynomial, and need separate convergence checks against the exponential.
+
+    Checkpointing replays both recurrence levels using the existing bounded
+    loop. ``valid`` flags nonfinite outputs/inputs and an out-of-plan horizon;
+    it cannot detect a false norm bound or certify floating-point accuracy.
+    """
+    vector = jnp.asarray(vector)
+    if not jnp.issubdtype(vector.dtype, jnp.inexact):
+        raise TypeError("vector must have a floating or complex dtype")
+    if plan.shift.imag and not jnp.iscomplexobj(vector):
+        raise TypeError("a complex shift requires a complex vector")
+    time = jnp.asarray(plan.horizon if horizon is None else horizon)
+    if time.ndim != 0 or jnp.iscomplexobj(time):
+        raise ValueError("horizon must be a real scalar")
+    time = time.astype(jnp.real(vector).dtype)
+    shift = jnp.asarray(plan.shift if jnp.iscomplexobj(vector) else plan.shift.real, vector.dtype)
+    step = time / plan.substeps
+    loop = checkpointed_fori_loop if checkpoint else jax.lax.fori_loop
+
+    def substep(_index, state):
+        def accumulate(index, carry):
+            term, total = carry
+            image = apply(term)
+            if image.shape != vector.shape or image.dtype != vector.dtype:
+                raise ValueError("apply must preserve the vector shape and dtype")
+            term = (step / index) * (image - shift * term)
+            return term, total + term
+
+        _, total = loop(1, plan.degree + 1, accumulate, (state, state))
+        return jnp.exp(step * shift) * total
+
+    value = loop(0, plan.substeps, substep, vector)
+    valid = jnp.isfinite(time) & (time >= 0.0) & (time <= plan.horizon)
+    valid &= jnp.all(jnp.isfinite(vector)) & jnp.all(jnp.isfinite(value))
+    truncation = jnp.asarray(plan.error_bound, dtype=jnp.real(vector).dtype)
+    scale = jnp.max(jnp.abs(vector), initial=0.0)
+    norm = scale * jnp.linalg.norm(vector / jnp.where(scale > 0.0, scale, 1.0))
+    bound = jnp.where(truncation == 0.0, 0.0, truncation * norm)
+    bound = jnp.where(valid, bound, jnp.inf)
+    return ExponentialActionSolution(value, bound, valid, plan.degree * plan.substeps)
 
 
 class RK4Timestep(NamedTuple):
@@ -263,11 +411,12 @@ def exponential_eigenpairs(
     v0: jax.Array,
     *,
     horizon: float,
-    inner_krylov_dim: int,
+    inner_krylov_dim: int | None = None,
     outer_krylov_dim: int = 24,
     candidates: int = 2,
     tol: float = 1.0e-9,
     restarts: int = 1,
+    action_plan: ExponentialActionPlan | None = None,
 ) -> PropagatorEigenSolution:
     """Return leading modes using Arnoldi actions of ``exp(horizon * A)``.
 
@@ -275,13 +424,25 @@ def exponential_eigenpairs(
     explicit stability limit. A second, small Arnoldi space extracts the
     largest-magnitude propagator modes; every returned pair is certified
     against the original continuous operator.
+    An optional ``action_plan`` replaces only the inner action with a fixed
+    Taylor recurrence; provide either it or ``inner_krylov_dim``. Its caller-
+    supplied norm bound must cover this operator and horizon. Outer extraction
+    and continuous residual checks are unchanged.
     """
 
     size = int(v0.size)
     if not 1 <= candidates <= outer_krylov_dim < size:
         raise ValueError("require 1 <= candidates <= outer_krylov_dim < operator size")
-    if not 1 < inner_krylov_dim <= size:
-        raise ValueError("inner_krylov_dim must be in (1, operator size]")
+    if action_plan is None:
+        if inner_krylov_dim is None or not 1 < inner_krylov_dim <= size:
+            raise ValueError("inner_krylov_dim must be in (1, operator size]")
+        inner_applications = inner_krylov_dim
+    else:
+        if inner_krylov_dim is not None:
+            raise ValueError("provide either action_plan or inner_krylov_dim")
+        if not 0.0 < horizon <= action_plan.horizon:
+            raise ValueError("horizon must lie in the action plan interval")
+        inner_applications = action_plan.degree * action_plan.substeps
     if horizon <= 0.0 or tol <= 0.0 or restarts < 1:
         raise ValueError("horizon, tol, and restarts must be positive")
     dtype = jnp.result_type(v0, jnp.complex64)
@@ -289,6 +450,9 @@ def exponential_eigenpairs(
     horizon_value = jnp.asarray(horizon, dtype=jnp.real(initial).dtype)
 
     def filtered(vector):
+        if action_plan is not None:
+            return exponential_action(apply, vector, action_plan, horizon=horizon_value).value
+        assert inner_krylov_dim is not None
         basis, projected = _arnoldi_basis(apply, vector, inner_krylov_dim)
         coefficients = jax.scipy.linalg.expm(
             horizon_value * projected[:inner_krylov_dim, :inner_krylov_dim]
@@ -306,7 +470,7 @@ def exponential_eigenpairs(
         krylov_dim=outer_krylov_dim,
         candidates=candidates,
         tol=tol,
-        operator_applications=(restarts * inner_krylov_dim * outer_krylov_dim + candidates),
+        operator_applications=(restarts * inner_applications * outer_krylov_dim + candidates),
         restarts=restarts,
     )
 
@@ -443,8 +607,12 @@ __all__ = [
     "AdaptiveEigenSolution",
     "PropagatorEigenSolution",
     "RK4Timestep",
+    "ExponentialActionPlan",
+    "ExponentialActionSolution",
     "adaptive_eigenpair",
     "estimate_rk4_timestep",
     "exponential_eigenpairs",
+    "exponential_action",
+    "plan_exponential_action",
     "propagator_eigenpairs",
 ]
