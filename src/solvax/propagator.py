@@ -44,6 +44,108 @@ class ExponentialActionSolution(NamedTuple):
     operator_applications: int
 
 
+@dataclass(frozen=True)
+class ChebyshevActionPlan:
+    """Fixed-horizon action on an imaginary-major numerical-range rectangle.
+
+    The caller verifies ``W(A-shift*I)`` lies in the centered rectangle with
+    the supplied halfwidths, in the Euclidean norm of the supplied coordinates.
+    For a physical norm, transform the operator and vectors consistently first.
+    ``error_bound`` is an exact-arithmetic truncation estimate per input norm,
+    excluding scalar coefficient, recurrence and operator roundoff. Coefficients
+    and horizon are static: operator/input derivatives are supported, time
+    derivatives require a Taylor plan or a separately converged construction.
+    """
+
+    horizon: float
+    real_halfwidth: float
+    imag_halfwidth: float
+    shift: complex
+    focus: float
+    coefficients: tuple[complex, ...]
+    tolerance: float
+    error_bound: float
+
+    @property
+    def degree(self) -> int:
+        """Number of operator applications per action."""
+        return len(self.coefficients) - 1
+
+
+def plan_chebyshev_action(
+    *,
+    horizon: float,
+    real_halfwidth: float,
+    imag_halfwidth: float,
+    tolerance: float = 1.0e-10,
+    shift: complex = 0.0,
+    max_degree: int = 10000,
+) -> ChebyshevActionPlan:
+    r"""Plan a short recurrence using a verified numerical-range rectangle.
+
+    Requires ``0 <= real_halfwidth < imag_halfwidth``. The rectangle is
+    enclosed by the ellipse with semiaxes ``sqrt(2)`` times its halfwidths;
+    using the halfwidths themselves would exclude the corners. For focal
+    distance ``c``, ellipse parameter ``rho``, and ``r=t*c*rho/2``, the tail is
+    bounded by ``2*(1+sqrt(2))*exp(t*Re(shift))*r**(m+1)/(m+1)!`` divided by
+    ``1-r/(m+2)`` when ``m+2 > r``. This uses the established
+    Crouzeix--Palencia constant and real Bessel coefficient bound.
+
+    Planning runs on the host and requires SciPy (``pip install solvax[native]``)
+    for Bessel coefficients; the device action needs only JAX. No numerical
+    range or physical metric is inferred from Ritz values. Degree exhaustion
+    and nonfinite coefficients raise; a finite status is not an accuracy proof.
+    """
+    horizon, alpha, beta = float(horizon), float(real_halfwidth), float(imag_halfwidth)
+    tolerance, shift = float(tolerance), complex(shift)
+    max_degree = operator.index(max_degree)
+    if not math.isfinite(horizon) or horizon < 0.0:
+        raise ValueError("horizon must be finite and nonnegative")
+    if not math.isfinite(alpha) or not math.isfinite(beta) or not 0.0 <= alpha < beta:
+        raise ValueError("require finite 0 <= real_halfwidth < imag_halfwidth")
+    if not math.isfinite(tolerance) or not 0.0 < tolerance < 1.0:
+        raise ValueError("tolerance must be finite and in (0, 1)")
+    if not math.isfinite(shift.real) or not math.isfinite(shift.imag):
+        raise ValueError("shift must be finite")
+    if max_degree < 1:
+        raise ValueError("max_degree must be positive")
+    focus = math.sqrt(2.0) * beta * math.sqrt((1.0 - alpha / beta) * (1.0 + alpha / beta))
+    if not math.isfinite(focus) or focus == 0.0:
+        raise ValueError("ellipse focus is not representable; rescale the operator")
+    if horizon == 0.0:
+        return ChebyshevActionPlan(horizon, alpha, beta, shift, focus, (1.0 + 0j,),
+                                   tolerance, 0.0)
+    # c*rho = sqrt(2)*(alpha+beta); avoid overflow before dividing by two.
+    r = horizon * (alpha / math.sqrt(2.0) + beta / math.sqrt(2.0))
+    log_extent = math.log(beta) + math.log((1.0 + alpha / beta) / math.sqrt(2.0))
+    argument = focus * horizon
+    growth = shift.real * horizon
+    if not math.isfinite(r) or not math.isfinite(argument) or not math.isfinite(growth):
+        raise ValueError("Chebyshev truncation budget exhausted; rescale or use Krylov")
+    for degree in range(max_degree + 1):
+        if degree + 2 <= r:
+            continue
+        logtail = (math.log(2.0 * (1.0 + math.sqrt(2.0))) + growth
+                   + (degree + 1) * (math.log(horizon) + log_extent)
+                   - math.lgamma(degree + 2) - math.log1p(-r / (degree + 2)))
+        if logtail < math.log(tolerance):
+            bound = math.nextafter(math.exp(logtail), math.inf)
+            if bound <= tolerance:
+                break
+    else:
+        raise ValueError("Chebyshev truncation budget exhausted; increase max_degree or use Krylov")
+    from scipy.special import jv
+
+    coefficients = 2.0 * (1j ** np.arange(degree + 1)) * jv(np.arange(degree + 1), argument)
+    coefficients[0] *= 0.5
+    with np.errstate(over="ignore", invalid="ignore"):
+        coefficients *= np.exp(horizon * shift)
+    if not np.all(np.isfinite(coefficients)):
+        raise ValueError("Chebyshev coefficients are nonfinite; rescale or use Krylov")
+    return ChebyshevActionPlan(horizon, alpha, beta, shift, focus,
+                               tuple(complex(x) for x in coefficients), tolerance, bound)
+
+
 def plan_exponential_action(
     *,
     horizon: float,
@@ -103,12 +205,12 @@ def plan_exponential_action(
 def exponential_action(
     apply: Callable[[jax.Array], jax.Array],
     vector: jax.Array,
-    plan: ExponentialActionPlan,
+    plan: ExponentialActionPlan | ChebyshevActionPlan,
     *,
     horizon: jax.Array | float | None = None,
     checkpoint: bool = True,
 ) -> ExponentialActionSolution:
-    """Apply a fixed shifted Taylor plan to an arbitrary real/complex array.
+    """Apply a fixed Taylor or Chebyshev plan to an arbitrary compatible array.
 
     ``apply`` is a time-independent linear map preserving shape and dtype.
     A block of RHSs is allowed when ``apply`` handles that block; norms then use
@@ -118,13 +220,23 @@ def exponential_action(
     operands; the host-selected plan is static. Derivatives are of this fixed
     polynomial, and need separate convergence checks against the exponential.
 
-    Checkpointing replays both recurrence levels using the existing bounded
+    Chebyshev plans require complex inputs and their fixed horizon: omit the
+    ``horizon`` operand. Their three-term recurrence uses the same checkpoint
+    loop; input and operator derivatives remain supported, including at zero.
+    Taylor plans support real/complex inputs and a differentiable time operand.
+
+    Checkpointing replays the recurrence using the existing bounded
     loop. ``valid`` flags nonfinite outputs/inputs and an out-of-plan horizon;
     it cannot detect a false norm bound or certify floating-point accuracy.
     """
     vector = jnp.asarray(vector)
     if not jnp.issubdtype(vector.dtype, jnp.inexact):
         raise TypeError("vector must have a floating or complex dtype")
+    if isinstance(plan, ChebyshevActionPlan):
+        if horizon is not None:
+            raise ValueError("Chebyshev plans have a fixed horizon; omit horizon")
+        if not jnp.iscomplexobj(vector):
+            raise TypeError("a Chebyshev plan requires a complex vector")
     if plan.shift.imag and not jnp.iscomplexobj(vector):
         raise TypeError("a complex shift requires a complex vector")
     time = jnp.asarray(plan.horizon if horizon is None else horizon)
@@ -132,22 +244,44 @@ def exponential_action(
         raise ValueError("horizon must be a real scalar")
     time = time.astype(jnp.real(vector).dtype)
     shift = jnp.asarray(plan.shift if jnp.iscomplexobj(vector) else plan.shift.real, vector.dtype)
-    step = time / plan.substeps
     loop = checkpointed_fori_loop if checkpoint else jax.lax.fori_loop
 
-    def substep(_index, state):
-        def accumulate(index, carry):
-            term, total = carry
-            image = apply(term)
-            if image.shape != vector.shape or image.dtype != vector.dtype:
-                raise ValueError("apply must preserve the vector shape and dtype")
-            term = (step / index) * (image - shift * term)
-            return term, total + term
+    def image(state):
+        result = apply(state)
+        if result.shape != vector.shape or result.dtype != vector.dtype:
+            raise ValueError("apply must preserve the vector shape and dtype")
+        return result
 
-        _, total = loop(1, plan.degree + 1, accumulate, (state, state))
-        return jnp.exp(step * shift) * total
+    if isinstance(plan, ChebyshevActionPlan):
+        coefficients = jnp.asarray(plan.coefficients, dtype=vector.dtype)
+        if plan.degree == 0:
+            value = coefficients[0] * vector
+        else:
+            first = (image(vector) - shift * vector) / (1j * plan.focus)
 
-    value = loop(0, plan.substeps, substep, vector)
+            def accumulate(index, carry):
+                previous, current, total = carry
+                following = 2.0 * (image(current) - shift * current) / (1j * plan.focus)
+                following -= previous
+                return current, following, total + coefficients[index] * following
+
+            value = loop(2, plan.degree + 1, accumulate,
+                         (vector, first, coefficients[0] * vector + coefficients[1] * first))[2]
+        applications = plan.degree
+    else:
+        step = time / plan.substeps
+
+        def substep(_index, state):
+            def accumulate(index, carry):
+                term, total = carry
+                term = (step / index) * (image(term) - shift * term)
+                return term, total + term
+
+            _, total = loop(1, plan.degree + 1, accumulate, (state, state))
+            return jnp.exp(step * shift) * total
+
+        value = loop(0, plan.substeps, substep, vector)
+        applications = plan.degree * plan.substeps
     valid = jnp.isfinite(time) & (time >= 0.0) & (time <= plan.horizon)
     valid &= jnp.all(jnp.isfinite(vector)) & jnp.all(jnp.isfinite(value))
     truncation = jnp.asarray(plan.error_bound, dtype=jnp.real(vector).dtype)
@@ -155,7 +289,7 @@ def exponential_action(
     norm = scale * jnp.linalg.norm(vector / jnp.where(scale > 0.0, scale, 1.0))
     bound = jnp.where(truncation == 0.0, 0.0, truncation * norm)
     bound = jnp.where(valid, bound, jnp.inf)
-    return ExponentialActionSolution(value, bound, valid, plan.degree * plan.substeps)
+    return ExponentialActionSolution(value, bound, valid, applications)
 
 
 class RK4Timestep(NamedTuple):
@@ -416,7 +550,7 @@ def exponential_eigenpairs(
     candidates: int = 2,
     tol: float = 1.0e-9,
     restarts: int = 1,
-    action_plan: ExponentialActionPlan | None = None,
+    action_plan: ExponentialActionPlan | ChebyshevActionPlan | None = None,
 ) -> PropagatorEigenSolution:
     """Return leading modes using Arnoldi actions of ``exp(horizon * A)``.
 
@@ -425,7 +559,7 @@ def exponential_eigenpairs(
     largest-magnitude propagator modes; every returned pair is certified
     against the original continuous operator.
     An optional ``action_plan`` replaces only the inner action with a fixed
-    Taylor recurrence; provide either it or ``inner_krylov_dim``. Its caller-
+    polynomial recurrence; provide either it or ``inner_krylov_dim``. Its caller-
     supplied norm bound must cover this operator and horizon. Outer extraction
     and continuous residual checks are unchanged.
     """
@@ -442,7 +576,11 @@ def exponential_eigenpairs(
             raise ValueError("provide either action_plan or inner_krylov_dim")
         if not 0.0 < horizon <= action_plan.horizon:
             raise ValueError("horizon must lie in the action plan interval")
-        inner_applications = action_plan.degree * action_plan.substeps
+        if isinstance(action_plan, ChebyshevActionPlan) and horizon != action_plan.horizon:
+            raise ValueError("Chebyshev plans have a fixed horizon")
+        inner_applications = action_plan.degree
+        if isinstance(action_plan, ExponentialActionPlan):
+            inner_applications *= action_plan.substeps
     if horizon <= 0.0 or tol <= 0.0 or restarts < 1:
         raise ValueError("horizon, tol, and restarts must be positive")
     dtype = jnp.result_type(v0, jnp.complex64)
@@ -451,6 +589,8 @@ def exponential_eigenpairs(
 
     def filtered(vector):
         if action_plan is not None:
+            if isinstance(action_plan, ChebyshevActionPlan):
+                return exponential_action(apply, vector, action_plan).value
             return exponential_action(apply, vector, action_plan, horizon=horizon_value).value
         assert inner_krylov_dim is not None
         basis, projected = _arnoldi_basis(apply, vector, inner_krylov_dim)
@@ -608,11 +748,13 @@ __all__ = [
     "PropagatorEigenSolution",
     "RK4Timestep",
     "ExponentialActionPlan",
+    "ChebyshevActionPlan",
     "ExponentialActionSolution",
     "adaptive_eigenpair",
     "estimate_rk4_timestep",
     "exponential_eigenpairs",
     "exponential_action",
     "plan_exponential_action",
+    "plan_chebyshev_action",
     "propagator_eigenpairs",
 ]
