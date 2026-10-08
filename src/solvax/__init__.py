@@ -139,11 +139,17 @@ from solvax.precond import (
 )
 from solvax.propagator import (
     AdaptiveEigenSolution,
+    ChebyshevActionPlan,
+    ExponentialActionPlan,
+    ExponentialActionSolution,
     PropagatorEigenSolution,
     RK4Timestep,
     adaptive_eigenpair,
     estimate_rk4_timestep,
+    exponential_action,
     exponential_eigenpairs,
+    plan_chebyshev_action,
+    plan_exponential_action,
     propagator_eigenpairs,
 )
 from solvax.randomized import (
@@ -203,6 +209,12 @@ __all__ = [
     "RECYCLE_DRIFT_ADVISORY",
     "BandedLUFactors",
     "AdaptiveEigenSolution",
+    "ChebyshevActionPlan",
+    "ExponentialActionPlan",
+    "ExponentialActionSolution",
+    "exponential_action",
+    "plan_exponential_action",
+    "plan_chebyshev_action",
     "PropagatorEigenSolution",
     "PeriodicBandedLUFactors",
     "RK4Timestep",
