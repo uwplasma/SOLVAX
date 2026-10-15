@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `block_thomas_factor` and `block_thomas_factor_fn` run one scan over every
+  row and write the Schur factors straight into its stacked outputs; the bottom
+  row starts from an identity carry instead of being factored apart and
+  concatenated on. Compiled temporaries for a 64-block, 779-wide float64 system
+  fall from 937 MB to 24 MB (stored bands) and 330 MB to 24 MB (generated),
+  and the generated factor-plus-solve from 622 MB to 335 MB.
 - `gcrot` warm starts (`recycle=`) no longer run an SVD on the n-by-k drift
   residual, which some backends serve with an n-by-n workspace (113 GB on a
   119k-unknown DKX deck): a thin QR reduces it to a k-by-k SVD with the same

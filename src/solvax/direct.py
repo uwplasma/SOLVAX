@@ -175,19 +175,25 @@ def block_thomas_factor(
     work = jnp.result_type(diag)
     fdt = work if factor_dtype is None else factor_dtype
 
+    m = diag.shape[-1]
+    identity = lu_factor(jnp.eye(m, dtype=fdt))
+    # One scan over all rows, written straight into its stacked outputs: the
+    # bottom row sees an identity carry and a masked coupling, so no
+    # concatenate copies the whole factor band after the sweep.
     def down_step(carry, inputs):
-        delta_next = carry
-        d_k, u_k, l_next = inputs
+        delta_next, l_next = carry
+        d_k, u_k, l_k, last_row = inputs
         x = lu_solve(delta_next, l_next.astype(fdt)).astype(work)
-        delta_k = lu_factor((d_k - u_k @ x).astype(fdt))
-        return delta_k, delta_k
+        delta_k = lu_factor((d_k - jnp.where(last_row, 0, u_k @ x)).astype(fdt))
+        return (delta_k, l_k), delta_k
 
-    last = lu_factor(diag[-1].astype(fdt))
-    inputs = (diag[:-1], upper[:-1], lower[1:])  # steps k = n-2 .. 0
-    _, (lus, pivs) = jax.lax.scan(down_step, last, inputs, reverse=True)
-
-    delta_lu = jnp.concatenate([lus, last[0][None]], axis=0)
-    delta_piv = jnp.concatenate([pivs, last[1][None]], axis=0)
+    last_row = jnp.arange(diag.shape[0]) == diag.shape[0] - 1
+    _, (delta_lu, delta_piv) = jax.lax.scan(
+        down_step,
+        (identity, jnp.zeros_like(diag[0])),
+        (diag, upper, lower, last_row),
+        reverse=True,
+    )
     return BlockTridiagFactors(delta_lu, delta_piv, lower, upper)
 
 
@@ -239,32 +245,34 @@ def block_thomas_factor_fn(
     if n_blocks < 1:
         raise ValueError("n_blocks must be positive")
 
-    l_last, d_last, u_last = block_fn(jnp.int32(n_blocks - 1))
-    work = jnp.result_type(d_last)
+    _, d_probe, _ = jax.eval_shape(block_fn, jnp.int32(0))
+    work = d_probe.dtype
     fdt = work if factor_dtype is None else factor_dtype
-    last = lu_factor(d_last.astype(fdt))
+    m = d_probe.shape[-1]
+    identity = lu_factor(jnp.eye(m, dtype=fdt))
 
+    # A single scan over every row writes the factors straight into its
+    # stacked outputs. The bottom row starts from an identity carry and a
+    # masked coupling, so no concatenate copies the band after the sweep.
     def down_step(carry, index):
         delta_next, l_next = carry
         lower, diagonal, upper = block_fn(index)
         solved_lower = lu_solve(delta_next, l_next.astype(fdt)).astype(work)
-        delta = lu_factor((diagonal - upper @ solved_lower).astype(fdt))
-        # With the bands dropped nothing of size ``(n_blocks, m, m)`` beyond the
-        # Schur factors is ever stacked; only the running ``L`` sits in the
-        # carry, exactly as it must for the elimination itself.
+        coupling = jnp.where(index == n_blocks - 1, 0, upper @ solved_lower)
+        delta = lu_factor((diagonal - coupling).astype(fdt))
         emitted = (delta[0], delta[1])
         if store_offdiagonals:
             emitted += (lower, upper)
         return (delta, lower), emitted
 
+    zero = jnp.zeros((m, m), work)
     _, emitted = jax.lax.scan(
         down_step,
-        (last, l_last),
-        jnp.arange(n_blocks - 1, dtype=jnp.int32),
+        (identity, zero),
+        jnp.arange(n_blocks, dtype=jnp.int32),
         reverse=True,
     )
-    delta_lu = jnp.concatenate([emitted[0], last[0][None]], axis=0)
-    delta_piv = jnp.concatenate([emitted[1], last[1][None]], axis=0)
+    delta_lu, delta_piv = emitted[0], emitted[1]
     if not store_offdiagonals:
         return GeneratedBlockTridiagFactors(
             delta_lu=delta_lu,
@@ -274,10 +282,7 @@ def block_thomas_factor_fn(
             work_dtype=work,
         )
     return BlockTridiagFactors(
-        delta_lu=delta_lu,
-        delta_piv=delta_piv,
-        lower=jnp.concatenate([emitted[2], l_last[None]], axis=0),
-        upper=jnp.concatenate([emitted[3], u_last[None]], axis=0),
+        delta_lu=delta_lu, delta_piv=delta_piv, lower=emitted[2], upper=emitted[3]
     )
 
 

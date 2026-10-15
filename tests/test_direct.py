@@ -1071,3 +1071,20 @@ def test_generated_bounded_adjoint_requires_window_with_params():
         block_thomas_truncated_fn(
             _indexed_block_fn, 4, jnp.zeros((1, 2)), 1, params=(None, None, None)
         )
+
+
+def test_factor_writes_the_band_without_a_second_copy():
+    """Both factor routes emit Schur factors straight from the scan, no concatenate."""
+    n, m = 24, 16
+    band = jax.ShapeDtypeStruct((n, m, m), jnp.float64)
+    routes = {
+        "stored": lambda l, d, u: block_thomas_factor(l, d, u).delta_lu,
+        "generated": lambda l, d, u: block_thomas_factor_fn(
+            lambda i: (l[i], d[i], u[i]), n, store_offdiagonals=False
+        ).delta_lu,
+    }
+    for name, route in routes.items():
+        analysis = jax.jit(route).lower(band, band, band).compile().memory_analysis()
+        if analysis is None:
+            pytest.skip("backend reports no memory analysis")
+        assert analysis.temp_size_in_bytes < 0.25 * n * m * m * 8, (name, analysis.temp_size_in_bytes)
