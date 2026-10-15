@@ -1087,4 +1087,5 @@ def test_factor_writes_the_band_without_a_second_copy():
         analysis = jax.jit(route).lower(band, band, band).compile().memory_analysis()
         if analysis is None:
             pytest.skip("backend reports no memory analysis")
-        assert analysis.temp_size_in_bytes < 0.25 * n * m * m * 8, (name, analysis.temp_size_in_bytes)
+        temp = analysis.temp_size_in_bytes
+        assert temp < 0.25 * n * m * m * 8, (name, temp)
