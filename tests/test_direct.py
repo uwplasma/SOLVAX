@@ -1078,9 +1078,9 @@ def test_factor_writes_the_band_without_a_second_copy():
     n, m = 24, 16
     band = jax.ShapeDtypeStruct((n, m, m), jnp.float64)
     routes = {
-        "stored": lambda l, d, u: block_thomas_factor(l, d, u).delta_lu,
-        "generated": lambda l, d, u: block_thomas_factor_fn(
-            lambda i: (l[i], d[i], u[i]), n, store_offdiagonals=False
+        "stored": lambda lo, d, u: block_thomas_factor(lo, d, u).delta_lu,
+        "generated": lambda lo, d, u: block_thomas_factor_fn(
+            lambda i: (lo[i], d[i], u[i]), n, store_offdiagonals=False
         ).delta_lu,
     }
     for name, route in routes.items():
