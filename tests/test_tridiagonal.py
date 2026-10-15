@@ -94,7 +94,7 @@ def numpy_thomas(lower, diag, upper, rhs):
     return x
 
 
-@pytest.mark.parametrize("method", ["thomas", "lax", "auto"])
+@pytest.mark.parametrize("method", ["thomas", "lax", "auto", "pallas"])
 @pytest.mark.parametrize(
     "n,columns,n_fields",
     [(5, (), None), (10, (3,), None), (8, (2, 2), 2), (20, (4,), 3), (3, (), None)],
@@ -550,3 +550,15 @@ def test_degenerate_shapes_are_handled_rather_than_crashing():
     )
     dense = jnp.asarray([[4.0, 1.0], [1.0, 4.0]])
     assert jnp.allclose(two.ravel(), jnp.linalg.solve(dense, jnp.ones(2)))
+
+
+def test_pallas_gradient_matches_thomas():
+    lower, diag, upper, rhs = make_tridiag(9, (5,), None)
+
+    def loss(method, d, b):
+        return jnp.sum(tridiagonal_solve(lower, d, upper, b, method=method) ** 2)
+
+    g_ref = jax.grad(lambda d, b: loss("thomas", d, b), argnums=(0, 1))(diag, rhs)
+    g = jax.grad(lambda d, b: loss("pallas", d, b), argnums=(0, 1))(diag, rhs)
+    for a, b in zip(g, g_ref):
+        assert np.allclose(np.asarray(a), np.asarray(b), atol=1e-9)
