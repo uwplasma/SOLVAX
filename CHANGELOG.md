@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.28.5 - 2026-10-18
+
 - `gmres` and `gcrot` compile once per operator code and shape. Called eagerly
   with a new closure each time, they retraced and recompiled the whole solve
   (about 0.15 s of a 0.17 s call at n = 300); the closure's arrays and floats
