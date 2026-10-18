@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `gmres` and `gcrot` compile once per operator code and shape. Called eagerly
+  with a new closure each time, they retraced and recompiled the whole solve
+  (about 0.15 s of a 0.17 s call at n = 300); the closure's arrays and floats
+  now enter a module-level jit as arguments, so repeated solves reuse one
+  executable. Bound methods, callable objects and traced inputs take the
+  previous direct path; the API and differentiability are unchanged.
+
 ## 0.28.4 - 2026-10-18
 
 - `pcg` and `pcg_linear_solve` skip the initial matvec when `x0` is `None`
