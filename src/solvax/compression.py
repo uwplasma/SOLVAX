@@ -260,7 +260,7 @@ def block_tridiagonal_from_products(
             image = np.asarray(probe(jnp.asarray(seed[:, :n], dtype)))
             image = np.concatenate([image, np.zeros((cols.size, 1), image.dtype)], 1)
             if out is None:
-                out = [np.zeros((n_blocks, m, m), image.dtype) for _ in range(3)]
+                out = [np.zeros((n_blocks, m, m), dtype or image.dtype) for _ in range(3)]
             for slot, offset in ((0, 1), (1, 0), (2, -1)):
                 # a probe in block k answers in block k + offset: lower, diag, upper
                 row = rows + offset
