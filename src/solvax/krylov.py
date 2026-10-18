@@ -51,6 +51,7 @@ References
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Callable
 from typing import Any, NamedTuple
 
@@ -58,6 +59,8 @@ import jax
 import jax.numpy as jnp
 from jax import lax
 from jax.scipy.linalg import solve_triangular
+
+from solvax._reuse import call_reusing_compile
 
 PyTree = Any
 MatVec = Callable[[PyTree], PyTree]
@@ -874,7 +877,7 @@ def _pytree_gmres(
     return KrylovSolution(x, residual_norm, iterations, residual_norm <= tolerance, None)
 
 
-def gmres(
+def _gmres_impl(
     matvec: MatVec,
     b: PyTree,
     *,
@@ -977,7 +980,7 @@ def gmres(
     return KrylovSolution(x, res, iters, converged, None)
 
 
-def gcrot(
+def _gcrot_impl(
     matvec: MatVec,
     b: jax.Array,
     *,
@@ -1147,3 +1150,27 @@ def gcrot(
         fixed_precond=fixed_precond,
     )
     return KrylovSolution(x.reshape(shape), res, iters, converged, (C, U), drift)
+
+
+def _reusing(impl, fn_names, static_names):
+    """Public entry that compiles ``impl`` once per operator code and shapes."""
+
+    @functools.wraps(impl)
+    def solve(matvec, b, **kw):
+        fns = {"matvec": matvec, **{k: kw.pop(k, None) for k in fn_names}}
+        static = {k: kw.pop(k) for k in static_names if k in kw}
+        return call_reusing_compile(impl, fns, {"b": b, **kw}, static)
+
+    return solve
+
+
+gmres = _reusing(
+    _gmres_impl,
+    ("precond", "inner_product"),
+    ("restart", "max_restarts", "fixed_work", "fixed_precond"),
+)
+gcrot = _reusing(
+    _gcrot_impl,
+    ("precond",),
+    ("m", "k", "max_restarts", "recycle_strategy", "fixed_precond"),
+)
