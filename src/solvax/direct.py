@@ -147,7 +147,11 @@ class GeneratedBlockTridiagFactors:
 
 
 def block_thomas_factor(
-    lower: jax.Array, diag: jax.Array, upper: jax.Array, factor_dtype=None
+    lower: jax.Array,
+    diag: jax.Array,
+    upper: jax.Array,
+    factor_dtype=None,
+    shift=None,
 ) -> BlockTridiagFactors:
     """Run the downward Schur sweep once, for reuse across right-hand sides.
 
@@ -168,10 +172,16 @@ def block_thomas_factor(
             ``jnp.float32``: ``lu_factor`` dispatches to LAPACK/cuSOLVER
             ``getrf``, which has float32 and float64 kernels but no half
             precision, so bfloat16/float16 fail at tracing or execution.
+        shift: if given, factor ``A - shift I`` (subtracted from ``diag``, in
+            its dtype), the operator of a shift-invert eigensolve. The solves
+            then apply ``(A - shift I)^{-1}`` and, with ``transpose=True``,
+            its transpose.
 
     Returns:
         Factors for :func:`block_thomas_solve`.
     """
+    if shift is not None:
+        diag = diag - jnp.asarray(shift, diag.dtype) * jnp.eye(diag.shape[-1], dtype=diag.dtype)
     work = jnp.result_type(diag)
     fdt = work if factor_dtype is None else factor_dtype
 

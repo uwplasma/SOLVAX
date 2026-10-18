@@ -215,3 +215,55 @@ def verify_products(
         difference = float(np.linalg.norm(recovered - reference))
         worst = max(worst, difference / scale if scale > 0.0 else difference)
     return worst
+
+
+def block_tridiagonal_from_products(
+    apply: Callable[[jax.Array], jax.Array],
+    blocks,
+    *,
+    batch: int = 32,
+    dtype=None,
+):
+    """Recover a block-tridiagonal operator from compressed products.
+
+    ``blocks[k]`` lists the flat unknowns of block ``k`` (``-1`` pads a short
+    block). The operator must couple block ``k`` only to ``k - 1``, ``k`` and
+    ``k + 1``. Blocks three apart then never share a row, so column ``c`` of
+    every block ``k = r (mod 3)`` goes into one probe and the whole operator
+    costs ``3 ceil(m / batch)`` batched products, ``m`` the block size.
+
+    Args:
+        apply: the operator on a flat vector; it is ``vmap``-ed over probes.
+        blocks: integer array ``(n_blocks, m)`` partitioning the unknowns.
+        batch: probes per batched product.
+        dtype: dtype of the probes, and so of the returned blocks; complex128
+            by default.
+
+    Returns:
+        ``(lower, diag, upper)``, each ``(n_blocks, m, m)``, in the layout of
+        :func:`solvax.block_thomas_factor`. Padded rows and columns are zero,
+        so a shifted padded system is nonsingular for a nonzero shift.
+    """
+    blocks = np.asarray(blocks)
+    n_blocks, m = blocks.shape
+    n = int(blocks.max()) + 1
+    safe = np.where(blocks < 0, n, blocks)  # padding reads and writes slot n
+    probe = jax.jit(jax.vmap(apply))
+    out = None
+    for r in range(3):
+        rows = np.arange(r, n_blocks, 3)
+        for c0 in range(0, m, batch):
+            cols = np.arange(c0, min(c0 + batch, m))
+            seed = np.zeros((cols.size, n + 1), np.complex128)
+            seed[np.arange(cols.size)[:, None], safe[rows][:, cols].T] = 1.0
+            seed[:, n] = 0.0
+            image = np.asarray(probe(jnp.asarray(seed[:, :n], dtype)))
+            image = np.concatenate([image, np.zeros((cols.size, 1), image.dtype)], 1)
+            if out is None:
+                out = [np.zeros((n_blocks, m, m), image.dtype) for _ in range(3)]
+            for slot, offset in ((0, 1), (1, 0), (2, -1)):
+                # a probe in block k answers in block k + offset: lower, diag, upper
+                row = rows + offset
+                row = row[(row >= 0) & (row < n_blocks)]
+                out[slot][row[:, None], :, cols[None, :]] = image[:, safe[row]].transpose(1, 0, 2)
+    return tuple(jnp.asarray(b) for b in out)
