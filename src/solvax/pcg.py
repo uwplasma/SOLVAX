@@ -114,10 +114,11 @@ def _single_reduction_pcg(
     tiny: jax.Array,
     scalar_dtype: jnp.dtype,
     max_steps: int,
+    zero_start: bool,
 ) -> PCGSolution:
     """PETSc-style PCG rearrangement with one reduction stage per step."""
 
-    residual0 = _tree_sub(b, _pcg_matvec(matvec, x0))
+    residual0 = b if zero_start else _tree_sub(b, _pcg_matvec(matvec, x0))
     z0 = _pcg_precondition(precond, residual0)
     applied0 = _pcg_matvec(matvec, z0)
     rho0, delta0, residual_squared0 = _tree_multi_dot(
@@ -244,7 +245,8 @@ def pcg(
     products in an algebraically equivalent recurrence. The residual history
     always has shape ``(max_steps + 1,)``; entries
     after termination repeat the final norm, which keeps the result compatible
-    with ``jit`` and ``vmap`` without dynamic allocation.
+    with ``jit`` and ``vmap`` without dynamic allocation. A missing ``x0`` skips
+    the initial matvec (the residual is ``b``); an explicit zero ``x0`` does not.
     """
 
     if max_steps < 0:
@@ -257,7 +259,8 @@ def pcg(
     dtype = jnp.result_type(*[jnp.asarray(leaf).dtype for leaf in leaves], jnp.float32)
     scalar_dtype = jnp.real(jnp.zeros((), dtype=dtype)).dtype
     b = jax.tree.map(lambda leaf: jnp.asarray(leaf, dtype=dtype), b)
-    if x0 is None:
+    zero_start = x0 is None
+    if zero_start:
         x0 = jax.tree.map(jnp.zeros_like, b)
     else:
         if jax.tree.structure(x0) != jax.tree.structure(b):
@@ -282,8 +285,9 @@ def pcg(
             tiny=tiny,
             scalar_dtype=scalar_dtype,
             max_steps=max_steps,
+            zero_start=zero_start,
         )
-    residual0 = _tree_sub(b, _pcg_matvec(matvec, x0))
+    residual0 = b if zero_start else _tree_sub(b, _pcg_matvec(matvec, x0))
     residual_norm0 = _tree_norm(residual0)
     z0 = _pcg_precondition(precond, residual0)
     rho0 = _tree_dot(residual0, z0)
