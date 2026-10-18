@@ -78,6 +78,15 @@ the recovered matrix factors successfully and answers a different question — s
 `verify_products` compares the recovered matrix against the operator on random
 vectors, and callers assembling an operator they did not write should use it.
 
+For an operator whose unknowns can be ordered into blocks that couple only to
+their neighbours, `block_tridiagonal_from_products` does the same with the
+colouring known in advance: blocks three apart never share a row, so one batched
+product per three-block class and column recovers all blocks. The result feeds
+`block_thomas_factor(..., shift=sigma)`, a shift-invert factor of `A - sigma I`
+that solves with the transpose as well. Keep the blocks and the factor in
+complex64 and refine with `iterative_refinement` against the operator to hold
+the memory of the factor at a quarter of complex128 storage.
+
 ## Scaling before factorization
 
 A factorization chooses its pivots from the matrix it is given, so rows spanning
