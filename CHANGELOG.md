@@ -2,15 +2,23 @@
 
 ## Unreleased
 
+## 0.28.4 - 2026-10-18
+
 - `pcg` and `pcg_linear_solve` skip the initial matvec when `x0` is `None`
   (the residual is `b`), removing one traced copy of the operator per solve;
   an explicit `x0`, including zeros, still applies it (#130).
+
+## 0.28.3 - 2026-10-15
+
 - `block_thomas_factor` and `block_thomas_factor_fn` run one scan over every
   row and write the Schur factors straight into its stacked outputs; the bottom
   row starts from an identity carry instead of being factored apart and
   concatenated on. Compiled temporaries for a 64-block, 779-wide float64 system
   fall from 937 MB to 24 MB (stored bands) and 330 MB to 24 MB (generated),
   and the generated factor-plus-solve from 622 MB to 335 MB.
+
+## 0.23.0 to 0.28.2 - 2026-09-15 to 2026-10-07
+
 - `gcrot` warm starts (`recycle=`) no longer run an SVD on the n-by-k drift
   residual, which some backends serve with an n-by-n workspace (113 GB on a
   119k-unknown DKX deck): a thin QR reduces it to a k-by-k SVD with the same
