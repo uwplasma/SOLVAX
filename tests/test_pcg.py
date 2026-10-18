@@ -213,3 +213,24 @@ def test_pcg_linear_solve_retains_diagnostics_and_uses_implicit_gradient():
     gradient = jax.grad(lambda scale: solve_and_sum(scale)[0])(3.0)
     expected_gradient = -2.0 * (rhs[0] ** 2 / 3.0**3 + rhs[1] ** 2 / 4.0**3)
     assert jnp.allclose(gradient, expected_gradient, rtol=1.0e-6)
+
+
+@pytest.mark.parametrize("single_reduction", [False, True])
+def test_pcg_zero_start_skips_initial_matvec(single_reduction):
+    matrix = jnp.array([[5.0, 1.0], [1.0, 3.0]])
+    rhs = jnp.array([2.0, -1.0])
+    calls = []
+
+    def matvec(x):
+        calls.append(1)
+        return matrix @ x
+
+    def count(**kw):
+        calls.clear()
+        jax.make_jaxpr(lambda b: pcg(matvec, b, single_reduction=single_reduction, **kw).x)(rhs)
+        return len(calls)
+
+    # The explicit start costs exactly one extra traced operator.
+    assert count(x0=jnp.zeros(2)) == count() + 1
+    solution = pcg(matvec, rhs, rtol=1.0e-12, single_reduction=single_reduction)
+    assert jnp.allclose(solution.x, jnp.linalg.solve(matrix, rhs))

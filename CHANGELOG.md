@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `pcg` and `pcg_linear_solve` skip the initial matvec when `x0` is `None`
+  (the residual is `b`), removing one traced copy of the operator per solve;
+  an explicit `x0`, including zeros, still applies it (#130).
 - `block_thomas_factor` and `block_thomas_factor_fn` run one scan over every
   row and write the Schur factors straight into its stacked outputs; the bottom
   row starts from an identity carry instead of being factored apart and
