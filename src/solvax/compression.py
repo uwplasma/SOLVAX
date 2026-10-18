@@ -249,7 +249,7 @@ def block_tridiagonal_from_products(
     n = int(blocks.max()) + 1
     safe = np.where(blocks < 0, n, blocks)  # padding reads and writes slot n
     probe = jax.jit(jax.vmap(apply))
-    out = None
+    out: list[np.ndarray] = []
     for r in range(3):
         rows = np.arange(r, n_blocks, 3)
         for c0 in range(0, m, batch):
@@ -259,7 +259,7 @@ def block_tridiagonal_from_products(
             seed[:, n] = 0.0
             image = np.asarray(probe(jnp.asarray(seed[:, :n], dtype)))
             image = np.concatenate([image, np.zeros((cols.size, 1), image.dtype)], 1)
-            if out is None:
+            if not out:
                 out = [np.zeros((n_blocks, m, m), dtype or image.dtype) for _ in range(3)]
             for slot, offset in ((0, 1), (1, 0), (2, -1)):
                 # a probe in block k answers in block k + offset: lower, diag, upper
