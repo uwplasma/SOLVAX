@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.29.0 - 2026-10-18
+
+- `block_tridiagonal_from_products(apply, blocks)` recovers a block-tridiagonal
+  operator from `3 ceil(m / batch)` batched products (blocks three apart never
+  share a row); `block_thomas_factor(..., shift=sigma)` factors `A - sigma I`.
+  Together with `factor_dtype=jnp.complex64` and `iterative_refinement` they
+  are a shift-invert solve for operators with a banded unknown ordering.
+- `block_thomas_solve` indexes the bands directly, so jit no longer copies them
+  (removes a GPU out-of-memory failure on large banded factors).
+
 ## 0.28.5 - 2026-10-18
 
 - `gmres` and `gcrot` compile once per operator code and shape. Called eagerly
@@ -10,11 +20,6 @@
   now enter a module-level jit as arguments, so repeated solves reuse one
   executable. Bound methods, callable objects and traced inputs take the
   previous direct path; the API and differentiability are unchanged.
-- `block_tridiagonal_from_products(apply, blocks)` recovers a block-tridiagonal
-  operator from `3 ceil(m / batch)` batched products (blocks three apart never
-  share a row); `block_thomas_factor(..., shift=sigma)` factors `A - sigma I`.
-  Together with `factor_dtype=jnp.complex64` and `iterative_refinement` they
-  are a shift-invert solve for operators with a banded unknown ordering.
 
 ## 0.28.4 - 2026-10-18
 
