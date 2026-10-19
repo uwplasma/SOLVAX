@@ -24,7 +24,12 @@ from solvax.banded import (
     lu_solve_banded,
     lu_solve_banded_periodic,
 )
-from solvax.compression import column_groups, matrix_from_products, verify_products
+from solvax.compression import (
+    block_tridiagonal_from_products,
+    column_groups,
+    matrix_from_products,
+    verify_products,
+)
 from solvax.direct import (
     BlockTridiagFactors,
     ChainWindowPlan,
@@ -363,6 +368,7 @@ __all__ = [
     "sparse_eigenvalue",
     "sparse_solve",
     "sparse_operator_matrix",
+    "block_tridiagonal_from_products",
     "column_groups",
     "matrix_from_products",
     "verify_products",

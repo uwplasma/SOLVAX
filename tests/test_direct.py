@@ -1089,3 +1089,31 @@ def test_factor_writes_the_band_without_a_second_copy():
             pytest.skip("backend reports no memory analysis")
         temp = analysis.temp_size_in_bytes
         assert temp < 0.25 * n * m * m * 8, (name, temp)
+
+
+@pytest.mark.parametrize("dtype", [np.complex64, np.complex128])
+def test_shifted_factor_inverts_a_minus_sigma_and_its_transpose(dtype):
+    """Shift-invert building block: (A - sigma I)^-1 and its transpose from one factor."""
+    rng = np.random.default_rng(3)
+    nb, m, sigma = 5, 6, 0.7 - 0.2j
+
+    def blocks():
+        z = rng.standard_normal((2, nb, m, m))
+        return (z[0] + 1j * z[1]).astype(dtype)
+
+    lower, diag, upper = blocks(), blocks(), blocks()
+    dense = np.zeros((nb * m, nb * m), complex)
+    for k in range(nb):
+        dense[k * m : (k + 1) * m, k * m : (k + 1) * m] = diag[k]
+        if k:
+            dense[k * m : (k + 1) * m, (k - 1) * m : k * m] = lower[k]
+        if k < nb - 1:
+            dense[k * m : (k + 1) * m, (k + 1) * m : (k + 2) * m] = upper[k]
+    shifted = dense - sigma * np.eye(nb * m)
+    factors = block_thomas_factor(lower, diag, upper, shift=sigma)
+    rhs = (rng.standard_normal((nb, m)) + 1j * rng.standard_normal((nb, m))).astype(dtype)
+    tol = 2e-3 if dtype == np.complex64 else 1e-9
+    for transpose in (False, True):
+        got = np.asarray(block_thomas_solve(factors, rhs, transpose=transpose)).reshape(-1)
+        want = np.linalg.solve(shifted.T if transpose else shifted, rhs.reshape(-1))
+        assert np.linalg.norm(got - want) < tol * np.linalg.norm(want)

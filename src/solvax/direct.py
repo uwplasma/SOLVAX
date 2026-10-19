@@ -147,7 +147,11 @@ class GeneratedBlockTridiagFactors:
 
 
 def block_thomas_factor(
-    lower: jax.Array, diag: jax.Array, upper: jax.Array, factor_dtype=None
+    lower: jax.Array,
+    diag: jax.Array,
+    upper: jax.Array,
+    factor_dtype=None,
+    shift=None,
 ) -> BlockTridiagFactors:
     """Run the downward Schur sweep once, for reuse across right-hand sides.
 
@@ -168,10 +172,16 @@ def block_thomas_factor(
             ``jnp.float32``: ``lu_factor`` dispatches to LAPACK/cuSOLVER
             ``getrf``, which has float32 and float64 kernels but no half
             precision, so bfloat16/float16 fail at tracing or execution.
+        shift: if given, factor ``A - shift I`` (subtracted from ``diag``, in
+            its dtype), the operator of a shift-invert eigensolve. The solves
+            then apply ``(A - shift I)^{-1}`` and, with ``transpose=True``,
+            its transpose.
 
     Returns:
         Factors for :func:`block_thomas_solve`.
     """
+    if shift is not None:
+        diag = diag - jnp.asarray(shift, diag.dtype) * jnp.eye(diag.shape[-1], dtype=diag.dtype)
     work = jnp.result_type(diag)
     fdt = work if factor_dtype is None else factor_dtype
 
@@ -667,13 +677,15 @@ def block_thomas_solve(
     if isinstance(factors, GeneratedBlockTridiagFactors):
         return _block_thomas_solve_regenerated(factors, rhs, transpose)
     delta_lu, delta_piv, lower, upper = factors
+    # Indexing the stored bands directly, not through ``upper[:-1]`` / ``lower[1:]``:
+    # inside ``jit`` the slice of a parameter materializes a copy of the band.
     if transpose:
-        down_blocks = jnp.swapaxes(lower[1:], -1, -2)
-        up_blocks = jnp.swapaxes(upper[:-1], -1, -2)
+        down_block = lambda k: jnp.swapaxes(lower[k + 1], -1, -2)  # noqa: E731
+        up_block = lambda k: jnp.swapaxes(upper[k - 1], -1, -2)  # noqa: E731
         trans = 1
     else:
-        down_blocks = upper[:-1]
-        up_blocks = lower[1:]
+        down_block = lambda k: upper[k]  # noqa: E731
+        up_block = lambda k: lower[k]  # noqa: E731
         trans = 0
 
     # When the factors were built with a low ``factor_dtype`` (delta_lu below
@@ -704,7 +716,7 @@ def block_thomas_solve(
     sigma: list[jax.Array] = [None] * rhs.shape[0]  # type: ignore[list-item]
     sigma[-1] = rhs[-1]
     for k in range(rhs.shape[0] - 2, -1, -1):
-        sigma[k] = rhs[k] - down_blocks[k] @ tsolve(
+        sigma[k] = rhs[k] - down_block(k) @ tsolve(
             delta_lu[k + 1], delta_piv[k + 1], sigma[k + 1]
         )
 
@@ -714,7 +726,7 @@ def block_thomas_solve(
             tsolve(
                 delta_lu[k],
                 delta_piv[k],
-                sigma[k] - up_blocks[k - 1] @ solution[-1],
+                sigma[k] - up_block(k) @ solution[-1],
             )
         )
     return jnp.stack(solution)
