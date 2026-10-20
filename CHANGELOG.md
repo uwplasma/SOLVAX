@@ -12,7 +12,7 @@
   core, 2.8 GB out of core. Residual after five refinement sweeps 4e-15 to
   2e-14 in every mode. The analysis estimate INFOG(16) was within 5% of the
   measured peak (3,892 MB against 3.8 GB; 7,170 MB against 6.95 GB). The wheels
-  are built against NumPy 1, so under NumPy 2 (every JAX since 0.8) set
+  are built against NumPy 1, so under NumPy 2 (JAX 0.10 requires it) set
   `SOLVAX_MUMPS_PYTHON` to an interpreter that has them: the matrix and
   right-hand sides then cross a pipe to a worker process (`_mumps_worker.py`).
 
