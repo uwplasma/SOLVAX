@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.31.0 - 2026-10-20
+
 - `SpluFactorization(backend="mumps")` also runs on the `python-mumps` wheels
   (`pip install solvax[mumps-wheel]`; sequential MUMPS, no MPI) when PyMUMPS is absent, and takes `out_of_core=True` (ICNTL(22):
   factors on disk, admission on MUMPS's out-of-core estimate INFOG(26)).
