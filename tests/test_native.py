@@ -1,5 +1,6 @@
 """Tests for solvax.native host-side sparse-direct bridges."""
 
+import os
 import sys
 from types import SimpleNamespace
 
@@ -14,6 +15,14 @@ from solvax import native as native_module
 jax.config.update("jax_enable_x64", True)
 
 scipy_sparse = pytest.importorskip("scipy.sparse")
+
+# A worker interpreter holding python-mumps, for environments whose NumPy the wheels do not match.
+MUMPS_PYTHON = os.environ.get("SOLVAX_MUMPS_PYTHON")
+
+
+@pytest.fixture(autouse=True)
+def _no_worker_interpreter(monkeypatch):
+    monkeypatch.delenv("SOLVAX_MUMPS_PYTHON", raising=False)
 
 
 def make_sparse_system(n=80, density=0.05, seed=0):
@@ -106,7 +115,7 @@ class FakeMumpsContext:
             self.rhs[...] = np.linalg.solve(operator, self.rhs)
 
     def get_infog(self, index):
-        return {16: self.symbolic_mb, 21: self.effective_mb}[index]
+        return {16: self.symbolic_mb, 21: self.effective_mb, 26: self.symbolic_mb // 2}[index]
 
     def set_icntl(self, index, value):
         self.icntl[index] = value
@@ -360,8 +369,11 @@ def test_mumps_import_error_is_actionable(monkeypatch):
 
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float64, np.complex64, np.complex128])
-def test_mumps_real_binding_when_available(dtype):
-    pytest.importorskip("mumps")
+def test_mumps_real_binding_when_available(dtype, monkeypatch):
+    if MUMPS_PYTHON:
+        monkeypatch.setenv("SOLVAX_MUMPS_PYTHON", MUMPS_PYTHON)
+    else:
+        pytest.importorskip("mumps", exc_type=ImportError)
     matrix = np.array([[5.0 + 1.0j, 1.0], [2.0 - 0.5j, 4.0 + 2.0j]])
     rhs = np.array([[1.0 + 2.0j, 3.0], [-1.0j, 2.0 - 0.5j]])
     if not np.issubdtype(dtype, np.complexfloating):
@@ -384,3 +396,121 @@ def test_mumps_real_binding_when_available(dtype):
             )
         assert factor.symbolic_memory_bytes is not None
         assert factor.effective_memory_bytes is not None
+
+
+def test_mumps_out_of_core_sets_icntl22_and_admits_on_the_ooc_estimate(fake_mumps):
+    matrix = scipy_sparse.eye(3, dtype=np.float64, format="csr")
+    # INFOG(16) = 4 MB exceeds the 3 MB budget; the out-of-core estimate INFOG(26) = 2 MB fits.
+    with pytest.raises(MemoryError):
+        SpluFactorization(matrix, backend="mumps", memory_limit_bytes=3_000_000)
+    with SpluFactorization(
+        matrix, backend="mumps", memory_limit_bytes=3_000_000, out_of_core=True
+    ) as factor:
+        assert ("icntl", 22, 1) in fake_mumps.instances[-1].calls
+        assert factor.symbolic_memory_bytes == 2_000_000
+    with pytest.raises(ValueError, match="only supported"):
+        SpluFactorization(matrix, out_of_core=True)
+
+
+class _FakePythonMumpsInstance:
+    def __init__(self):
+        self.icntl, self.infog, self.job = {}, {16: 4, 26: 2, 21: 3}, 0
+
+
+class _FakePythonMumpsContext:
+    """python-mumps ``Context`` protocol; the numerics are SciPy's."""
+
+    last = None
+
+    def __init__(self):
+        self.mumps_instance = _FakePythonMumpsInstance()
+        self.ooc = None
+        _FakePythonMumpsContext.last = self
+
+    def set_matrix(self, matrix):
+        self.matrix = scipy_sparse.csc_matrix(matrix)
+
+    def analyze(self):
+        pass
+
+    def factor(self, *, reuse_analysis, ooc):
+        assert reuse_analysis
+        self.ooc = ooc
+        self.lu = pytest.importorskip("scipy.sparse.linalg").splu(self.matrix)
+
+    def solve(self, rhs):
+        return self.lu.solve(rhs, trans="N" if self.mumps_instance.icntl[9] == 1 else "T")
+
+
+@pytest.mark.parametrize("out_of_core", [False, True])
+def test_python_mumps_wheel_backs_the_mumps_backend(monkeypatch, out_of_core):
+    monkeypatch.setitem(sys.modules, "mumps", SimpleNamespace(Context=_FakePythonMumpsContext))
+    matrix = scipy_sparse.csr_matrix(np.array([[4.0, 1.0, 0.0], [2.0, 5.0, 1.0], [0.0, 1.0, 3.0]]))
+    rhs = np.array([1.0, 2.0, 3.0])
+    with SpluFactorization(
+        matrix, backend="mumps", memory_limit_bytes=8_000_000, out_of_core=out_of_core
+    ) as factor:
+        for trans, operator in (("N", matrix.toarray()), ("T", matrix.toarray().T)):
+            np.testing.assert_allclose(operator @ factor._solve_numpy(rhs, trans=trans), rhs)
+        assert factor.symbolic_memory_bytes == (2_000_000 if out_of_core else 4_000_000)
+        context = _FakePythonMumpsContext.last
+        assert context.ooc is out_of_core
+
+
+
+_FAKE_WHEEL = """
+import numpy as np
+import scipy.sparse.linalg as spla
+
+class _Instance:
+    def __init__(self):
+        self.icntl, self.infog = {}, {1: 0, 16: 4, 21: 3, 26: 2, 27: 2}
+
+class Context:
+    def set_matrix(self, matrix):
+        self.matrix, self.mumps_instance = matrix.tocsc(), _Instance()
+    def analyze(self):
+        pass
+    def factor(self, *, reuse_analysis, ooc):
+        assert reuse_analysis
+        self.mumps_instance.infog[21] = 7 if ooc else 3
+        self.lu = spla.splu(self.matrix)
+    def solve(self, rhs):
+        return self.lu.solve(rhs, trans="N" if self.mumps_instance.icntl[9] == 1 else "T")
+"""
+
+
+@pytest.mark.parametrize("out_of_core", [False, True])
+def test_worker_process_carries_the_wheel_across_a_numpy_boundary(
+    tmp_path, monkeypatch, out_of_core
+):
+    """The worker protocol end to end, with a stand-in ``mumps`` module on its path."""
+    (tmp_path / "mumps.py").write_text(_FAKE_WHEEL)
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    monkeypatch.setenv("SOLVAX_MUMPS_PYTHON", sys.executable)
+    matrix = scipy_sparse.csr_matrix(np.array([[4.0, 1.0, 0.0], [2.0, 5.0, 1.0], [0.0, 1.0, 3.0]]))
+    rhs = np.array([[1.0, 0.5], [2.0, 0.0], [3.0, 1.0]])
+    with SpluFactorization(
+        matrix, backend="mumps", memory_limit_bytes=8_000_000, out_of_core=out_of_core
+    ) as factor:
+        for trans, operator in (("N", matrix.toarray()), ("T", matrix.toarray().T)):
+            np.testing.assert_allclose(
+                operator @ factor._solve_numpy(rhs, trans=trans), rhs, atol=1e-12
+            )
+        assert factor.symbolic_memory_bytes == (2_000_000 if out_of_core else 4_000_000)
+        assert factor.effective_memory_bytes == (7_000_000 if out_of_core else 3_000_000)
+
+
+def test_worker_process_reports_its_errors_and_death(tmp_path, monkeypatch):
+    failing = _FAKE_WHEEL.replace("assert reuse_analysis", "raise ValueError('boom')")
+    (tmp_path / "mumps.py").write_text(failing)
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    monkeypatch.setenv("SOLVAX_MUMPS_PYTHON", sys.executable)
+    matrix = scipy_sparse.eye(3, format="csr")
+    with pytest.raises(RuntimeError, match="MUMPS worker: ValueError: boom"):
+        SpluFactorization(matrix, backend="mumps", memory_limit_bytes=8_000_000)
+    context = native_module._PythonMumpsContext(par=1, sym=0, comm=None)._context
+    context._worker.kill()
+    context._worker.wait()
+    with pytest.raises(RuntimeError, match="died"):
+        context._call("factor", {})

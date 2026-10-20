@@ -40,6 +40,7 @@ Documentation = "https://solvax.readthedocs.io"
 adv = ["adv-jax-math>=1.1"]
 native = ["scipy"]
 mumps = ["scipy", "pymumps>=0.4"]
+mumps-wheel = ["scipy", "python-mumps>=0.0.2"]  # Linux wheels, sequential MUMPS, no MPI
 dev = ["pytest", "pytest-cov", "pytest-xdist", "scipy", "numpy", "ruff"]
 bench = ["lineax", "scipy"]
 docs = [
@@ -113,6 +114,7 @@ pythonpath = ["src"]
 [tool.coverage.run]
 source = ["src/solvax"]
 branch = true
+omit = ["src/solvax/_mumps_worker.py"]  # runs in a subprocess; tests/test_native.py drives it
 
 [tool.coverage.report]
 fail_under = 95
