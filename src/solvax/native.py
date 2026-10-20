@@ -96,16 +96,19 @@ class _RemoteMumpsContext:
 
         self._pickle = pickle
         script = Path(__file__).with_name("_mumps_worker.py")
-        self._worker = subprocess.Popen(
+        worker = subprocess.Popen(
             [python, str(script)], stdin=subprocess.PIPE, stdout=subprocess.PIPE
         )
+        assert worker.stdin is not None and worker.stdout is not None
+        self._worker: subprocess.Popen[bytes] | None = worker
+        self._requests, self._replies = worker.stdin, worker.stdout
         self.mumps_instance = _MumpsInstance()
 
     def _call(self, command: str, *payload):
         try:
-            self._pickle.dump((command, payload), self._worker.stdin)
-            self._worker.stdin.flush()
-            status, value = self._pickle.load(self._worker.stdout)
+            self._pickle.dump((command, payload), self._requests)
+            self._requests.flush()
+            status, value = self._pickle.load(self._replies)
         except (BrokenPipeError, EOFError) as err:
             raise RuntimeError("the MUMPS worker process died") from err
         if status != "ok":
@@ -143,7 +146,7 @@ class _RemoteMumpsContext:
     def close(self) -> None:
         worker, self._worker = self._worker, None
         if worker is not None:
-            worker.stdin.close()
+            self._requests.close()
             worker.wait()
 
 

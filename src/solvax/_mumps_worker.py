@@ -8,6 +8,7 @@ or ``("error", message)``.
 import os
 import pickle
 import sys
+from typing import Any
 
 import mumps
 import numpy as np
@@ -23,7 +24,7 @@ def _array(raw, dtype, shape):
 def main() -> None:
     requests, replies = sys.stdin.buffer, os.fdopen(os.dup(1), "wb")
     os.dup2(2, 1)  # MUMPS prints on unit 6; keep it off the reply channel
-    context = None
+    context: Any = None
     while True:
         try:
             command, payload = pickle.load(requests)
