@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- `SpluFactorization(backend="mumps")` also runs on the `python-mumps` wheels
+  (`pip install solvax[mumps-wheel]`; sequential MUMPS, no MPI, float64 and
+  complex128) when PyMUMPS is absent, and takes `out_of_core=True` (ICNTL(22):
+  factors on disk, admission on MUMPS's out-of-core estimate INFOG(26)).
+  Measured on the DKX HSX QHS full-FP matrix (equilibrated, one process, 8
+  pinned cores of a shared 36-core host): 46,204 unknowns 7.4 s, 1.7 GB in core,
+  0.73 GB out of core, against 375 s and 7.8 GB for SuperLU; 66,004 unknowns
+  59 s, 3.8 GB in core, 1.45 GB out of core; 85,804 unknowns 139 s, 6.95 GB in
+  core, 2.8 GB out of core. Residual after five refinement sweeps 4e-15 to
+  2e-14 in every mode. The analysis estimate INFOG(16) was within 4% of the
+  measured peak (3,892 MB against 3.8 GB; 7,170 MB against 6.95 GB).
+
 ## 0.30.0 - 2026-10-20
 
 - `solvax.ode`: `erk_step` (embedded explicit Runge-Kutta step with local-error
