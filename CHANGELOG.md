@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `solvax.ode`: `erk_step` (embedded explicit Runge-Kutta step with local-error
+  estimate and an optional stage projection), the `RK4_2`, `BS3_2` and
+  `DOPRI5_4` tableaux, `error_norm`, `PIController`/`step_factor`, and
+  `erk_integrate` (accept/reject loop under `jax.lax.while_loop`).
+
 ## 0.29.0 - 2026-10-18
 
 - `block_tridiagonal_from_products(apply, blocks)` recovers a block-tridiagonal

@@ -111,6 +111,19 @@ from solvax.nonlinear import (
     pseudo_arclength_residual,
     pseudo_transient_continuation,
 )
+from solvax.ode import (
+    BS3_2,
+    DOPRI5_4,
+    PAIRS,
+    RK4_2,
+    ERKPair,
+    ERKSolution,
+    PIController,
+    erk_integrate,
+    erk_step,
+    error_norm,
+    step_factor,
+)
 from solvax.operators import (
     BlockTridiagonalOperator,
     BorderedOperator,
@@ -374,5 +387,16 @@ __all__ = [
     "verify_products",
     "Equilibration",
     "equilibrate",
+    "BS3_2",
+    "DOPRI5_4",
+    "PAIRS",
+    "RK4_2",
+    "ERKPair",
+    "ERKSolution",
+    "PIController",
+    "erk_integrate",
+    "erk_step",
+    "error_norm",
+    "step_factor",
     "__version__",
 ]
