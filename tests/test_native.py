@@ -361,9 +361,7 @@ def test_mumps_import_error_is_actionable(monkeypatch):
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float64, np.complex64, np.complex128])
 def test_mumps_real_binding_when_available(dtype):
-    mumps = pytest.importorskip("mumps")
-    if not hasattr(mumps, "DMumpsContext") and dtype in (np.float32, np.complex64):
-        pytest.skip("python-mumps wheels are used for float64 and complex128 only")
+    pytest.importorskip("mumps")
     matrix = np.array([[5.0 + 1.0j, 1.0], [2.0 - 0.5j, 4.0 + 2.0j]])
     rhs = np.array([[1.0 + 2.0j, 3.0], [-1.0j, 2.0 - 0.5j]])
     if not np.issubdtype(dtype, np.complexfloating):
@@ -446,8 +444,3 @@ def test_python_mumps_wheel_backs_the_mumps_backend(monkeypatch, out_of_core):
         context = _FakePythonMumpsContext.last
         assert context.ooc is out_of_core
 
-
-def test_python_mumps_wheel_refuses_single_precision(monkeypatch):
-    monkeypatch.setitem(sys.modules, "mumps", SimpleNamespace(Context=_FakePythonMumpsContext))
-    with pytest.raises(TypeError, match="float64 and complex128"):
-        native_module._import_mumps(np.dtype(np.float32))

@@ -3,8 +3,7 @@
 ## Unreleased
 
 - `SpluFactorization(backend="mumps")` also runs on the `python-mumps` wheels
-  (`pip install solvax[mumps-wheel]`; sequential MUMPS, no MPI, float64 and
-  complex128) when PyMUMPS is absent, and takes `out_of_core=True` (ICNTL(22):
+  (`pip install solvax[mumps-wheel]`; sequential MUMPS, no MPI) when PyMUMPS is absent, and takes `out_of_core=True` (ICNTL(22):
   factors on disk, admission on MUMPS's out-of-core estimate INFOG(26)).
   Measured on the DKX HSX QHS full-FP matrix (equilibrated, one process, 8
   pinned cores of a shared 36-core host): 46,204 unknowns 7.4 s, 1.7 GB in core,

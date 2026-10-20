@@ -13,8 +13,7 @@ if a traced value is passed; if you need staging, wrap the call in
 SciPy is an optional dependency, imported lazily; install it with
 ``pip install solvax[native]``. MUMPS is selected explicitly and additionally
 requires PyMUMPS plus compatible MUMPS and MPI libraries, or the sequential
-``python-mumps`` wheels (``pip install solvax[mumps-wheel]``, float64 and
-complex128, no MPI).
+``python-mumps`` wheels (``pip install solvax[mumps-wheel]``, no MPI).
 
 References
 ----------
@@ -129,8 +128,6 @@ def _import_mumps(dtype: np.dtype):
             "with `pip install solvax[mumps]` after providing the system libraries."
         ) from err
     if not hasattr(mumps, "DMumpsContext") and hasattr(mumps, "Context"):
-        if dtype not in (np.dtype(np.float64), np.dtype(np.complex128)):
-            raise TypeError(f"the python-mumps backend supports float64 and complex128, got {dtype}")
         return _PythonMumpsContext, None
 
     try:
