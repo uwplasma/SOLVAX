@@ -114,6 +114,7 @@ pythonpath = ["src"]
 [tool.coverage.run]
 source = ["src/solvax"]
 branch = true
+omit = ["src/solvax/_mumps_worker.py"]  # runs in a subprocess; tests/test_native.py drives it
 
 [tool.coverage.report]
 fail_under = 95

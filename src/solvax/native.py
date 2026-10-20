@@ -23,6 +23,8 @@ References
 
 from __future__ import annotations
 
+import os
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -73,13 +75,90 @@ def _check_not_traced(b, name: str) -> None:
         )
 
 
+class _MumpsInstance:
+    """What the shim reads and writes of a MUMPS instance, mirrored on the parent side."""
+
+    def __init__(self):
+        self.icntl, self.infog = {}, {}
+
+
+class _RemoteMumpsContext:
+    """python-mumps ``Context`` subset in a worker process (``SOLVAX_MUMPS_PYTHON``).
+
+    The wheels are built against NumPy 1; a JAX environment carries NumPy 2, so the wheels
+    run under another interpreter and the matrix and right-hand sides cross a pipe.
+    """
+
+    def __init__(self, python: str):
+        import pickle
+        import subprocess
+        from pathlib import Path
+
+        self._pickle = pickle
+        script = Path(__file__).with_name("_mumps_worker.py")
+        self._worker = subprocess.Popen(
+            [python, str(script)], stdin=subprocess.PIPE, stdout=subprocess.PIPE
+        )
+        self.mumps_instance = _MumpsInstance()
+
+    def _call(self, command: str, *payload):
+        try:
+            self._pickle.dump((command, payload), self._worker.stdin)
+            self._worker.stdin.flush()
+            status, value = self._pickle.load(self._worker.stdout)
+        except (BrokenPipeError, EOFError) as err:
+            raise RuntimeError("the MUMPS worker process died") from err
+        if status != "ok":
+            raise RuntimeError(f"MUMPS worker: {value}")
+        result, infog = value
+        self.mumps_instance.infog.update(infog)
+        return result
+
+    def set_matrix(self, matrix) -> None:
+        self._matrix = matrix.tocoo()
+
+    def analyze(self) -> None:
+        coo = self._matrix
+        self._call(
+            "analyze",
+            coo.row.astype("i8").tobytes(),
+            coo.col.astype("i8").tobytes(),
+            coo.data.tobytes(),
+            coo.data.dtype.str,
+            coo.shape,
+            dict(self.mumps_instance.icntl),
+        )
+        self._dtype = coo.data.dtype
+
+    def factor(self, *, reuse_analysis: bool, ooc: bool) -> None:
+        self._call("factor", {**self.mumps_instance.icntl, 22: int(ooc)})
+
+    def solve(self, rhs):
+        rhs = np.ascontiguousarray(rhs, dtype=self._dtype)
+        raw = self._call(
+            "solve", dict(self.mumps_instance.icntl), rhs.tobytes(), rhs.dtype.str, rhs.shape
+        )
+        return np.frombuffer(raw, dtype=self._dtype).reshape(rhs.shape).copy()
+
+    def close(self) -> None:
+        worker, self._worker = self._worker, None
+        if worker is not None:
+            worker.stdin.close()
+            worker.wait()
+
+
 class _PythonMumpsContext:
     """``python-mumps`` (sequential MUMPS wheels, no MPI) behind the PyMUMPS calls used here."""
 
     def __init__(self, *, par, sym, comm):
-        import mumps
+        python = os.environ.get("SOLVAX_MUMPS_PYTHON")
+        if python:
+            self._context = _RemoteMumpsContext(python)
+        else:
+            import mumps
 
-        self._context, self._icntl, self._rhs = mumps.Context(), {}, None
+            self._context = mumps.Context()
+        self._icntl, self._rhs = {}, None
 
     def set_silent(self) -> None:
         """No-op: the wheel is silent by default."""
@@ -98,10 +177,9 @@ class _PythonMumpsContext:
 
     def run(self, *, job: int) -> None:
         context = self._context
-        instance = context.mumps_instance
         for index, value in self._icntl.items():
             if index != 22:  # python-mumps sets ICNTL(22) from its ``ooc`` argument
-                instance.icntl[index] = value
+                context.mumps_instance.icntl[index] = value
         if job == 1:
             context.analyze()
         elif job == 2:
@@ -111,21 +189,28 @@ class _PythonMumpsContext:
 
     def destroy(self) -> None:
         """Drop the context; the wheel's wrapper frees the MUMPS instance itself."""
-        self._context = None
+        context, self._context = self._context, None
+        if isinstance(context, _RemoteMumpsContext):
+            context.close()
 
 
 def _import_mumps(dtype: np.dtype):
     """Import a PyMUMPS context matching ``dtype`` and MPI.COMM_SELF.
 
-    Without PyMUMPS, the sequential ``python-mumps`` wheel is used if installed.
+    Without PyMUMPS, the sequential ``python-mumps`` wheel is used if installed, in a
+    worker process when ``SOLVAX_MUMPS_PYTHON`` names the interpreter that has it.
     """
+    if os.environ.get("SOLVAX_MUMPS_PYTHON"):
+        return _PythonMumpsContext, None
     try:
         import mumps
     except ImportError as err:
         raise ImportError(
             "backend='mumps' requires PyMUMPS (with mpi4py and compatible MUMPS/MPI "
             "libraries) or the python-mumps wheels; install the Python dependencies "
-            "with `pip install solvax[mumps]` after providing the system libraries."
+            "with `pip install solvax[mumps]` after providing the system libraries. "
+            "The wheels need NumPy 1: under NumPy 2 point SOLVAX_MUMPS_PYTHON at an "
+            "interpreter that has them."
         ) from err
     if not hasattr(mumps, "DMumpsContext") and hasattr(mumps, "Context"):
         return _PythonMumpsContext, None
