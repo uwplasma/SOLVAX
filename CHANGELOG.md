@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.30.0 - 2026-10-20
+
 - `solvax.ode`: `erk_step` (embedded explicit Runge-Kutta step with local-error
   estimate and an optional stage projection), the `RK4_2`, `BS3_2` and
   `DOPRI5_4` tableaux, `error_norm`, `PIController`/`step_factor`, and
