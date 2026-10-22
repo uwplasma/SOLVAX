@@ -320,8 +320,10 @@ def tridiagonal_solve(
     n_rows = int(rhs.shape[0])
     if n_rows == 0:
         return rhs
-    if method not in ("auto", "thomas", "lax"):
-        raise ValueError(f"unknown method {method!r}; expected 'auto', 'thomas' or 'lax'")
+    if method not in ("auto", "thomas", "lax", "pallas"):
+        raise ValueError(
+            f"unknown method {method!r}; expected 'auto', 'thomas', 'lax' or 'pallas'"
+        )
 
     band_dtype = jnp.result_type(lower, diag, upper)
     bands_are_complex = jnp.issubdtype(band_dtype, jnp.complexfloating)
@@ -345,6 +347,8 @@ def tridiagonal_solve(
         return _thomas_solve(lower, diag, upper, rhs)
     if method == "lax":
         return _lax_solve(lower, diag, upper, rhs)
+    if method == "pallas":
+        return _pallas_solve(lower, diag, upper, rhs)
     if _platform_dependent is not None:
         return _platform_dependent(lower, diag, upper, rhs, cpu=_thomas_solve, default=_lax_solve)
     if jax.default_backend() == "cpu":  # pragma: no cover - old-jax fallback
@@ -551,6 +555,22 @@ def cyclic_tridiagonal_solve(
 
 def _lax_solve(lower: jax.Array, diag: jax.Array, upper: jax.Array, rhs: jax.Array) -> jax.Array:
     """Differentiable wrapper around the fused tridiagonal primitive."""
+    return _linear_solve(_lax_solve_raw, lower, diag, upper, rhs)
+
+
+def _pallas_solve(lower: jax.Array, diag: jax.Array, upper: jax.Array, rhs: jax.Array) -> jax.Array:
+    """Differentiable wrapper around the one-launch Pallas Thomas kernel."""
+    return _linear_solve(_pallas_solve_raw, lower, diag, upper, rhs)
+
+
+def _linear_solve(raw, lower, diag, upper, rhs):
+    """Wrap a raw solve as a linear solve whose transpose swaps the bands.
+
+    ``A^T`` of a tridiagonal ``A`` is tridiagonal with ``lower``/``upper``
+    exchanged and shifted by one row, so reverse mode reuses the same kernel.
+    Derivatives with respect to the bands follow from ``custom_linear_solve``'s
+    implicit rule through ``matvec``.
+    """
 
     def matvec(value):
         extra = (1,) * (value.ndim - diag.ndim)
@@ -562,13 +582,13 @@ def _lax_solve(lower: jax.Array, diag: jax.Array, upper: jax.Array, rhs: jax.Arr
         return result.at[:-1].add(up[:-1] * value[1:])
 
     def solve(_, value):
-        return _lax_solve_raw(lower, diag, upper, value)
+        return raw(lower, diag, upper, value)
 
     transpose_lower = jnp.concatenate((jnp.zeros_like(upper[:1]), upper[:-1]))
     transpose_upper = jnp.concatenate((lower[1:], jnp.zeros_like(lower[:1])))
 
     def transpose_solve(_, value):
-        return _lax_solve_raw(transpose_lower, diag, transpose_upper, value)
+        return raw(transpose_lower, diag, transpose_upper, value)
 
     return lax.custom_linear_solve(
         matvec, rhs, solve=solve, transpose_solve=transpose_solve
@@ -604,6 +624,104 @@ def _lax_solve_raw(
         jnp.moveaxis(rhs_in, 0, -2),
     )
     return jnp.moveaxis(solution_t, -2, 0).reshape(rhs.shape)
+
+
+def _pallas_thomas_kernel(eps_ref, lower_ref, diag_ref, upper_ref, rhs_ref, x_ref, c_ref):
+    """Thomas sweep for one block of columns; rows are walked in registers.
+
+    Each program owns ``block`` contiguous columns of the ``(n, columns)``
+    arrays. The forward sweep keeps the running ``c'`` and ``d'`` rows in
+    registers and spills them to ``c_ref``/``x_ref`` for the back
+    substitution, which overwrites ``x_ref`` in place. The arithmetic is the
+    same as :func:`_thomas_solve`, including the vanishing-pivot guard.
+    """
+    n = diag_ref.shape[0]
+    eps = eps_ref[0]
+    pivot = diag_ref[0]
+    pivot = jnp.where(pivot != 0.0, pivot, eps)
+    c = upper_ref[0] / pivot
+    x = rhs_ref[0] / pivot
+    c_ref[0] = c
+    x_ref[0] = x
+
+    def forward(j, carry):
+        c_prev, x_prev = carry
+        lower_j = lower_ref[j]
+        denom = diag_ref[j] - c_prev * lower_j
+        denom = jnp.where(denom != 0.0, denom, eps)
+        c_j = upper_ref[j] / denom
+        x_j = (rhs_ref[j] - x_prev * lower_j) / denom
+        c_ref[j] = c_j
+        x_ref[j] = x_j
+        return c_j, x_j
+
+    _, x = lax.fori_loop(1, n, forward, (c, x))
+
+    def backward(i, x_next):
+        j = n - 2 - i
+        x_j = x_ref[j] - c_ref[j] * x_next
+        x_ref[j] = x_j
+        return x_j
+
+    lax.fori_loop(0, n - 1, backward, x)
+
+
+def _pallas_solve_raw(lower, diag, upper, rhs, *, block=None, num_warps=None):
+    """One-launch batched Thomas solve with :mod:`jax.experimental.pallas`.
+
+    Bands and right-hand side are flattened to ``(n, columns)`` (extra
+    right-hand-side axes become columns) and padded to a whole number of
+    ``block``-column programs. Compiled with the Triton backend on GPU; on a
+    CPU lowering the identical kernel runs in Pallas interpret mode, which is
+    the reference used by the tests (slow, not a production path).
+    """
+    from jax.experimental import pallas as pl
+
+    n = rhs.shape[0]
+    extra = (1,) * (rhs.ndim - diag.ndim)
+    eps = _pivot_guard(diag, lower, upper)
+    eps = jnp.broadcast_to(eps.reshape(eps.shape + extra), rhs.shape[1:]).reshape(1, -1)
+    lower, diag, upper = (
+        jnp.broadcast_to(band.reshape(band.shape + extra), rhs.shape).reshape(n, -1)
+        for band in (lower, diag, upper)
+    )
+    b = rhs.reshape(n, -1)
+    columns = b.shape[1]
+    if block is None:
+        block = min(128, max(16, 1 << (columns - 1).bit_length()))
+    pad = -columns % block
+    if pad:
+        widths = ((0, 0), (0, pad))
+        eps, lower, upper, b = (jnp.pad(a, widths) for a in (eps, lower, upper, b))
+        diag = jnp.pad(diag, widths, constant_values=1.0)
+    spec = pl.BlockSpec((n, block), lambda i: (0, i))
+    out_shape = jax.ShapeDtypeStruct(b.shape, b.dtype)
+
+    def call(interpret, *args):
+        params = {}
+        if not interpret and num_warps is not None:
+            from jax.experimental.pallas import triton as plgpu
+
+            params["compiler_params"] = plgpu.CompilerParams(num_warps=num_warps)
+        x, _ = pl.pallas_call(
+            _pallas_thomas_kernel,
+            out_shape=(out_shape, out_shape),
+            grid=(b.shape[1] // block,),
+            in_specs=[pl.BlockSpec((1, block), lambda i: (0, i))] + [spec] * 4,
+            out_specs=(spec, spec),
+            interpret=interpret,
+            **params,
+        )(*args)
+        return x
+
+    args = (eps, lower, diag, upper, b)
+    if _platform_dependent is not None:
+        x = _platform_dependent(
+            *args, cpu=lambda *a: call(True, *a), default=lambda *a: call(False, *a)
+        )
+    else:  # pragma: no cover - old jax
+        x = call(jax.default_backend() == "cpu", *args)
+    return x[:, :columns].reshape(rhs.shape)
 
 
 def _sweep(body, initial, values, *, reverse=False):
