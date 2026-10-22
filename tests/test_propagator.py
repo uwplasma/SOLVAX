@@ -194,3 +194,17 @@ def test_exponential_eigenpairs_bypasses_the_explicit_stability_limit() -> None:
         rtol=1.0e-8,
         atol=1.0e-9,
     )
+
+
+def test_exponential_mode_breakdown_does_not_certify_zero_vectors():
+    """The zero vector is not an eigenvector, even with an exactly zero residual."""
+    diagonal = jnp.array([0.3 + 0.2j, 0.29 - 0.4j, -0.2 + 2j, -0.3 - 3j,
+                          -0.4 + 4j, -0.5 - 5j, -0.6 + 6j, -0.7 - 7j,
+                          -0.8 + 8j, -0.9 - 9j], dtype=jnp.complex128)
+    for initial in (jnp.zeros_like(diagonal), jnp.ones_like(diagonal)):
+        result = exponential_eigenpairs(lambda v: diagonal * v, initial,
+                                       horizon=10, inner_krylov_dim=10,
+                                       outer_krylov_dim=8, candidates=2, restarts=2)
+        norms = np.linalg.norm(np.asarray(result.eigenvectors), axis=1)
+        assert np.all(~np.asarray(result.converged)[norms == 0])
+        assert np.all(np.isinf(np.asarray(result.residuals)[norms == 0]))

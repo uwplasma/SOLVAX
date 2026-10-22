@@ -188,6 +188,8 @@ def _filtered_eigenpairs(
                 jnp.abs(value) * jnp.linalg.norm(vector),
                 jnp.finfo(jnp.real(vector).dtype).tiny,
             )
+            nonzero = jnp.isfinite(denominator) & (jnp.real(denominator) > 0.0)
+            residual = jnp.where(nonzero & jnp.isfinite(value), residual, jnp.inf)
             return value, residual
 
         values, residuals = jax.vmap(certify)(vectors)
