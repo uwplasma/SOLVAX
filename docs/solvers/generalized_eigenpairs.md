@@ -131,10 +131,26 @@ The tangent scan carries its linear inputs in the carry, because JAX before
 
 One block-Thomas factorization of $F-\sigma G$ ($O(Nm^3)$), then per iteration one
 solve with $p$ right-hand sides ($O(Nm^2p)$), two band products, and a
-$p\times p$ Ritz problem. `jit` compiles the solve with a Python loop over blocks, so
-compile time grows with `n_blocks` (about 7 s for 99 blocks of size 13, complex128, 6
-pairs on one CPU core; the compiled solve then takes 0.1 s). The eigenvector tangent
-factors one shifted band per returned eigenpair.
+$p\times p$ Ritz problem. The eigenvector tangent factors one shifted band per
+returned eigenpair.
+
+The substitution sweeps are two `lax.scan`s, not the unrolled loops of
+{func}`~solvax.direct.block_thomas_solve`, so compile time does not depend on
+`n_blocks`. The solver is never differentiated, so unrolling is not needed here.
+Measured with complex128, $m=13$, `count=6`, `tol=1e-10`, one CPU core, JAX 0.12
+(cold is compile plus first call; warm is the median of five calls; grad is
+`jax.grad` of the values and a quadratic form in the vectors with respect to `F`
+and `G`; seconds):
+
+| `n_blocks` | forward cold, before / after | forward warm, before / after | grad cold, before / after | grad warm, before / after |
+|---|---|---|---|---|
+| 50 | 1.77 / 0.69 | 0.019 / 0.019 | 7.9 / 0.92 | 0.032 / 0.028 |
+| 100 | 3.00 / 0.52 | 0.035 / 0.032 | 20.4 / 0.93 | 0.070 / 0.056 |
+| 200 | 4.15 / 0.50 | 0.080 / 0.068 | 49.8 / 0.81 | 0.136 / 0.094 |
+| 400 | 10.3 / 0.47 | 0.078 / 0.076 | 167 / 0.97 | 0.226 / 0.198 |
+
+Gradients agree to all printed digits. The dense fallback is compiled only if
+`n_blocks * m <= dense_limit`, so its LU adds a constant at small sizes.
 
 ## API summary
 

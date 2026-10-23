@@ -14,8 +14,11 @@
   First-order `jvp`/`vjp` are implicit: `dλ = Re yᴴ(dF - λ dG)y`, a bordered
   eigenvector tangent with `Re(yᴴ G dy) = -½ yᴴ dG y` and `Im(yᴴ G dy) = 0`, and
   the cluster mean through the trace of the projected perturbation. The second
-  derivative of the values is tested, that of the vectors is not. See
-  `docs/solvers/generalized_eigenpairs.md`.
+  derivative of the values is tested, that of the vectors is not. Its solves are
+  `lax.scan`s, so compile time does not grow with `n_blocks` (complex128, `m=13`,
+  `count=6`; cold compile plus first call, before to after: forward 1.8-10 s to
+  0.5-0.7 s and `grad` 7.9-167 s to 0.8-1.0 s for 50-400 blocks; warm time
+  unchanged). See `docs/solvers/generalized_eigenpairs.md`.
 - `block_thomas_solve(..., adjoint=True)` solves with the conjugate transpose
   `Aᴴ` from the same factors (`transpose=True` is the plain transpose).
 

@@ -14,7 +14,6 @@ from jax.scipy.linalg import lu_factor, lu_solve, solve_triangular
 
 from solvax.direct import (
     block_thomas_factor,
-    block_thomas_solve,
     block_tridiag_matvec,
     block_tridiag_relative_residual,
 )
@@ -292,6 +291,33 @@ def _ritz(Fp, Gp):
     return theta, solve_triangular(L, W, lower=True, trans="C")
 
 
+def _thomas(factors, b):
+    """Solve from :func:`block_thomas_factor` factors with two scans, so compile time does not
+    grow with ``n_blocks``. ``b`` is ``(n_blocks, m)`` or ``(n_blocks, m, k)``.
+
+    ``b`` rides in the scan carry: JAX before 0.10 cannot transpose a scan whose linear inputs
+    are ``xs``, and the tangent rule of ``_attach`` applies this solve to a linear right-hand side.
+    """
+    lu, piv, lower, upper = factors
+    read = lambda a, k: jax.lax.dynamic_index_in_dim(a, k, 0, keepdims=False)  # noqa: E731
+    write = lambda a, v, k: jax.lax.dynamic_update_index_in_dim(a, v, k, 0)  # noqa: E731
+
+    def sweep(step, band, carry, **kw):
+        def body(carry, xs):
+            v, buf = carry
+            k, block, lu_k, piv_k = xs
+            v = step(read(buf, k), block @ v, lambda r: lu_solve((lu_k, piv_k), r))
+            return (v, write(buf, v, k)), None
+
+        xs = (jnp.arange(b.shape[0]), band, lu, piv)
+        return jax.lax.scan(body, (jnp.zeros_like(b[0]), carry), xs, **kw)[0][1]
+
+    # z_k = Delta_k^{-1} (b_k - U_k z_{k+1}), then x_k = z_k - Delta_k^{-1} L_k x_{k-1};
+    # the last U_k and the first L_k meet a zero carry.
+    z = sweep(lambda r, c, solve: solve(r - c), upper, b, reverse=True)
+    return sweep(lambda r, c, solve: r - solve(c), lower, z)
+
+
 def _shifted_solver(band, dense_limit):
     """``(solve, fallback)`` for a Hermitian band: block Thomas, else dense pivoted LU.
 
@@ -303,7 +329,7 @@ def _shifted_solver(band, dense_limit):
     n, m = band[1].shape[:2]
     size = n * m
     factors = block_thomas_factor(*band)
-    thomas = lambda b: block_thomas_solve(factors, b)  # noqa: E731
+    thomas = lambda b: _thomas(factors, b)  # noqa: E731
     probe = jnp.sin(1.0 + jnp.arange(size)).reshape(n, m).astype(band[1].dtype)
     residual = block_tridiag_relative_residual(*band, thomas(probe), probe)
     ok = residual <= jnp.sqrt(jnp.finfo(band[1].dtype).eps)
