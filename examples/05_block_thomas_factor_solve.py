@@ -51,6 +51,15 @@ x_oneshot = sx.block_thomas(lower, diag, upper, rhs)
 print("one-shot matches factor/solve:", bool(jnp.allclose(x_oneshot, x, atol=1e-12)))
 
 
+# Normalized couplings: keep C_k = Delta_k^{-1} L_k so each Schur LU is applied
+# once per solve instead of twice. Same answers, N m^2 more storage.
+normalized = sx.block_thomas_factor(lower, diag, upper, normalized=True)
+x_norm = sx.block_thomas_solve(normalized, rhs)
+x_norm_adj = sx.block_thomas_solve(normalized, rhs, transpose=True)
+print("normalized solve matches stored:", bool(jnp.allclose(x_norm, x, atol=1e-12)))
+print("normalized transpose matches stored:", bool(jnp.allclose(x_norm_adj, x_adj, atol=1e-12)))
+
+
 # Same reuse, a third of the state: with generated rows, the off-diagonal bands
 # need not be kept — each substitution sweep rebuilds the block it needs.
 def row(k):

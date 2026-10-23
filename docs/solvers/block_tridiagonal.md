@@ -96,6 +96,69 @@ to the Schur factors.
 This split is useful for multiple forcing terms, repeated Newton corrections
 with a frozen Jacobian, and direct preconditioning.
 
+## Normalized couplings
+
+```python
+factors = sx.block_thomas_factor(lower, diag, upper, normalized=True)
+x = sx.block_thomas_solve(factors, rhs)
+x_t = sx.block_thomas_solve(factors, adjoint_rhs, transpose=True)
+```
+
+`normalized=True` returns a `NormalizedBlockTridiagFactors` that keeps the
+normalized lower couplings $C_k=\Delta_k^{-1}L_k$ ($C_0=0$) computed during the
+Schur sweep, with $\Delta_k=D_k-U_kC_{k+1}$. The elimination then reads as the
+factorization
+
+$$
+A=\widehat U\widehat L,
+$$
+
+where $\widehat U$ is block upper bidiagonal with diagonal $\Delta_k$ and upper
+band $U_k$, and $\widehat L$ is unit lower bidiagonal with lower band $C_k$.
+Block rows check as $(\widehat U\widehat L)_{k,k-1}=\Delta_kC_k=L_k$,
+$(\widehat U\widehat L)_{kk}=\Delta_k+U_kC_{k+1}=D_k$ and
+$(\widehat U\widehat L)_{k,k+1}=U_k$.
+
+The primal solve $Ax=b$ is $\widehat Uy=b$ upward, then $\widehat Lx=y$ downward:
+
+$$
+y_k=\Delta_k^{-1}(b_k-U_ky_{k+1}),\qquad x_k=y_k-C_kx_{k-1}.
+$$
+
+Since $A^T=\widehat L^T\widehat U^T$, `transpose=True` solves $\widehat L^Ty=b$
+upward, then $\widehat U^Tx=y$ downward, with the stored LU in transposed mode:
+
+$$
+y_k=b_k-C_{k+1}^Ty_{k+1},\qquad
+x_k=\Delta_k^{-T}(y_k-U_{k-1}^Tx_{k-1}).
+$$
+
+Neither direction refactors, and no $\Delta_k^{-1}$ is formed; `adjoint=True`
+takes the same route as for the other factor records.
+
+A solve applies each Schur LU once, $N$ applications per right-hand-side batch,
+where the stored-band solve applies it twice, $2N-1$. Band products and memory
+traffic are unchanged, so the saving is bounded by the share of the solve spent
+in triangular solves; the cubic factorization cost does not change. The default
+`BlockTridiagFactors` record aliases the input `lower` and `upper`, while
+$C_k$ is new storage: with the input bands still live, as in a residual check
+against the original operator, the normalized record holds an extra $Nm^2$
+scalars.
+
+Use it when one factorization serves many solves, for example repeated Newton
+corrections or the forward and adjoint solves of an implicit derivative. For a
+single solve the default needs no extra storage. Only `block_thomas_factor`
+offers it; `factor_dtype` composes with it.
+Compare the two routes on saved bands with:
+
+```bash
+PYTHONPATH=src python benchmarks/benchmark_block_factors.py --bands FILE.npz --routes stored,normalized
+```
+
+The benchmark reports compile time, executable memory, warm medians, the paired
+ratio to the first route, and the original-operator residual of the primal and
+transposed solves.
+
 ## Drop the off-diagonal bands from the factors
 
 Of those three `(N, m, m)` arrays only the Schur LU is irrecoverable; `lower`
@@ -566,7 +629,8 @@ defect corrections recover accuracy when the conditioning permits. See
 - {func}`solvax.direct.block_thomas`
 - {func}`solvax.direct.block_tridiag_matvec`
 - {func}`solvax.direct.block_tridiag_relative_residual`
-- {func}`solvax.direct.block_thomas_factor`
+- {func}`solvax.direct.block_thomas_factor` (`normalized=True`)
+- {class}`solvax.direct.NormalizedBlockTridiagFactors`
 - {func}`solvax.direct.block_thomas_factor_fn`
 - {class}`solvax.direct.GeneratedBlockTridiagFactors`
 - {func}`solvax.direct.block_thomas_factor_ops`
