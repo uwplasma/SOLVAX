@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `factor_dtype` given as a real dtype for complex bands now selects the complex
+  dtype of that width (`float32` gives `complex64`) in `block_thomas_factor`,
+  `block_thomas_factor_fn` and `block_thomas_factor_ops`. It previously cast the
+  Schur blocks to a real dtype and discarded the imaginary part (relative solve
+  error 0.71 on a random complex128 chain).
 - `generalized_eigenpairs(F, G, target, count, tol, max_iter)` returns the
   `count` eigenpairs of the Hermitian block-tridiagonal pencil `F y = λ G y`
   nearest `target` (real symmetric or complex Hermitian, `G` positive definite

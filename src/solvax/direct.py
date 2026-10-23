@@ -72,7 +72,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.scipy.linalg import lu_factor, lu_solve
 
-from solvax.refine import iterative_refinement
+from solvax.refine import _same_kind, iterative_refinement
 
 
 class BlockTridiagFactors(NamedTuple):
@@ -197,7 +197,9 @@ def block_thomas_factor(
             accuracy on fast low-precision hardware. Practically this is
             ``jnp.float32``: ``lu_factor`` dispatches to LAPACK/cuSOLVER
             ``getrf``, which has float32 and float64 kernels but no half
-            precision, so bfloat16/float16 fail at tracing or execution.
+            precision, so bfloat16/float16 fail at tracing or execution. For
+            complex bands a real ``factor_dtype`` selects the complex dtype of
+            that width (``float32`` gives ``complex64``).
         shift: if given, factor ``A - shift I`` (subtracted from ``diag``, in
             its dtype), the operator of a shift-invert eigensolve. The solves
             then apply ``(A - shift I)^{-1}`` and, with ``transpose=True``,
@@ -215,7 +217,7 @@ def block_thomas_factor(
     if shift is not None:
         diag = diag - jnp.asarray(shift, diag.dtype) * jnp.eye(diag.shape[-1], dtype=diag.dtype)
     work = jnp.result_type(diag)
-    fdt = work if factor_dtype is None else factor_dtype
+    fdt = work if factor_dtype is None else _same_kind(factor_dtype, work)
     first_row = jnp.arange(diag.shape[0]) == 0
     last_row = jnp.arange(diag.shape[0]) == diag.shape[0] - 1
 
@@ -308,7 +310,7 @@ def block_thomas_factor_fn(
 
     _, d_probe, _ = jax.eval_shape(block_fn, jnp.int32(0))
     work = d_probe.dtype
-    fdt = work if factor_dtype is None else factor_dtype
+    fdt = work if factor_dtype is None else _same_kind(factor_dtype, work)
     m = d_probe.shape[-1]
     identity = lu_factor(jnp.eye(m, dtype=fdt))
 
@@ -948,7 +950,7 @@ def block_thomas_factor_ops(
 
     d_last = diag_fn(jnp.int32(n_blocks - 1))
     work = jnp.result_type(d_last)
-    fdt = work if factor_dtype is None else factor_dtype
+    fdt = work if factor_dtype is None else _same_kind(factor_dtype, work)
     apply = partial(couple, params)
     indices = jnp.arange(n_blocks - 1, dtype=jnp.int32)
     pivots: jax.Array | None
