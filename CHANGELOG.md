@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.32.0 - 2026-10-24
+
 - `generalized_eigenpairs(F, G, target, count, tol, max_iter)` returns the
   `count` eigenpairs of the Hermitian block-tridiagonal pencil `F y = λ G y`
   nearest `target` (real symmetric or complex Hermitian, `G` positive definite
