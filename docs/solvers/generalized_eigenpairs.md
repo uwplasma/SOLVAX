@@ -122,10 +122,14 @@ degenerate pair, not one of its vectors.
 | second order, `vectors` | not supported (not tested; do not rely on it) | not supported |
 | precision | float64 validated; float32 is not | float64 validated |
 | CPU / GPU | CPU tested; GPU untested | CPU tested; GPU untested |
-| JAX | `>=0.4.38`, Python `>=3.10` tested | same |
+| JAX | `>=0.4.38`; the test file passes on 0.4.38 (Python 3.10), 0.6.2, 0.7.2, 0.9.2 and 0.12 (Python 3.12), each a CI job | same |
 
-The tangent scan carries its linear inputs in the carry, because JAX before
-0.10 cannot transpose a scan whose linear inputs are `xs`.
+Reverse mode transposes the tangent rule, and JAX's scan transpose is not
+uniform across releases: a scan over the eigenpairs with the tangents in its
+carry passed on 0.4.38 and 0.10 but raised `AssertionError` (0.6.2, 0.7.2) or
+`TypeError` (0.9.2). The rule therefore loops over the `count` eigenpairs in
+Python, and only the substitution sweeps of the solve are scans. Releases not
+listed above are untested.
 
 ## Cost
 
@@ -144,12 +148,14 @@ and `G`; seconds):
 
 | `n_blocks` | forward cold, before / after | forward warm, before / after | grad cold, before / after | grad warm, before / after |
 |---|---|---|---|---|
-| 50 | 1.77 / 0.69 | 0.019 / 0.019 | 7.9 / 0.92 | 0.032 / 0.028 |
-| 100 | 3.00 / 0.52 | 0.035 / 0.032 | 20.4 / 0.93 | 0.070 / 0.056 |
-| 200 | 4.15 / 0.50 | 0.080 / 0.068 | 49.8 / 0.81 | 0.136 / 0.094 |
-| 400 | 10.3 / 0.47 | 0.078 / 0.076 | 167 / 0.97 | 0.226 / 0.198 |
+| 50 | 1.77 / 0.69 | 0.019 / 0.019 | 7.9 / 1.9 | 0.032 / 0.028 |
+| 100 | 3.00 / 0.52 | 0.035 / 0.032 | 20.4 / 2.0 | 0.070 / 0.056 |
+| 200 | 4.15 / 0.50 | 0.080 / 0.068 | 49.8 / 1.6 | 0.136 / 0.094 |
+| 400 | 10.3 / 0.47 | 0.078 / 0.076 | 167 / 1.8 | 0.226 / 0.198 |
 
-Gradients agree to all printed digits. The dense fallback is compiled only if
+The gradient's cold time carries a constant for the Python loop over `count`
+(1.8-2.0 s here, against 0.8-1.0 s when the loop was a scan, still independent
+of `n_blocks`); it grows with `count`. Gradients agree to all printed digits. The dense fallback is compiled only if
 `n_blocks * m <= dense_limit`, so its LU adds a constant at small sizes.
 
 ## API summary

@@ -70,6 +70,39 @@ jobs:
       - name: Run native protocol and real-binding tests
         run: pytest -q -rs tests/test_native.py tests/test_native_eigen.py tests/test_sparse_direct.py
 
+  # Reverse mode through `generalized_eigenpairs` transposes scans, and JAX's scan transpose
+  # has changed behavior between releases: a rule that passed on 0.4.38 and 0.10 failed on
+  # 0.6.2-0.9.2. The main lanes pin only the floor and the latest, so this one runs the
+  # eigenpair tests alone on each release in between.
+  eigenpairs-jax:
+    name: eigenpairs (jax ${{ matrix.jax }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {jax: "0.4.38", python: "3.10"}
+          - {jax: "0.6.2", python: "3.12"}
+          - {jax: "0.7.2", python: "3.12"}
+          - {jax: "0.9.2", python: "3.12"}
+          - {jax: latest, python: "3.12"}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      # One resolver call, so equinox is chosen to match the pinned JAX.
+      - name: Install SOLVAX on the pinned JAX
+        if: matrix.jax != 'latest'
+        run: pip install -e '.[dev]' "jax==${{ matrix.jax }}" "jaxlib==${{ matrix.jax }}"
+      - name: Install SOLVAX on the latest JAX
+        if: matrix.jax == 'latest'
+        run: pip install -e '.[dev]'
+      - run: python -c "import jax; print(jax.__version__)"
+      - run: pytest -n auto tests/test_generalized_eigenpairs.py
+
   test:
     name: test (${{ matrix.label }})
     strategy:
