@@ -1,4 +1,9 @@
-# Eigenpair differentiation API
+# Eigenpair API
+
+`generalized_eigenpairs` is the targeted eigensolver for Hermitian block-tridiagonal
+pencils with first-order implicit derivatives; see {doc}`../solvers/generalized_eigenpairs`.
+
+## Application-supplied eigenpairs
 
 `eigenpair_reverse` accepts application-supplied primal and left eigensolvers,
 then differentiates their certified simple eigenpair implicitly. Eigenvalue

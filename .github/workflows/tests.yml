@@ -88,7 +88,8 @@ jobs:
               tests/test_precond.py tests/test_mixed_precision.py tests/test_randomized.py
               tests/test_nonlinear.py tests/test_operators.py tests/test_elliptic.py
               tests/test_transfer.py tests/test_dot_precision.py tests/test_chunk_backends.py
-              tests/test_eigen.py tests/test_precond_alfven.py tests/test_native_eigen.py
+              tests/test_eigen.py tests/test_generalized_eigenpairs.py
+              tests/test_precond_alfven.py tests/test_native_eigen.py
               tests/test_refine.py tests/test_pcg_benchmark.py tests/test_packaging.py
               tests/test_least_squares.py tests/test_compression.py tests/test_equilibration.py
           - os: ubuntu-latest
@@ -142,7 +143,8 @@ jobs:
         tests/test_tridiagonal.py tests/test_direct.py tests/test_krylov.py
         tests/test_pcg.py tests/test_nonlinear.py tests/test_implicit.py
         tests/test_autodiff.py tests/test_fixed_point.py tests/test_precond.py
-        tests/test_multigrid.py tests/test_eigen.py tests/test_sharding.py
+        tests/test_multigrid.py tests/test_eigen.py tests/test_generalized_eigenpairs.py
+        tests/test_sharding.py
         tests/test_least_squares.py tests/test_sparse_direct.py tests/test_ode.py
     steps:
       - uses: actions/checkout@v7

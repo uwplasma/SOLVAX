@@ -1,15 +1,25 @@
-"""Implicit reverse-mode differentiation for application-solved eigenpairs."""
+"""Eigenpairs: implicit reverse-mode differentiation of application-solved pairs, and a
+targeted generalized eigensolver for Hermitian block-tridiagonal pencils."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from functools import partial
+from typing import Any, NamedTuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax.scipy.linalg import lu_factor, lu_solve, solve_triangular
 
-__all__ = ["eigenpair_reverse"]
+from solvax.direct import (
+    block_thomas_factor,
+    block_thomas_solve,
+    block_tridiag_matvec,
+    block_tridiag_relative_residual,
+)
+
+__all__ = ["EigenpairResult", "eigenpair_reverse", "generalized_eigenpairs"]
 
 
 PrimalSolver = Callable[
@@ -214,3 +224,252 @@ def eigenpair_reverse(
 
     pair.defvjp(pair_fwd, pair_bwd)
     return pair(theta)
+
+
+class EigenpairResult(NamedTuple):
+    """Result of :func:`generalized_eigenpairs`. Only ``values`` and ``vectors`` carry derivatives.
+
+    Attributes:
+        values: ``(count,)`` real eigenvalues nearest the target, ascending.
+        vectors: ``(n_blocks, m, count)`` eigenvectors, ``G``-normalized
+            (``y^H G y = 1``), each defined up to a phase.
+        residuals: ``(count,)`` relative residuals
+            ``||F y - lam G y|| / ((||F|| + |lam| ||G||) ||y||)``, with ``||.||`` the
+            infinity norm (largest absolute row sum) of a band.
+        orthogonality: ``max |Y^H G Y - I|``.
+        iterations: shift-invert applications performed.
+        converged: ``max(residuals) <= tol``; False if anything is not finite.
+        gap: ``|lam - target|`` of the nearest excluded Ritz value minus that of the
+            farthest selected one. The iteration also converges that excluded pair to ``tol``,
+            so the gap is a converged eigenvalue distance, but it only sees the subspace: an
+            eigenvalue the iteration never captured is not counted. Zero means the selection
+            may split a degenerate or tied set; ``inf`` if every Ritz value was selected.
+        fallback: True if block Thomas failed its probe solve and the dense pivoted
+            path ran.
+    """
+
+    values: jax.Array
+    vectors: jax.Array
+    residuals: jax.Array
+    orthogonality: jax.Array
+    iterations: jax.Array
+    converged: jax.Array
+    gap: jax.Array
+    fallback: jax.Array
+
+
+def _hermitian(band):
+    """``(lower, diag, upper)`` with ``lower`` rebuilt as ``upper^H`` and ``diag`` Hermitian."""
+    _, diag, upper = band
+    upper = upper.at[-1].set(0)
+    adjoint = lambda a: jnp.conj(jnp.swapaxes(a, -1, -2))  # noqa: E731
+    return jnp.roll(adjoint(upper), 1, axis=0), (diag + adjoint(diag)) / 2, upper
+
+
+def _shift(F, G, sigma):
+    return tuple(f - sigma * g for f, g in zip(F, G, strict=True))
+
+
+def _norm(band):
+    """Infinity norm: the largest absolute row sum of the band."""
+    return sum(jnp.abs(a).sum(-1) for a in band).max()
+
+
+def _dense(band):
+    lower, diag, upper = band
+    n, m = diag.shape[:2]
+    i = jnp.arange(n)
+    full = jnp.zeros((n, n, m, m), diag.dtype).at[i, i].set(diag)
+    full = full.at[i[:-1], i[1:]].set(upper[:-1]).at[i[1:], i[:-1]].set(lower[1:])
+    return jnp.swapaxes(full, 1, 2).reshape(n * m, n * m)
+
+
+def _ritz(Fp, Gp):
+    """Eigenpairs of the Hermitian pencil ``(Fp, Gp)`` with ``Gp`` positive definite."""
+    L = jnp.linalg.cholesky((Gp + jnp.conj(Gp.T)) / 2)
+    M = solve_triangular(L, jnp.conj(solve_triangular(L, Fp, lower=True).T), lower=True)
+    theta, W = jnp.linalg.eigh((M + jnp.conj(M.T)) / 2)
+    return theta, solve_triangular(L, W, lower=True, trans="C")
+
+
+def _shifted_solver(band, dense_limit):
+    """``(solve, fallback)`` for a Hermitian band: block Thomas, else dense pivoted LU.
+
+    Block Thomas does not pivot across blocks, so it breaks down on an invertible matrix with a
+    singular Schur complement such as ``[[0, 1], [1, 0]]``. A probe solve whose relative
+    residual is not below ``sqrt(eps)``, or is not finite, selects the dense path, which is
+    compiled in only if ``n_blocks * m <= dense_limit``.
+    """
+    n, m = band[1].shape[:2]
+    size = n * m
+    factors = block_thomas_factor(*band)
+    thomas = lambda b: block_thomas_solve(factors, b)  # noqa: E731
+    probe = jnp.sin(1.0 + jnp.arange(size)).reshape(n, m).astype(band[1].dtype)
+    residual = block_tridiag_relative_residual(*band, thomas(probe), probe)
+    ok = residual <= jnp.sqrt(jnp.finfo(band[1].dtype).eps)
+    if size > dense_limit:
+        return thomas, jnp.zeros((), bool)
+    lu = jax.lax.cond(
+        ok,
+        lambda: (jnp.zeros((size, size), band[1].dtype), jnp.zeros(size, jnp.int32)),
+        lambda: lu_factor(_dense(band)),
+    )
+    dense = lambda b: lu_solve(lu, b.reshape(size, -1)).reshape(b.shape)  # noqa: E731
+    return (lambda b: jax.lax.cond(ok, thomas, dense, b)), ~ok
+
+
+def _subspace_iteration(F, G, target, count, tol, max_iter, dense_limit):
+    """Shift-invert subspace iteration; returns the result and each value's Ritz separation."""
+    n, m = F[1].shape[:2]
+    size = n * m
+    dtype = jnp.result_type(F[1], G[1])
+    real = jnp.zeros((), dtype).real.dtype
+    nF, nG = _norm(F), _norm(G)
+    target = jnp.asarray(target, real)
+    # A shift that is exactly an eigenvalue makes the factorization singular: nudge it.
+    sigma = target + 16 * jnp.finfo(real).eps * (nF + jnp.abs(target) * nG) / nG
+    solve, fallback = _shifted_solver(_shift(F, G, sigma), dense_limit)
+    matvec = lambda A, X: block_tridiag_matvec(*A, X)  # noqa: E731
+    width = min(2 * count + 8, size)
+    keep = min(count + 1, width)  # the selected pairs and the nearest excluded one
+    adjoint = lambda a: jnp.conj(a.T)  # noqa: E731
+
+    def sweep(Y):
+        """Orthonormalize ``Y``, Rayleigh-Ritz on ``(F, G)``; return ``G`` times the basis."""
+        Q = jnp.linalg.qr(Y.reshape(size, width))[0]
+        FQ, GQ = (matvec(A, Q.reshape(n, m, width)).reshape(size, width) for A in (F, G))
+        theta, C = _ritz(adjoint(Q) @ FQ, adjoint(Q) @ GQ)
+        order = jnp.argsort(jnp.abs(theta - target))[:keep]
+        X, GX = Q @ C[:, order], GQ @ C[:, order]
+        R = FQ @ C[:, order] - GX * theta[order]
+        scale = (nF + jnp.abs(theta[order]) * nG) * jnp.linalg.norm(X, axis=0)
+        return GQ @ C, theta, order, jnp.linalg.norm(R, axis=0) / scale, X
+
+    start = jax.random.normal(jax.random.PRNGKey(0), (n, m, width), dtype)
+    running = lambda k, res: (k < max_iter) & ~(res.max() <= tol) & jnp.isfinite(res.max())  # noqa: E731
+    iterations, _, theta, order, res, X = jax.lax.while_loop(
+        lambda s: running(s[0], s[4]),
+        lambda s: (s[0] + 1, *sweep(solve(s[1].reshape(n, m, width)))),
+        (jnp.zeros((), jnp.int32), *sweep(start)),
+    )
+    perm = jnp.argsort(theta[order[:count]])  # ascending values among the selected
+    sel, res = order[:count][perm], res[:count][perm]
+    vectors, values = X[:, :count][:, perm].reshape(n, m, count), theta[sel]
+    distance = jnp.sort(jnp.abs(theta - target))
+    gap = distance[count] - distance[count - 1] if width > count else jnp.asarray(jnp.inf, real)
+    gram = adjoint(X[:, :count][:, perm]) @ matvec(G, vectors).reshape(size, count)
+    others = jnp.abs(values[:, None] - theta[None, :]).at[jnp.arange(count), sel].set(jnp.inf)
+    result = EigenpairResult(
+        values, vectors, res, jnp.abs(gram - jnp.eye(count)).max(), iterations,
+        res.max() <= tol, gap, fallback,
+    )  # fmt: skip
+    return result, others.min(axis=1)
+
+
+@partial(jax.custom_jvp, nondiff_argnums=(5,))
+def _attach(F, G, values, vectors, sep, dense_limit):
+    """Identity on ``(values, vectors)`` that carries the first-order derivative rule."""
+    return values, vectors
+
+
+def _first_order(F, G, dF, dG, values, vectors, sep, dense_limit):
+    """Tangents ``(d values, d vectors)`` of ``_attach`` for the band tangents ``dF, dG``."""
+    matvec = lambda A, X: block_tridiag_matvec(*A, X)  # noqa: E731
+    inner = lambda a, b: jnp.einsum("kic,kic->c", jnp.conj(a), b)  # noqa: E731
+    cols = lambda a: jnp.moveaxis(a, -1, 0)  # noqa: E731
+    dA = matvec(dF, vectors) - values * matvec(dG, vectors)
+    dvalues = jnp.real(inner(vectors, dA))
+    GY, dGY = matvec(G, vectors), matvec(dG, vectors)
+    nF, nG = _norm(F), _norm(G)
+    eps = jnp.finfo(dvalues.dtype).eps
+
+    def one(linear, args):
+        i, lam, y, gy, s = args
+        a, d, dgy = (v[i] for v in linear)
+        scale = (nF + jnp.abs(lam) * nG) / nG
+        solve, _ = _shifted_solver(_shift(F, G, lam + jnp.minimum(s, scale) / 1e3), dense_limit)
+        project = lambda x: x - y * jnp.vdot(gy, x)  # noqa: E731 - G-orthogonal to y
+        rhs = d * gy - a
+        x = project(solve(rhs))
+        for _ in range(3):  # shift is off by <= sep / 1e3: refine on the exact operator
+            x = x + project(solve(rhs - (matvec(F, x) - lam * matvec(G, x))))
+        dy = x - 0.5 * jnp.vdot(y, dgy).real * y
+        return linear, jnp.where(s > jnp.sqrt(eps) * scale, dy, jnp.nan)
+
+    # The tangents ride in the scan carry: JAX before 0.10 cannot transpose a scan whose
+    # linear inputs are ``xs`` (see ``block_thomas_solve``).
+    linear = (cols(dA), dvalues, cols(dGY))
+    args = (jnp.arange(values.size), values, cols(vectors), cols(GY), sep)
+    return dvalues, jnp.moveaxis(jax.lax.scan(one, linear, args)[1], 0, -1)
+
+
+@_attach.defjvp
+def _attach_jvp(dense_limit, primals, tangents):
+    F, G, values, vectors, sep = primals
+    dF, dG = tangents[:2]
+    # Re-enter ``_attach`` so ``values`` and ``vectors`` are differentiable inside this rule too.
+    values, vectors = _attach(F, G, values, vectors, sep, dense_limit)
+    return (values, vectors), _first_order(F, G, dF, dG, values, vectors, sep, dense_limit)
+
+
+@partial(jax.jit, static_argnames=("count", "max_iter", "dense_limit"))
+def generalized_eigenpairs(
+    F, G, target, count: int = 8, tol: float = 1e-10, max_iter: int = 100, dense_limit: int = 2048
+) -> EigenpairResult:
+    """The ``count`` eigenpairs of ``F y = lam G y`` nearest ``target`` (block-tridiagonal pencil).
+
+    ``F`` and ``G`` are SOLVAX band triples ``(lower, diag, upper)`` of shape
+    ``(n_blocks, m, m)``: real symmetric or complex Hermitian, with ``G`` positive definite.
+    Both may depend on the parameters being differentiated. Only ``diag`` and ``upper[:-1]``
+    are read. The pencil is made Hermitian by construction: ``lower`` is rebuilt as
+    ``lower[k] = upper[k-1]^H`` (the conjugate transpose, not the transpose) and ``diag`` is
+    replaced by its Hermitian part.
+
+    The method is shift-invert subspace iteration with Rayleigh-Ritz on ``(F, G)``, over
+    ``min(2 count + 8, n_blocks m)`` vectors, factoring ``F - sigma G`` with
+    :func:`block_thomas_factor`. ``sigma`` is ``target`` moved by ``16 eps ||F|| / ||G||``, so
+    that a target equal to an eigenvalue does not give a singular factor. A probe solve checks
+    every factorization (see ``_shifted_solver``): if block Thomas has broken down, a dense
+    pivoted LU takes over and ``fallback`` is True. The dense path exists only if
+    ``n_blocks * m <= dense_limit``; above that a breakdown gives non-finite residuals and
+    ``converged=False``. Under ``vmap`` a ``cond`` runs both branches, so pass
+    ``dense_limit=0`` there to avoid always paying for the dense factorization. ``count``,
+    ``max_iter`` and ``dense_limit`` are static; everything else may be traced.
+
+    Derivatives are implicit, so the iteration is not differentiated, and are valid only when
+    ``converged`` is True. They support ``jax.jvp``, ``jax.grad`` and ``jax.jacfwd/jacrev``.
+    The second derivative of ``values`` is tested; that of ``vectors`` is not. ``target``,
+    ``tol`` and the diagnostics have zero derivative.
+
+    * ``values``: ``d lam = Re y^H (dF - lam dG) y``. For a degenerate or clustered selected
+      set the individual values are not differentiable but their sum is:
+      ``d mean(values) = tr(Y^H (dF - Lam dG) Y) / count``, the trace of the perturbation
+      projected on the cluster. This needs ``gap > 0``: if an excluded eigenvalue ties a
+      selected one, the selection itself jumps.
+    * ``vectors``: ``dy`` solves ``(F - lam G) dy = -(dF - lam dG) y + d lam G y`` with
+      ``Re(y^H G dy) = -y^H dG y / 2`` and the phase condition ``Im(y^H G dy) = 0``, so only
+      phase-invariant functions of ``vectors`` (``y y^H``, ``|y|``) are meaningful. The singular
+      system is solved on the ``G``-orthogonal complement of ``y`` at the shift ``lam + sep/1e3``,
+      ``sep`` being the distance to the nearest other Ritz value, followed by three refinement
+      sweeps on the exact operator. If ``sep <= sqrt(eps) ||F|| / ||G||`` the tangent is NaN:
+      differentiate the cluster mean instead of one vector of a degenerate pair.
+
+    Float64 is the validated precision. ``tol`` is the stopping relative residual.
+
+    Args:
+        F: stiffness band triple.
+        G: mass band triple, positive definite.
+        target: real number to search near.
+        count: number of eigenpairs, at most ``n_blocks * m``.
+        tol: relative residual to stop at.
+        max_iter: maximum shift-invert applications.
+        dense_limit: largest ``n_blocks * m`` for which the dense fallback is compiled.
+    """
+    F, G = _hermitian(F), _hermitian(G)
+    if not 1 <= count <= F[1].shape[0] * F[1].shape[1]:
+        raise ValueError("count must lie in [1, n_blocks * m]")
+    stop = lambda t: jax.tree_util.tree_map(jax.lax.stop_gradient, t)  # noqa: E731
+    solved = _subspace_iteration(stop(F), stop(G), target, count, tol, max_iter, dense_limit)
+    result, sep = stop(solved)
+    values, vectors = _attach(F, G, result.values, result.vectors, sep, dense_limit)
+    return result._replace(values=values, vectors=vectors)

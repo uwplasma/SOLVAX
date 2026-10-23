@@ -644,6 +644,7 @@ def block_thomas_solve(
     factors: BlockTridiagFactors | GeneratedBlockTridiagFactors,
     rhs: jax.Array,
     transpose: bool = False,
+    adjoint: bool = False,
 ) -> jax.Array:
     """Solve using precomputed factors.
 
@@ -670,10 +671,18 @@ def block_thomas_solve(
             :func:`block_thomas_factor_fn`, under either storage policy.
         rhs: ``(n_blocks, m)`` or ``(n_blocks, m, n_rhs)``.
         transpose: if True, solve ``A^T x = rhs`` instead of ``A x = rhs``.
+            ``A^T`` is the plain transpose, without conjugation.
+        adjoint: if True, solve ``A^H x = rhs`` (conjugate transpose) from the
+            same factors, as ``x = conj(A^{-T} conj(rhs))``. For a Hermitian
+            ``A`` this equals the forward solve. Exclusive with ``transpose``.
 
     Returns:
         Solution with the same shape as ``rhs``.
     """
+    if adjoint:
+        if transpose:
+            raise ValueError("transpose and adjoint are mutually exclusive")
+        return jnp.conj(block_thomas_solve(factors, jnp.conj(rhs), transpose=True))
     if isinstance(factors, GeneratedBlockTridiagFactors):
         return _block_thomas_solve_regenerated(factors, rhs, transpose)
     delta_lu, delta_piv, lower, upper = factors

@@ -57,7 +57,7 @@ from solvax.direct import (
     plan_chain_windows,
     suggest_adjoint_window,
 )
-from solvax.eigen import eigenpair_reverse
+from solvax.eigen import EigenpairResult, eigenpair_reverse, generalized_eigenpairs
 from solvax.elliptic import (
     FourierHelmholtzOperator,
     build_fourier_helmholtz_operator,
@@ -237,6 +237,8 @@ __all__ = [
     "block_tridiag_matvec",
     "block_tridiag_relative_residual",
     "eigenpair_reverse",
+    "EigenpairResult",
+    "generalized_eigenpairs",
     "estimate_rk4_timestep",
     "exponential_eigenpairs",
     "block_thomas",

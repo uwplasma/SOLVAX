@@ -223,7 +223,13 @@ because the saved factors are recomputed; the solutions agreed to round-off.
 
 ```python
 x_t = sx.block_thomas_solve(factors, rhs, transpose=True)
+x_h = sx.block_thomas_solve(factors, rhs, adjoint=True)
 ```
+
+`transpose=True` solves with the plain transpose $A^T$. For a complex operator
+the conjugate transpose is a different matrix: `adjoint=True` solves
+$A^H x=b$ from the same factors as $x=\overline{A^{-T}\bar b}$. For a Hermitian
+$A$ it equals the forward solve.
 
 For the chosen elimination order, the Schur complements of $A^T$ are
 $\Delta_k^T$. The same LU factors can therefore solve the transposed system by
@@ -566,7 +572,7 @@ defect corrections recover accuracy when the conditioning permits. See
 - {func}`solvax.direct.block_thomas_factor_ops`
 - {class}`solvax.direct.OperatorBlockTridiagFactors`
 - {func}`solvax.direct.block_thomas_solve_ops`
-- {func}`solvax.direct.block_thomas_solve`
+- {func}`solvax.direct.block_thomas_solve` (`transpose=` and `adjoint=`)
 - {func}`solvax.direct.block_thomas_selected_tail_fn`
 - {func}`solvax.direct.block_thomas_truncated`
 - {func}`solvax.direct.block_thomas_truncated_fn`
