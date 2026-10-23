@@ -92,6 +92,30 @@ class BlockTridiagFactors(NamedTuple):
     upper: jax.Array
 
 
+class NormalizedBlockTridiagFactors(NamedTuple):
+    """Reusable factors that keep the normalized lower couplings.
+
+    Returned by :func:`block_thomas_factor` with ``normalized=True``. They
+    represent ``A = U_hat L_hat``: ``U_hat`` is block upper bidiagonal with
+    diagonal ``Delta_k`` and upper band ``U_k``; ``L_hat`` is unit lower
+    bidiagonal with lower band ``C_k = Delta_k^{-1} L_k``. A solve then applies
+    each Schur LU once (``n_blocks`` triangular-solve pairs) instead of twice.
+
+    Attributes:
+        delta_lu: LU factors of every Schur complement ``Delta_k``,
+            shape ``(n_blocks, m, m)``.
+        delta_piv: matching pivot indices, shape ``(n_blocks, m)``.
+        coupling: ``C_k`` in the working precision, shape ``(n_blocks, m, m)``;
+            ``coupling[0]`` is zero.
+        upper: super-diagonal blocks ``U_k`` (``upper[-1]`` unused).
+    """
+
+    delta_lu: jax.Array
+    delta_piv: jax.Array
+    coupling: jax.Array
+    upper: jax.Array
+
+
 @jax.tree_util.register_pytree_node_class
 @dataclasses.dataclass(frozen=True, eq=False)
 class GeneratedBlockTridiagFactors:
@@ -152,7 +176,9 @@ def block_thomas_factor(
     upper: jax.Array,
     factor_dtype=None,
     shift=None,
-) -> BlockTridiagFactors:
+    *,
+    normalized: bool = False,
+) -> BlockTridiagFactors | NormalizedBlockTridiagFactors:
     """Run the downward Schur sweep once, for reuse across right-hand sides.
 
     Args:
@@ -176,6 +202,12 @@ def block_thomas_factor(
             its dtype), the operator of a shift-invert eigensolve. The solves
             then apply ``(A - shift I)^{-1}`` and, with ``transpose=True``,
             its transpose.
+        normalized: return :class:`NormalizedBlockTridiagFactors`, which keep
+            ``C_k = Delta_k^{-1} L_k`` (computed by the sweep in any case) in
+            place of ``L_k``. Each later solve, primal or transposed, then
+            applies the Schur LU factors once per block instead of twice. The
+            couplings are new storage, ``n_blocks * m * m`` working-precision
+            scalars, where the default record aliases ``lower``.
 
     Returns:
         Factors for :func:`block_thomas_solve`.
@@ -184,6 +216,26 @@ def block_thomas_factor(
         diag = diag - jnp.asarray(shift, diag.dtype) * jnp.eye(diag.shape[-1], dtype=diag.dtype)
     work = jnp.result_type(diag)
     fdt = work if factor_dtype is None else factor_dtype
+    first_row = jnp.arange(diag.shape[0]) == 0
+    last_row = jnp.arange(diag.shape[0]) == diag.shape[0] - 1
+
+    if normalized:
+        # Row k factors Delta_k = D_k - U_k C_{k+1} and emits C_k with it. The
+        # ignored lower[0] is replaced by zeros before the solve, so coupling[0]
+        # is exactly zero whatever the caller stored there.
+        def normalized_step(coupling_next, inputs):
+            d_k, u_k, l_k, first, last = inputs
+            delta_k = lu_factor((d_k - jnp.where(last, 0, u_k) @ coupling_next).astype(fdt))
+            coupling_k = lu_solve(delta_k, jnp.where(first, 0, l_k).astype(fdt)).astype(work)
+            return coupling_k, (delta_k, coupling_k)
+
+        _, ((delta_lu, delta_piv), coupling) = jax.lax.scan(
+            normalized_step,
+            jnp.zeros_like(diag[0]),
+            (diag, upper, lower, first_row, last_row),
+            reverse=True,
+        )
+        return NormalizedBlockTridiagFactors(delta_lu, delta_piv, coupling, upper)
 
     m = diag.shape[-1]
     identity = lu_factor(jnp.eye(m, dtype=fdt))
@@ -197,7 +249,6 @@ def block_thomas_factor(
         delta_k = lu_factor((d_k - jnp.where(last_row, 0, u_k @ x)).astype(fdt))
         return (delta_k, l_k), delta_k
 
-    last_row = jnp.arange(diag.shape[0]) == diag.shape[0] - 1
     _, (delta_lu, delta_piv) = jax.lax.scan(
         down_step,
         (identity, jnp.zeros_like(diag[0])),
@@ -640,8 +691,48 @@ def _block_thomas_solve_regenerated(
     return solution
 
 
+def _block_thomas_solve_normalized(
+    factors: NormalizedBlockTridiagFactors, rhs: jax.Array, transpose: bool
+) -> jax.Array:
+    """Substitution through ``A = U_hat L_hat``, one Schur LU solve per block.
+
+    Primal: ``U_hat y = b`` upward, ``y_k = Delta_k^{-1}(b_k - U_k y_{k+1})``,
+    then ``x_k = y_k - C_k x_{k-1}`` downward. Transposed, ``A^T = L_hat^T
+    U_hat^T``: ``y_k = b_k - C_{k+1}^T y_{k+1}`` upward, then
+    ``x_k = Delta_k^{-T}(y_k - U_{k-1}^T x_{k-1})`` downward. Unrolled like the
+    stored-band solve below, for the same transpose reasons.
+    """
+    delta_lu, delta_piv, coupling, upper = factors
+    fdt = delta_lu.dtype
+    work = jnp.result_type(rhs, coupling)
+    n = rhs.shape[0]
+    mT = lambda a: jnp.swapaxes(a, -1, -2)  # noqa: E731
+
+    def tsolve(k, v, trans):
+        return lu_solve((delta_lu[k], delta_piv[k]), v.astype(fdt), trans=trans).astype(work)
+
+    y: list[jax.Array] = [None] * n  # type: ignore[list-item]
+    if transpose:
+        y[-1] = rhs[-1]
+        for k in range(n - 2, -1, -1):
+            y[k] = rhs[k] - mT(coupling[k + 1]) @ y[k + 1]
+        solution = [tsolve(0, y[0], 1)]
+        for k in range(1, n):
+            solution.append(tsolve(k, y[k] - mT(upper[k - 1]) @ solution[-1], 1))
+        return jnp.stack(solution)
+    y[-1] = tsolve(n - 1, rhs[-1], 0)
+    for k in range(n - 2, -1, -1):
+        y[k] = tsolve(k, rhs[k] - upper[k] @ y[k + 1], 0)
+    solution = [y[0]]
+    for k in range(1, n):
+        solution.append(y[k] - coupling[k] @ solution[-1])
+    return jnp.stack(solution)
+
+
 def block_thomas_solve(
-    factors: BlockTridiagFactors | GeneratedBlockTridiagFactors,
+    factors: BlockTridiagFactors
+    | NormalizedBlockTridiagFactors
+    | GeneratedBlockTridiagFactors,
     rhs: jax.Array,
     transpose: bool = False,
     adjoint: bool = False,
@@ -666,9 +757,13 @@ def block_thomas_solve(
     transposed solve is exact under that policy too, because it needs the same
     two blocks per row.
 
+    :class:`NormalizedBlockTridiagFactors` (``normalized=True``) solve through
+    the stored ``C_k`` and apply each Schur LU once rather than twice, with the
+    same transpose and adjoint contracts.
+
     Args:
         factors: output of :func:`block_thomas_factor` or
-            :func:`block_thomas_factor_fn`, under either storage policy.
+            :func:`block_thomas_factor_fn`, under any storage policy.
         rhs: ``(n_blocks, m)`` or ``(n_blocks, m, n_rhs)``.
         transpose: if True, solve ``A^T x = rhs`` instead of ``A x = rhs``.
             ``A^T`` is the plain transpose, without conjugation.
@@ -685,6 +780,8 @@ def block_thomas_solve(
         return jnp.conj(block_thomas_solve(factors, jnp.conj(rhs), transpose=True))
     if isinstance(factors, GeneratedBlockTridiagFactors):
         return _block_thomas_solve_regenerated(factors, rhs, transpose)
+    if isinstance(factors, NormalizedBlockTridiagFactors):
+        return _block_thomas_solve_normalized(factors, rhs, transpose)
     delta_lu, delta_piv, lower, upper = factors
     # Indexing the stored bands directly, not through ``upper[:-1]`` / ``lower[1:]``:
     # inside ``jit`` the slice of a parameter materializes a copy of the band.
