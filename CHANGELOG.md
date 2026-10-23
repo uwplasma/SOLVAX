@@ -17,8 +17,12 @@
   derivative of the values is tested, that of the vectors is not. Its solves are
   `lax.scan`s, so compile time does not grow with `n_blocks` (complex128, `m=13`,
   `count=6`; cold compile plus first call, before to after: forward 1.8-10 s to
-  0.5-0.7 s and `grad` 7.9-167 s to 0.8-1.0 s for 50-400 blocks; warm time
-  unchanged). See `docs/solvers/generalized_eigenpairs.md`.
+  0.5-0.7 s and `grad` 7.9-167 s to 1.6-2.0 s for 50-400 blocks; warm time
+  unchanged). Reverse mode (`jax.grad`, `vjp`, `jacrev`) is tested on JAX 0.4.38,
+  0.6.2, 0.7.2, 0.9.2 and 0.12, each a CI job: the eigenvector tangent loops
+  over the `count` eigenpairs in Python instead of scanning over them, because
+  JAX's scan transpose raised `AssertionError` or `TypeError` on 0.6.2-0.9.2
+  for the scanned form. See `docs/solvers/generalized_eigenpairs.md`.
 - `block_thomas_solve(..., adjoint=True)` solves with the conjugate transpose
   `Aᴴ` from the same factors (`transpose=True` is the plain transpose).
 

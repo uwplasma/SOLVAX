@@ -402,31 +402,26 @@ def _first_order(F, G, dF, dG, values, vectors, sep, dense_limit):
     """Tangents ``(d values, d vectors)`` of ``_attach`` for the band tangents ``dF, dG``."""
     matvec = lambda A, X: block_tridiag_matvec(*A, X)  # noqa: E731
     inner = lambda a, b: jnp.einsum("kic,kic->c", jnp.conj(a), b)  # noqa: E731
-    cols = lambda a: jnp.moveaxis(a, -1, 0)  # noqa: E731
-    dA = matvec(dF, vectors) - values * matvec(dG, vectors)
+    dGY = matvec(dG, vectors)
+    dA = matvec(dF, vectors) - values * dGY
     dvalues = jnp.real(inner(vectors, dA))
-    GY, dGY = matvec(G, vectors), matvec(dG, vectors)
+    GY = matvec(G, vectors)
     nF, nG = _norm(F), _norm(G)
     eps = jnp.finfo(dvalues.dtype).eps
 
-    def one(linear, args):
-        i, lam, y, gy, s = args
-        a, d, dgy = (v[i] for v in linear)
+    def one(i):
+        lam, y, gy, s = values[i], vectors[..., i], GY[..., i], sep[i]
         scale = (nF + jnp.abs(lam) * nG) / nG
         solve, _ = _shifted_solver(_shift(F, G, lam + jnp.minimum(s, scale) / 1e3), dense_limit)
         project = lambda x: x - y * jnp.vdot(gy, x)  # noqa: E731 - G-orthogonal to y
-        rhs = d * gy - a
+        rhs = gy * dvalues[i] - dA[..., i]
         x = project(solve(rhs))
         for _ in range(3):  # shift is off by <= sep / 1e3: refine on the exact operator
             x = x + project(solve(rhs - (matvec(F, x) - lam * matvec(G, x))))
-        dy = x - 0.5 * jnp.vdot(y, dgy).real * y
-        return linear, jnp.where(s > jnp.sqrt(eps) * scale, dy, jnp.nan)
+        dy = x - 0.5 * jnp.vdot(y, dGY[..., i]).real * y
+        return jnp.where(s > jnp.sqrt(eps) * scale, dy, jnp.nan)
 
-    # The tangents ride in the scan carry: JAX before 0.10 cannot transpose a scan whose
-    # linear inputs are ``xs`` (see ``block_thomas_solve``).
-    linear = (cols(dA), dvalues, cols(dGY))
-    args = (jnp.arange(values.size), values, cols(vectors), cols(GY), sep)
-    return dvalues, jnp.moveaxis(jax.lax.scan(one, linear, args)[1], 0, -1)
+    return dvalues, jnp.stack([one(i) for i in range(values.size)], -1)
 
 
 @_attach.defjvp
