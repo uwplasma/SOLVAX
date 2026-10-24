@@ -100,11 +100,16 @@ whose second equation is the normalization $\operatorname{Re}(y^H G\,dy)=-\tfrac
 together with the phase condition $\operatorname{Im}(y^H G\,dy)=0$. The phase of the
 primal vector is arbitrary, so only phase-invariant functions of `vectors`
 ($y y^H$, $|y|$) have meaningful derivatives. The projected right-hand side is solved
-at the shift $\lambda+\text{sep}/10^3$, where `sep` is the distance to the nearest other Ritz value,
-followed by three refinement sweeps on the exact singular operator, so the error
-contracts by $10^{-3}$ per sweep. If $\text{sep}\le\sqrt{\epsilon}\,\lVert F\rVert/\lVert G\rVert$ the tangent
-is NaN rather than wrong: differentiate the cluster mean (or the projector) of a
-degenerate pair, not one of its vectors.
+at the shift $\lambda+\text{sep}/10^3$, where `sep` is the distance to the nearest Ritz value outside the
+cluster of $y$, followed by three refinement sweeps on the exact singular operator, so the error
+contracts by $10^{-3}$ per sweep. Ritz values within $\sqrt{\epsilon}\,(\lVert F\rVert+|\lambda|\lVert G\rVert)/\lVert G\rVert$
+of $\lambda$ are degenerate with it. For such a cluster $C$ the tangent is the gauge-fixed subspace tangent:
+the right-hand side and the solve are projected $G$-orthogonally to the whole cluster, and the
+cluster block of $Y^H G\,dY$ is $-\tfrac12 Y_C^H dG\,Y_C$, so there is no rotation inside the
+cluster. Only subspace-invariant functions of `vectors` (the projector $Y_C Y_C^H$) are meaningful
+there. The tangent is finite, never NaN, in forward and reverse mode: reverse mode transposes the
+whole tangent map, and a NaN anywhere in it leaks into the value cotangent as NaN$\cdot 0$.
+Value and cluster-mean tangents are unaffected. Certify the selection with `gap`.
 
 `target`, `tol` and every diagnostic have zero derivative.
 
