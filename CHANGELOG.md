@@ -11,6 +11,19 @@
   and its field meanings are unchanged; the normalized record holds `N m^2`
   more scalars while the input bands stay live. `benchmarks/benchmark_block_factors.py`
   compares the routes on saved bands. See `docs/solvers/block_tridiagonal.md`.
+
+## 0.32.1 - 2026-10-24
+
+- `generalized_eigenpairs`: the eigenvector tangent of an exactly degenerate pair is no longer
+  NaN. The NaN was masked in the forward pass, but reverse mode transposes the whole tangent map,
+  so differentiating only `values` (a cluster mean) gave NaN in the value cotangent on some
+  XLA builds (NaN times a zero cotangent; seen on JAX 0.6.2, Python 3.10, Linux). Inside a
+  degenerate cluster the vector tangent is now the gauge with no intra-cluster rotation, solved
+  away from the cluster, so only subspace-invariant functions of `vectors` are meaningful there;
+  values, cluster means and separated eigenvectors are unchanged (within 1e-15).
+
+## 0.32.0 - 2026-10-24
+
 - `generalized_eigenpairs(F, G, target, count, tol, max_iter)` returns the
   `count` eigenpairs of the Hermitian block-tridiagonal pencil `F y = λ G y`
   nearest `target` (real symmetric or complex Hermitian, `G` positive definite
