@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `factor_dtype` given as a real dtype for complex bands now selects the complex
+  dtype of that width (`float32` gives `complex64`) in `block_thomas_factor`,
+  `block_thomas_factor_fn` and `block_thomas_factor_ops`. It previously cast the
+  Schur blocks to a real dtype and discarded the imaginary part (relative solve
+  error 0.71 on a random complex128 chain).
 - `block_thomas_factor(..., normalized=True)` returns
   `NormalizedBlockTridiagFactors(delta_lu, delta_piv, coupling, upper)`, which
   keeps `C_k = Delta_k^{-1} L_k` from the Schur sweep so that `A = U_hat L_hat`.

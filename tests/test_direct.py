@@ -1203,6 +1203,24 @@ def test_normalized_factors_with_float32_schur_lu_match_the_stored_route():
         np.testing.assert_allclose(b, a, rtol=1e-5, atol=1e-6)
 
 
+@pytest.mark.parametrize("normalized", [False, True])
+def test_float32_factor_dtype_keeps_the_imaginary_part_of_complex_bands(normalized):
+    """A real ``factor_dtype`` on complex128 bands gives complex64 factors, not a real cast."""
+    (lower, diag, upper, rhs), _ = make_system(6, 4, 2, seed=8)
+    rng = np.random.default_rng(9)
+    bands = [b + 0.5j * jnp.asarray(rng.standard_normal(b.shape)) for b in (lower, diag, upper)]
+    rhs = rhs + 1j * jnp.asarray(rng.standard_normal(rhs.shape))
+    factors = block_thomas_factor(*bands, factor_dtype=jnp.float32, normalized=normalized)
+    assert factors.delta_lu.dtype == jnp.complex64
+    exact = block_thomas_solve(block_thomas_factor(*bands), rhs)
+    for transpose in (False, True):
+        got = block_thomas_solve(factors, rhs, transpose=transpose)
+        want = block_thomas_solve(block_thomas_factor(*bands), rhs, transpose=transpose)
+        assert got.dtype == jnp.complex128
+        np.testing.assert_allclose(got, want, rtol=1e-4, atol=1e-5)
+    assert np.linalg.norm(np.asarray(exact).imag) > 0
+
+
 def test_normalized_solve_derivatives_match_the_dense_equation():
     """JVP and band cotangents follow ``dx = A^{-1}(db - dA x)``; jit and vmap are transparent."""
     (lower, diag, upper, rhs), _ = make_system(5, 3, seed=6, dominance=1.0)
