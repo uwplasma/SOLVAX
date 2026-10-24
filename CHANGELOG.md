@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.32.1 - 2026-10-24
+
 - `generalized_eigenpairs`: the eigenvector tangent of an exactly degenerate pair is no longer
   NaN. The NaN was masked in the forward pass, but reverse mode transposes the whole tangent map,
   so differentiating only `values` (a cluster mean) gave NaN in the value cotangent on some
