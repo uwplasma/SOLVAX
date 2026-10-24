@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.33.0 - 2026-10-24
+
 - `factor_dtype` given as a real dtype for complex bands now selects the complex
   dtype of that width (`float32` gives `complex64`) in `block_thomas_factor`,
   `block_thomas_factor_fn` and `block_thomas_factor_ops`. It previously cast the
