@@ -9,6 +9,7 @@ import pytest
 
 from solvax import (
     GeneratedBlockTridiagFactors,
+    NormalizedBlockTridiagFactors,
     block_thomas,
     block_thomas_checkpointed_fn,
     block_thomas_factor,
@@ -1079,6 +1080,7 @@ def test_factor_writes_the_band_without_a_second_copy():
     band = jax.ShapeDtypeStruct((n, m, m), jnp.float64)
     routes = {
         "stored": lambda lo, d, u: block_thomas_factor(lo, d, u).delta_lu,
+        "normalized": lambda lo, d, u: block_thomas_factor(lo, d, u, normalized=True).coupling,
         "generated": lambda lo, d, u: block_thomas_factor_fn(
             lambda i: (lo[i], d[i], u[i]), n, store_offdiagonals=False
         ).delta_lu,
@@ -1117,3 +1119,133 @@ def test_shifted_factor_inverts_a_minus_sigma_and_its_transpose(dtype):
         got = np.asarray(block_thomas_solve(factors, rhs, transpose=transpose)).reshape(-1)
         want = np.linalg.solve(shifted.T if transpose else shifted, rhs.reshape(-1))
         assert np.linalg.norm(got - want) < tol * np.linalg.norm(want)
+
+
+def _dense(lower, diag, upper):
+    n, m = diag.shape[0], diag.shape[-1]
+    dense = np.zeros((n * m, n * m), np.result_type(diag))
+    for k in range(n):
+        dense[k * m : (k + 1) * m, k * m : (k + 1) * m] = diag[k]
+        if k:
+            dense[k * m : (k + 1) * m, (k - 1) * m : k * m] = lower[k]
+        if k < n - 1:
+            dense[k * m : (k + 1) * m, (k + 1) * m : (k + 2) * m] = upper[k]
+    return dense
+
+
+@pytest.mark.parametrize("n_rhs", [None, 1, 3])
+@pytest.mark.parametrize("n_blocks,m", [(1, 2), (2, 5), (3, 1), (5, 2), (7, 5)])
+def test_normalized_factors_match_dense_primal_and_transpose(n_blocks, m, n_rhs):
+    """Nonsymmetric blocks with weak dominance, so the block LUs pivot."""
+    (lower, diag, upper, rhs), _ = make_system(n_blocks, m, n_rhs, seed=n_blocks, dominance=0.3)
+    dense = _dense(*map(np.asarray, (lower, diag, upper)))
+    # The ignored boundary entries must never reach the result.
+    lower, upper = lower.at[0].set(jnp.nan), upper.at[-1].set(jnp.nan)
+    factors = block_thomas_factor(lower, diag, upper, normalized=True)
+    assert isinstance(factors, NormalizedBlockTridiagFactors)
+    assert np.all(np.asarray(factors.coupling[0]) == 0)
+    flat = np.asarray(rhs).reshape(n_blocks * m, -1)
+    for transpose in (False, True):
+        got = np.asarray(block_thomas_solve(factors, rhs, transpose=transpose))
+        want = np.linalg.solve(dense.T if transpose else dense, flat)
+        np.testing.assert_allclose(got.reshape(want.shape), want, rtol=1e-10, atol=1e-12)
+        assert got.shape == rhs.shape
+
+
+def test_normalized_factors_reconstruct_the_bands():
+    """``U_hat L_hat = A`` blockwise: ``Delta_k C_k = L_k``, ``Delta_k + U_k C_{k+1} = D_k``."""
+    (lower, diag, upper, _), _ = make_system(6, 4, seed=2, dominance=0.3)
+    lu, piv, coupling, _ = block_thomas_factor(lower, diag, upper, normalized=True)
+    perm = jax.vmap(lambda p: jax.lax.linalg.lu_pivots_to_permutation(p, 4))(piv)
+    unit = jnp.tril(lu, -1) + jnp.eye(4)
+    delta = np.asarray(jax.vmap(lambda P, L, U: L[jnp.argsort(P)] @ U)(perm, unit, jnp.triu(lu)))
+    np.testing.assert_allclose(delta[1:] @ coupling[1:], lower[1:], atol=1e-12)
+    np.testing.assert_allclose(delta[:-1] + upper[:-1] @ coupling[1:], diag[:-1], atol=1e-12)
+    np.testing.assert_allclose(delta[-1], diag[-1], atol=1e-12)
+
+
+@pytest.mark.parametrize("dtype,tol", [(np.complex128, 1e-10), (np.complex64, 2e-4)])
+def test_normalized_factors_complex_transpose_is_unconjugated(dtype, tol):
+    rng = np.random.default_rng(4)
+    nb, m, sigma = 5, 3, 0.4 + 0.3j
+    z = rng.standard_normal((3, 2, nb, m, m))
+    lower, diag, upper = (z[:, 0] + 1j * z[:, 1]).astype(dtype)
+    rhs = (rng.standard_normal((nb, m, 2)) + 1j * rng.standard_normal((nb, m, 2))).astype(dtype)
+    shifted = _dense(lower, diag, upper) - sigma * np.eye(nb * m)
+    factors = block_thomas_factor(lower, diag, upper, shift=sigma, normalized=True)
+    modes = (("primal", shifted), ("transpose", shifted.T), ("adjoint", shifted.conj().T))
+    for mode, matrix in modes:
+        got = block_thomas_solve(
+            factors, rhs, transpose=mode == "transpose", adjoint=mode == "adjoint"
+        )
+        want = np.linalg.solve(matrix, rhs.reshape(nb * m, -1))
+        error = np.asarray(got).reshape(want.shape) - want
+        assert np.linalg.norm(error) < tol * np.linalg.norm(want)
+
+
+def test_normalized_factors_with_float32_schur_lu_match_the_stored_route():
+    """``factor_dtype`` lowers only the LU; couplings and products stay float64."""
+    (lower, diag, upper, rhs), _ = make_system(9, 4, 2, seed=5)
+    stored = block_thomas_factor(lower, diag, upper, factor_dtype=jnp.float32)
+    normal = block_thomas_factor(lower, diag, upper, factor_dtype=jnp.float32, normalized=True)
+    assert normal.delta_lu.dtype == jnp.float32 and normal.coupling.dtype == jnp.float64
+    for transpose in (False, True):
+        a = block_thomas_solve(stored, rhs, transpose=transpose)
+        b = block_thomas_solve(normal, rhs, transpose=transpose)
+        assert b.dtype == jnp.float64
+        np.testing.assert_allclose(b, a, rtol=1e-5, atol=1e-6)
+
+
+def test_normalized_solve_derivatives_match_the_dense_equation():
+    """JVP and band cotangents follow ``dx = A^{-1}(db - dA x)``; jit and vmap are transparent."""
+    (lower, diag, upper, rhs), _ = make_system(5, 3, seed=6, dominance=1.0)
+    rng = np.random.default_rng(7)
+    tangents = [jnp.asarray(rng.standard_normal(a.shape)) for a in (lower, diag, upper, rhs)]
+
+    @jax.jit
+    def solve(lo, d, u, b):
+        return block_thomas_solve(block_thomas_factor(lo, d, u, normalized=True), b)
+
+    x, dx = jax.jvp(solve, (lower, diag, upper, rhs), tuple(tangents))
+    dense = _dense(*map(np.asarray, (lower, diag, upper)))
+    tlo = np.asarray(tangents[0]).copy()
+    tlo[0] = 0
+    tup = np.asarray(tangents[2]).copy()
+    tup[-1] = 0
+    d_dense = _dense(tlo, np.asarray(tangents[1]), tup)
+    want = np.linalg.solve(dense, np.ravel(tangents[3]) - d_dense @ np.ravel(x))
+    np.testing.assert_allclose(np.ravel(dx), want, rtol=1e-9, atol=1e-11)
+
+    weight = jnp.asarray(rng.standard_normal(rhs.shape))
+    grads = jax.grad(lambda *a: jnp.vdot(weight, solve(*a)), argnums=(0, 1, 2, 3))(
+        lower, diag, upper, rhs
+    )
+    lam = np.linalg.solve(dense.T, np.ravel(weight)).reshape(rhs.shape)
+    xs = np.asarray(x)
+    np.testing.assert_allclose(grads[3], lam, rtol=1e-9, atol=1e-11)
+    np.testing.assert_allclose(grads[1], -lam[:, :, None] * xs[:, None, :], atol=1e-10)
+    np.testing.assert_allclose(grads[0][1:], -lam[1:, :, None] * xs[:-1, None, :], atol=1e-10)
+    np.testing.assert_allclose(grads[2][:-1], -lam[:-1, :, None] * xs[1:, None, :], atol=1e-10)
+    assert np.all(np.asarray(grads[0][0]) == 0) and np.all(np.asarray(grads[2][-1]) == 0)
+
+    factors = block_thomas_factor(lower, diag, upper, normalized=True)
+    transpose = jax.linear_transpose(lambda b: block_thomas_solve(factors, b), rhs)
+    np.testing.assert_allclose(
+        transpose(weight)[0], block_thomas_solve(factors, weight, transpose=True), atol=1e-12
+    )
+    batch = jnp.stack([rhs, 2 * rhs, -rhs])
+    np.testing.assert_allclose(
+        jax.vmap(lambda b: block_thomas_solve(factors, b))(batch),
+        jnp.stack([x, 2 * x, -x]),
+        atol=1e-12,
+    )
+
+
+@pytest.mark.parametrize("route", ["stored", "normalized"])
+def test_block_breakdown_is_not_a_silent_success(route):
+    """``[[0, I], [I, 0]]`` is invertible, but its block elimination order is not."""
+    eye, zero = jnp.eye(2), jnp.zeros((2, 2))
+    lower, diag, upper = jnp.stack([zero, eye]), jnp.stack([zero, zero]), jnp.stack([eye, zero])
+    factors = block_thomas_factor(lower, diag, upper, normalized=route == "normalized")
+    x = block_thomas_solve(factors, jnp.ones((2, 2)))
+    assert not np.all(np.isfinite(np.asarray(x)))

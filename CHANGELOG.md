@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- `block_thomas_factor(..., normalized=True)` returns
+  `NormalizedBlockTridiagFactors(delta_lu, delta_piv, coupling, upper)`, which
+  keeps `C_k = Delta_k^{-1} L_k` from the Schur sweep so that `A = U_hat L_hat`.
+  `block_thomas_solve` accepts it directly and applies each Schur LU once per
+  block (`N` applications instead of `2N-1`) in the primal and the `transpose=True`
+  and `adjoint=True` solves, without a second factorization. The default record
+  and its field meanings are unchanged; the normalized record holds `N m^2`
+  more scalars while the input bands stay live. `benchmarks/benchmark_block_factors.py`
+  compares the routes on saved bands. See `docs/solvers/block_tridiagonal.md`.
+
 ## 0.32.1 - 2026-10-24
 
 - `generalized_eigenpairs`: the eigenvector tangent of an exactly degenerate pair is no longer
