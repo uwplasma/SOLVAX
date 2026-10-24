@@ -64,7 +64,7 @@ import warnings
 from collections.abc import Callable
 from functools import partial
 from math import isqrt
-from typing import NamedTuple
+from typing import NamedTuple, cast
 
 import jax
 import jax.flatten_util
@@ -821,7 +821,10 @@ def block_cyclic_reduction_factor(
             CyclicReductionLevel(odd_lu, odd_piv, p_odd, q_odd, even_lower, even_upper)
         )
         lower, diag, upper = new_lower, new_diag, new_upper
-    leaf = block_thomas_factor(lower, diag, upper, factor_dtype=factor_dtype, normalized=True)
+    leaf = cast(
+        NormalizedBlockTridiagFactors,
+        block_thomas_factor(lower, diag, upper, factor_dtype=factor_dtype, normalized=True),
+    )
     return CyclicReductionFactors(tuple(levels), leaf)
 
 
