@@ -344,6 +344,15 @@ def _shifted_solver(band, dense_limit):
     return (lambda b: jax.lax.cond(ok, thomas, dense, b)), ~ok
 
 
+def _scale(values, nF, nG):
+    return (nF + jnp.abs(values) * nG) / nG
+
+
+def _cluster_tol(values, nF, nG):
+    """Ritz values closer than this to a value are degenerate with it."""
+    return jnp.sqrt(jnp.finfo(values.dtype).eps) * _scale(values, nF, nG)
+
+
 def _subspace_iteration(F, G, target, count, tol, max_iter, dense_limit):
     """Shift-invert subspace iteration; returns the result and each value's Ritz separation."""
     n, m = F[1].shape[:2]
@@ -384,7 +393,9 @@ def _subspace_iteration(F, G, target, count, tol, max_iter, dense_limit):
     distance = jnp.sort(jnp.abs(theta - target))
     gap = distance[count] - distance[count - 1] if width > count else jnp.asarray(jnp.inf, real)
     gram = adjoint(X[:, :count][:, perm]) @ matvec(G, vectors).reshape(size, count)
-    others = jnp.abs(values[:, None] - theta[None, :]).at[jnp.arange(count), sel].set(jnp.inf)
+    # Distance from each value to the nearest Ritz value outside its (degenerate) cluster.
+    others = jnp.abs(values[:, None] - theta[None, :])
+    others = jnp.where(others > _cluster_tol(values, nF, nG)[:, None], others, jnp.inf)
     result = EigenpairResult(
         values, vectors, res, jnp.abs(gram - jnp.eye(count)).max(), iterations,
         res.max() <= tol, gap, fallback,
@@ -407,19 +418,25 @@ def _first_order(F, G, dF, dG, values, vectors, sep, dense_limit):
     dvalues = jnp.real(inner(vectors, dA))
     GY = matvec(G, vectors)
     nF, nG = _norm(F), _norm(G)
-    eps = jnp.finfo(dvalues.dtype).eps
+    scale = _scale(values, nF, nG)
+    # ``cluster[j, i]``: eigenpair j is degenerate with i (itself included). ``sep`` is the
+    # distance to the nearest Ritz value outside it, so the shifted solves are never singular.
+    cluster = jnp.abs(values[:, None] - values[None, :]) <= _cluster_tol(values, nF, nG)[None, :]
+    dot = lambda a, b: jnp.einsum("kij,ki->j", jnp.conj(a), b)  # noqa: E731
 
     def one(i):
-        lam, y, gy, s = values[i], vectors[..., i], GY[..., i], sep[i]
-        scale = (nF + jnp.abs(lam) * nG) / nG
-        solve, _ = _shifted_solver(_shift(F, G, lam + jnp.minimum(s, scale) / 1e3), dense_limit)
-        project = lambda x: x - y * jnp.vdot(gy, x)  # noqa: E731 - G-orthogonal to y
-        rhs = gy * dvalues[i] - dA[..., i]
+        lam, c = values[i], cluster[:, i]
+        solve, _ = _shifted_solver(
+            _shift(F, G, lam + jnp.minimum(sep[i], scale[i]) / 1e3), dense_limit
+        )
+        Yc, GYc = vectors * c, GY * c
+        project = lambda x: x - Yc @ dot(GYc, x)  # noqa: E731 - G-orthogonal to the cluster
+        rhs = GYc @ dot(Yc, dA[..., i]) - dA[..., i]
         x = project(solve(rhs))
         for _ in range(3):  # shift is off by <= sep / 1e3: refine on the exact operator
             x = x + project(solve(rhs - (matvec(F, x) - lam * matvec(G, x))))
-        dy = x - 0.5 * jnp.vdot(y, dGY[..., i]).real * y
-        return jnp.where(s > jnp.sqrt(eps) * scale, dy, jnp.nan)
+        # No rotation inside the cluster: its block of ``Y^H G dY`` is ``-Y^H dG Y / 2``.
+        return x - 0.5 * Yc @ dot(vectors, dGY[..., i])
 
     return dvalues, jnp.stack([one(i) for i in range(values.size)], -1)
 
@@ -471,9 +488,14 @@ def generalized_eigenpairs(
       ``Re(y^H G dy) = -y^H dG y / 2`` and the phase condition ``Im(y^H G dy) = 0``, so only
       phase-invariant functions of ``vectors`` (``y y^H``, ``|y|``) are meaningful. The singular
       system is solved on the ``G``-orthogonal complement of ``y`` at the shift ``lam + sep/1e3``,
-      ``sep`` being the distance to the nearest other Ritz value, followed by three refinement
-      sweeps on the exact operator. If ``sep <= sqrt(eps) ||F|| / ||G||`` the tangent is NaN:
-      differentiate the cluster mean instead of one vector of a degenerate pair.
+      ``sep`` being the distance to the nearest Ritz value outside the cluster of ``y``, followed
+      by three refinement sweeps on the exact operator. Ritz values within
+      ``sqrt(eps) (||F|| + |lam| ||G||) / ||G||`` of ``lam`` are degenerate with it; for such a
+      cluster the tangent is the gauge-fixed subspace tangent, with no rotation inside the
+      cluster (its block of ``Y^H G dY`` is ``-Y^H dG Y / 2``) and only the out-of-cluster
+      components from the solve. It is finite, never NaN, in forward and reverse mode; only
+      subspace-invariant functions of ``vectors`` (the projector) are meaningful there. Value and
+      cluster-mean tangents are unaffected. Certify the selection with ``gap``.
 
     Float64 is the validated precision. ``tol`` is the stopping relative residual.
 

@@ -102,6 +102,9 @@ factors = sx.block_thomas_factor(lower, diag, upper)
 x1 = sx.block_thomas_solve(factors, rhs1)
 x2 = sx.block_thomas_solve(factors, rhs2)
 
+# normalized=True keeps C_k = Delta_k^{-1} L_k: one Schur LU solve per block (N m^2 more storage)
+normalized = sx.block_thomas_factor(lower, diag, upper, normalized=True)
+
 # Generate each block once when reusable factors are needed without a stored
 # diagonal band. `row(j)` returns the triple (L_j, D_j, U_j) of row j; the
 # parameterized form `block_fn(params, j)` used further down takes the
