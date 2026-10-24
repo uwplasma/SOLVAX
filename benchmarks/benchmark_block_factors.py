@@ -30,6 +30,7 @@ import numpy as np
 
 from solvax import (
     __version__,
+    block_cyclic_reduction_factor,
     block_thomas_factor,
     block_thomas_solve,
     block_tridiag_relative_residual,
@@ -41,6 +42,7 @@ ROUTES = {
     "normalized": partial(block_thomas_factor, normalized=True),
     "stored-f32lu": partial(block_thomas_factor, factor_dtype=jnp.float32),
     "normalized-f32lu": partial(block_thomas_factor, factor_dtype=jnp.float32, normalized=True),
+    **{f"cyclic-{c}": partial(block_cyclic_reduction_factor, cutoff=c) for c in (1, 2, 4, 8, 16)},
     # All-FP32 factor arithmetic: the bands are rounded to FP32 before the sweep.
     "stored-f32": lambda *bands: block_thomas_factor(*(b.astype(jnp.float32) for b in bands)),
 }

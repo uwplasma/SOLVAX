@@ -64,7 +64,7 @@ import warnings
 from collections.abc import Callable
 from functools import partial
 from math import isqrt
-from typing import NamedTuple
+from typing import NamedTuple, cast
 
 import jax
 import jax.flatten_util
@@ -731,9 +731,171 @@ def _block_thomas_solve_normalized(
     return jnp.stack(solution)
 
 
+class CyclicReductionLevel(NamedTuple):
+    """One odd-row elimination of :func:`block_cyclic_reduction_factor`.
+
+    Attributes:
+        odd_lu, odd_piv: LU factors of the eliminated diagonal blocks ``D_j``.
+        lower_transfer, upper_transfer: ``P_j = D_j^{-1} L_j`` and
+            ``Q_j = D_j^{-1} U_j``, in the working precision.
+        even_lower, even_upper: the retained rows' couplings ``L_i``, ``U_i``
+            to the eliminated rows, needed by both substitution directions.
+    """
+
+    odd_lu: jax.Array
+    odd_piv: jax.Array
+    lower_transfer: jax.Array
+    upper_transfer: jax.Array
+    even_lower: jax.Array
+    even_upper: jax.Array
+
+
+class CyclicReductionFactors(NamedTuple):
+    """Reusable cyclic-reduction tree: reduction levels, then a Thomas leaf.
+
+    Returned by :func:`block_cyclic_reduction_factor` and accepted by
+    :func:`block_thomas_solve`, primal, transposed and adjoint.
+    """
+
+    levels: tuple[CyclicReductionLevel, ...]
+    leaf: NormalizedBlockTridiagFactors
+
+
+def _blocks_times(blocks, x, transpose=False):
+    """``blocks[k] @ x[k]`` (or ``blocks[k].T @ x[k]``) for vector or matrix ``x[k]``."""
+    return jnp.einsum("kji,kj...->ki..." if transpose else "kij,kj...->ki...", blocks, x)
+
+
+def block_cyclic_reduction_factor(
+    lower: jax.Array,
+    diag: jax.Array,
+    upper: jax.Array,
+    *,
+    cutoff: int = 8,
+    factor_dtype=None,
+) -> CyclicReductionFactors:
+    """Factor by block cyclic reduction down to ``cutoff`` rows, then Thomas.
+
+    Each level eliminates the odd rows ``j``, all at once: with
+    ``P_j = D_j^{-1} L_j`` and ``Q_j = D_j^{-1} U_j`` from one batched LU, the
+    even rows ``i`` form the half-size block-tridiagonal system
+
+        ``L'_i = -L_i P_{i-1}``, ``D'_i = D_i - L_i Q_{i-1} - U_i P_{i+1}``,
+        ``U'_i = -U_i Q_{i+1}``,
+
+    which is reduced again until at most ``cutoff`` rows remain and is then
+    factored by :func:`block_thomas_factor` with ``normalized=True``. Total
+    work stays ``O(n_blocks m^3)`` with a larger constant than Thomas; the
+    dependency chain shortens from ``n_blocks`` to about
+    ``log2(n_blocks / cutoff) + cutoff`` batched steps. Partial pivoting is
+    within blocks only, and the elimination order differs from Thomas, so it
+    can meet a different (possibly singular) diagonal block on the same
+    invertible matrix. Arguments and the ignored ``lower[0]``/``upper[-1]``
+    follow :func:`block_thomas_factor`; ``cutoff >= n_blocks`` is plain
+    Thomas.
+    """
+    if cutoff < 1:
+        raise ValueError("cutoff must be positive")
+    lower, diag, upper = map(jnp.asarray, (lower, diag, upper))
+    work = jnp.result_type(diag)
+    fdt = work if factor_dtype is None else factor_dtype
+    levels = []
+    while diag.shape[0] > cutoff:
+        n = diag.shape[0]
+        n_odd, n_even = n // 2, (n + 1) // 2
+        odd_upper = upper[1::2]
+        if n % 2 == 0:  # the last odd row is the last row: its upper block is ignored
+            odd_upper = odd_upper.at[-1].set(0)
+        odd_lu, odd_piv = jax.vmap(lu_factor)(diag[1::2].astype(fdt))
+        transfers = jax.vmap(lambda a, b, r: lu_solve((a, b), r))(
+            odd_lu, odd_piv, jnp.concatenate((lower[1::2], odd_upper), -1).astype(fdt)
+        ).astype(work)
+        p_odd, q_odd = transfers[..., : diag.shape[-1]], transfers[..., diag.shape[-1] :]
+        even_lower, even_diag, even_upper = lower[0::2], diag[0::2], upper[0::2]
+        zero = jnp.zeros_like(even_diag[:1])
+        new_diag = even_diag.at[1:].add(-(even_lower[1:] @ q_odd[: n_even - 1]))
+        new_diag = new_diag.at[:n_odd].add(-(even_upper[:n_odd] @ p_odd))
+        new_lower = jnp.concatenate((zero, -(even_lower[1:] @ p_odd[: n_even - 1])))
+        new_upper = -(even_upper[:n_odd] @ q_odd)
+        if n_odd < n_even:
+            new_upper = jnp.concatenate((new_upper, zero))
+        levels.append(
+            CyclicReductionLevel(odd_lu, odd_piv, p_odd, q_odd, even_lower, even_upper)
+        )
+        lower, diag, upper = new_lower, new_diag, new_upper
+    leaf = cast(
+        NormalizedBlockTridiagFactors,
+        block_thomas_factor(lower, diag, upper, factor_dtype=factor_dtype, normalized=True),
+    )
+    return CyclicReductionFactors(tuple(levels), leaf)
+
+
+def _cyclic_reduction_solve(
+    factors: CyclicReductionFactors, rhs: jax.Array, transpose: bool
+) -> jax.Array:
+    """Primal or transposed substitution through a cyclic-reduction tree.
+
+    With odd rows ordered first, a level is ``[[E, F], [G, H]]``, ``T =
+    E^{-1} F`` and the reduced matrix ``S = H - G T``. Primal: ``g = E^{-1}
+    b_o``, ``x_e = S^{-1}(b_e - G g)``, ``x_o = g - T x_e``. Transposed, from
+    the same tree: ``x_e = S^{-T}(b_e - T^T b_o)``, ``x_o = E^{-T}(b_o - G^T
+    x_e)``.
+    """
+    rhs = jnp.asarray(rhs)
+    fdt = factors.leaf.delta_lu.dtype
+    work = jnp.result_type(rhs, factors.leaf.coupling)
+    trans = int(transpose)
+
+    def odd_solve(level, v):
+        return jax.vmap(lambda a, b, r: lu_solve((a, b), r.astype(fdt), trans=trans))(
+            level.odd_lu, level.odd_piv, v
+        ).astype(work)
+
+    def pad(v, n):  # append zero rows up to length n
+        return jnp.concatenate((v, jnp.zeros((n - v.shape[0], *v.shape[1:]), v.dtype)))
+
+    stack = []
+    for level in factors.levels:
+        n_odd, n_even = level.odd_lu.shape[0], level.even_lower.shape[0]
+        b_odd, b_even = rhs[1::2], rhs[0::2]
+        if transpose:
+            moved = _blocks_times(level.lower_transfer, b_odd, True)
+            reduced = b_even - pad(moved, n_even)
+            reduced = reduced.at[1:].add(
+                -_blocks_times(level.upper_transfer[: n_even - 1], b_odd[: n_even - 1], True)
+            )
+            stack.append((level, b_odd))
+        else:
+            g = odd_solve(level, b_odd)
+            reduced = b_even.at[1:].add(-_blocks_times(level.even_lower[1:], g[: n_even - 1]))
+            reduced = reduced.at[:n_odd].add(-_blocks_times(level.even_upper[:n_odd], g))
+            stack.append((level, g))
+        rhs = reduced
+    x = _block_thomas_solve_normalized(factors.leaf, rhs, transpose)
+    for level, saved in reversed(stack):
+        n_odd = level.odd_lu.shape[0]
+        x_prev, x_next = x[:n_odd], pad(x[1:], n_odd)[:n_odd]
+        if transpose:
+            from_next = _blocks_times(level.even_lower[1:], x[1:], True)
+            pulled = _blocks_times(level.even_upper[:n_odd], x_prev, True) + pad(
+                from_next, n_odd
+            )[:n_odd]
+            x_odd = odd_solve(level, saved - pulled)
+        else:
+            x_odd = (
+                saved
+                - _blocks_times(level.lower_transfer, x_prev)
+                - _blocks_times(level.upper_transfer, x_next)
+            )
+        merged = jnp.zeros((x.shape[0] + n_odd, *x.shape[1:]), work)
+        x = merged.at[0::2].set(x).at[1::2].set(x_odd)
+    return x
+
+
 def block_thomas_solve(
     factors: BlockTridiagFactors
     | NormalizedBlockTridiagFactors
+    | CyclicReductionFactors
     | GeneratedBlockTridiagFactors,
     rhs: jax.Array,
     transpose: bool = False,
@@ -761,7 +923,8 @@ def block_thomas_solve(
 
     :class:`NormalizedBlockTridiagFactors` (``normalized=True``) solve through
     the stored ``C_k`` and apply each Schur LU once rather than twice, with the
-    same transpose and adjoint contracts.
+    same transpose and adjoint contracts, and so do the
+    :class:`CyclicReductionFactors` of :func:`block_cyclic_reduction_factor`.
 
     Args:
         factors: output of :func:`block_thomas_factor` or
@@ -784,6 +947,8 @@ def block_thomas_solve(
         return _block_thomas_solve_regenerated(factors, rhs, transpose)
     if isinstance(factors, NormalizedBlockTridiagFactors):
         return _block_thomas_solve_normalized(factors, rhs, transpose)
+    if isinstance(factors, CyclicReductionFactors):
+        return _cyclic_reduction_solve(factors, rhs, transpose)
     delta_lu, delta_piv, lower, upper = factors
     # Indexing the stored bands directly, not through ``upper[:-1]`` / ``lower[1:]``:
     # inside ``jit`` the slice of a parameter materializes a copy of the band.

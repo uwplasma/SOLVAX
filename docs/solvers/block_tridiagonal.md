@@ -603,6 +603,131 @@ The Schur-complement factors use low precision; working-precision residuals and
 defect corrections recover accuracy when the conditioning permits. See
 {doc}`mixed_precision` for the convergence condition and diagnostics.
 
+## Cyclic reduction with a Thomas cutoff
+
+```python
+factors = sx.block_cyclic_reduction_factor(lower, diag, upper, cutoff=8)
+x = sx.block_thomas_solve(factors, rhs)
+x_t = sx.block_thomas_solve(factors, rhs, transpose=True)  # same tree
+```
+
+Thomas elimination is a chain of $N$ dependent steps. Cyclic reduction
+eliminates every odd block row at once, leaving a block-tridiagonal system
+on the even rows with about half as many blocks, and repeats until at most
+`cutoff` rows remain; those are factored by normalized block Thomas
+(`block_thomas_factor(..., normalized=True)`). The factors do not depend on
+the right-hand side.
+
+**One level.** Odd rows do not couple to each other, so each $D_j$ ($j$ odd)
+is factored independently, with one LU and the combined right-hand side
+$[L_j\;\,U_j]$:
+
+$$
+P_j=D_j^{-1}L_j,\qquad Q_j=D_j^{-1}U_j,\qquad
+x_j=g_j-P_jx_{j-1}-Q_jx_{j+1},\quad g_j=D_j^{-1}b_j .
+$$
+
+Substituting into the retained rows $i$ gives the reduced system, with the
+products in this order because the blocks do not commute:
+
+$$
+L'_i=-L_iP_{i-1},\qquad
+D'_i=D_i-L_iQ_{i-1}-U_iP_{i+1},\qquad
+U'_i=-U_iQ_{i+1},\qquad
+b'_i=b_i-L_ig_{i-1}-U_ig_{i+1}.
+$$
+
+Terms whose neighbor does not exist are omitted, so any $N\ge1$ works and each
+level has $\lceil N/2\rceil$ rows. Solving the reduced system and then applying
+the substitution for $x_j$ recovers the odd rows.
+
+**Transpose from the same tree.** Order the odd rows first at one level:
+$\begin{bmatrix}E&F\\G&H\end{bmatrix}$ with $E$ block diagonal, $T=E^{-1}F$
+(the stored $[P_j\;Q_j]$) and $S=H-GT$ the reduced matrix. Then
+
+$$
+x_e=S^{-T}\,(b_e-T^{\mathsf T}b_o),\qquad x_o=E^{-T}(b_o-G^{\mathsf T}x_e),
+$$
+
+which needs the retained rows' couplings $G=[L_i\;U_i]$ as well as $T$. Both
+are stored per level, together with the odd LU factors, so primal, transpose
+(`transpose=True`) and conjugate-transpose (`adjoint=True`) solves, and
+therefore forward- and reverse-mode derivatives, use one tree.
+
+**Cutoff and storage.** `cutoff` is the largest chain left to Thomas;
+`cutoff >= N` is plain normalized Thomas and `cutoff=1` reduces fully. The
+tree stores about 1.6 times the data of a Thomas factor (odd LU, $[P\;Q]$ and
+$[L\;U]$ per level, plus the leaf), and the factorization needs temporary
+storage of about the same size as the input bands. `factor_dtype` follows
+`block_thomas_factor`: the odd-row LU and the leaf Schur LU use it, the
+products stay in the working precision.
+
+**Stability.** Pivoting is inside blocks only, and cyclic reduction eliminates
+in a different order than Thomas, so the two can meet different diagonal
+blocks on the same invertible matrix. For $\begin{bmatrix}0&I\\I&0\end{bmatrix}$
+both break down (singular diagonal blocks) and return non-finite values; neither
+route silently returns a finite wrong answer. Check the residual of the original
+operator, for example with `block_tridiag_relative_residual`, as for Thomas.
+
+**Measured regime.**
+
+Time ratios are the median of paired samples, cyclic reduction divided by
+normalized Thomas (`block_thomas_factor(..., normalized=True)`), with the same
+arrays and compiled executables; below 1 is faster. Bands are VMEX's scaled
+QA force bands ($N=31$, $m=150$) and synthetic nonsymmetric chains
+($N=101$, $m=150$; $N=51$, $m=384$), float64, 8 right-hand sides,
+`benchmarks/benchmark_block_factors.py`, JAX 0.12.0.1.
+
+| Device | Shape | Factor | Apply, 1 rhs | Apply, 8 rhs | Transpose apply, 8 rhs | Tree storage | Factor temporary |
+|---|---|---:|---:|---:|---:|---:|---:|
+| CPU, 8 cores, shared | 31x150 | 1.31-1.45 | 1.08-1.13 | 0.93-1.05 | 1.29-1.34 | 1.5-1.6x | 19 MB vs 0.5 MB |
+| CPU, 8 cores, shared | 101x150 | 1.35-1.62 | 1.06-1.10 | 1.95-2.44 | 1.16-1.34 | 1.6-1.7x | 63 MB vs 0.5 MB |
+| CPU, 8 cores, shared | 51x384 | 0.97-1.05 | 0.87-1.05 | 1.22-1.62 | 0.90-1.11 | 1.6-1.7x | 209 MB vs 3.5 MB |
+| RTX A4000 | 31x150 | 0.55-0.59 | 0.58-0.88 | 0.36-0.59 | 0.23-0.40 | 1.5-1.7x | 29 MB vs 6 MB |
+| RTX A4000 | 101x150 | 0.39-0.41 | 0.38-0.48 | 0.23-0.29 | 0.11-0.15 | 1.6-1.7x | 81-90 MB vs 19 MB |
+| RTX A4000 | 51x384 | 0.93-1.00 | 0.72-0.85 | 0.50-0.52 | 0.19-0.25 | 1.6-1.7x | 269 MB vs 64 MB |
+
+Ranges span cutoffs 2, 4 and 8 (cutoff 1 and 16 on the GPU differ by a few
+percent). The residual of the original operator is within a factor 1.5 of
+Thomas for every cutoff, primal and transposed.
+
+- **CPU: cyclic reduction loses.** It factors up to 1.6 times slower than
+  Thomas on the two 150-wide shapes and ties on the 384-wide one; applications
+  are equal or slower. The per-row arithmetic is larger than Thomas's (one LU
+  and a $2m$-column solve, then four $m\times m$ products, per eliminated
+  row). Its tree is about 1.6 times larger and the factorization needs tens to
+  hundreds of megabytes of temporary storage. The CPU runs were pinned to 8
+  cores of a 36-core machine whose load average was 37-70, so absolute times
+  are inflated several times. The bootstrap 95% intervals of the factor ratio
+  exclude 1 at 31x150 and 101x150 and include it at 51x384; most apply
+  intervals include 1. Only "not faster" is supported.
+- **GPU: cyclic reduction wins on application and, for $m=150$, on
+  factorization.** Each level is a few large batched operations, while the
+  Thomas scan is $O(N)$ dependent small ones, the likely reason (no profile was
+  taken). Thomas's transposed application is slower than its primal one on the
+  GPU, so the transposed solve gains most (2.5 to 9 times). At $m=384$ the factorization ties (0.93-1.00) and only the
+  applications gain.
+- The GPU measurements were taken on a shared machine: both A4000s were
+  occupied by other jobs at the start of the session. The ratios repeat
+  between two processes on one GPU and a third on the other to within 0.05, but
+  absolute times differed by up to 2.4 times between the GPUs (the other one
+  shared with a running job), so treat them as a contended-machine result.
+- `cutoff` between 2 and 8 changes the factor time by under 10% on both
+  devices; larger cutoffs help the factorization only at $N=51$ and $m=384$
+  and slow the transposed application.
+- Float32 Schur LU (`factor_dtype=jnp.float32`) is faster to factor on both
+  devices but, on the QA bands, leaves a relative residual of $10^{-2}$; it is
+  a preconditioner there, not a solver.
+
+A different assembly of one level (single $[L\;U]$ and $[P\;Q]$ arrays with
+two batched products, or stacking and reshaping instead of scattering rows
+back) was measured on the QA bands and not adopted: the temporary storage grew
+from 19 to 22 MB or stayed at 19 MB, and no time ratio moved by more than the
+run-to-run noise.
+
+Use cyclic reduction on an accelerator, with `cutoff` 2 to 8, when the same
+factors are applied several times or transposed; keep Thomas on CPU.
+
 ## Comparison with alternatives
 
 | Method | Prefer when | Difference from block Thomas |
@@ -611,7 +736,7 @@ defect corrections recover accuracy when the conditioning permits. See
 | Banded LU | scalar bandwidth is small but not naturally blocked | scalar band storage and static pivoting |
 | Dense LU | only tiny systems or validation | ignores structure and scales cubically in total size |
 | FGMRES + block preconditioner | extra nonlocal couplings perturb a block-tridiagonal core | matrix-free outer solve; direct method becomes approximate inverse |
-| Cyclic reduction | massive parallelism dominates sequential sweep cost | more parallel work and different numerical/storage trade-offs |
+| Cyclic reduction | the sequential chain, not arithmetic, limits the device (see the cyclic reduction section above) | $O(\log N)$ dependent batches instead of $N$; more factor arithmetic per row, about 1.6 times the stored data; different pivot order; loses on CPU, wins on the measured GPU |
 
 ## Failure modes
 
@@ -632,6 +757,9 @@ defect corrections recover accuracy when the conditioning permits. See
 - {func}`solvax.direct.block_thomas_factor` (`normalized=True`)
 - {class}`solvax.direct.NormalizedBlockTridiagFactors`
 - {func}`solvax.direct.block_thomas_factor_fn`
+- {func}`solvax.direct.block_cyclic_reduction_factor`
+- {class}`solvax.direct.CyclicReductionFactors`
+- {class}`solvax.direct.CyclicReductionLevel`
 - {class}`solvax.direct.GeneratedBlockTridiagFactors`
 - {func}`solvax.direct.block_thomas_factor_ops`
 - {class}`solvax.direct.OperatorBlockTridiagFactors`

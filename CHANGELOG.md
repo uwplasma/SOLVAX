@@ -17,6 +17,18 @@
   more scalars while the input bands stay live. `benchmarks/benchmark_block_factors.py`
   compares the routes on saved bands. See `docs/solvers/block_tridiagonal.md`.
 
+- `block_cyclic_reduction_factor(lower, diag, upper, cutoff=8, factor_dtype=None)`
+  factors a block-tridiagonal matrix by cyclic reduction: each level eliminates
+  the odd block rows with one batched LU per level and the combined right-hand
+  side `[L U]`, until at most `cutoff` rows remain, which are factored by
+  normalized block Thomas. The returned `CyclicReductionFactors` are applied by
+  `block_thomas_solve` (primal, `transpose=True`, `adjoint=True`, vector or
+  matrix right-hand sides, JIT, `vmap`, JVP and VJP) from one tree. Opt-in. On an
+  RTX A4000 it factors 1.0-2.5x faster and applies 1.7-4x (transposed 2.5-9x) faster
+  than normalized Thomas on 31-101 blocks of 150-384; on 8 shared CPU cores it
+  factors up to 1.6x slower. It stores about 1.6x the data. See
+  `docs/solvers/block_tridiagonal.md`.
+
 ## 0.32.1 - 2026-10-24
 
 - `generalized_eigenpairs`: the eigenvector tangent of an exactly degenerate pair is no longer
