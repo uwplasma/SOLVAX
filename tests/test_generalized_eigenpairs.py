@@ -300,8 +300,55 @@ def test_cluster_mean_derivative_survives_degeneracy(split):
     h = 1e-6
     fd = (mean(t0 + h * dt) - mean(t0 - h * dt)) / (2 * h)
     np.testing.assert_allclose(jax.jvp(mean, (t0,), (dt,))[1], fd, atol=1e-8)
-    if split == 0.0:  # a degenerate eigenvector is not differentiable: NaN, not a wrong number
-        assert bool(jnp.isnan(jax.jvp(lambda t: solve(t).vectors, (t0,), (dt,))[1]).all())
+    if split == 0.0:  # a degenerate eigenvector is gauge fixed: no rotation inside the pair
+        Y, dY = (
+            np.asarray(a).reshape(-1, 2) for a in jax.jvp(lambda t: solve(t).vectors, (t0,), (dt,))
+        )
+        Gm, dGm = (np.asarray(_dense(_hermitian(B))) for B in (G, dG))
+        np.testing.assert_allclose(Y.conj().T @ Gm @ dY, -0.05 * Y.conj().T @ dGm @ Y, atol=1e-8)
+
+
+def _degenerate_pair(cplx):
+    """``F = blockdiag(I2, diag(3, 4))``, ``G = I``: the pair nearest ``1.0`` is degenerate."""
+    z = jnp.zeros((2, 2, 2))
+    d = jnp.stack([jnp.eye(2), jnp.diag(jnp.array([3.0, 4.0]))]).astype(complex if cplx else float)
+    eye = (z, jnp.stack([jnp.eye(2)] * 2).astype(d.dtype), z)
+    dF = _band(np.random.default_rng(7), 2, 2, cplx)
+    return (z, d, z), eye, dF
+
+
+@pytest.mark.parametrize("cplx", [False, True], ids=["real", "complex"])
+def test_reverse_mode_through_exact_degeneracy_is_finite(cplx):
+    """Reverse mode transposes the whole tangent map, so a NaN anywhere in it (even one multiplied
+    by a zero cotangent) leaks: ``grad`` of the cluster mean and of a subspace-invariant function
+    of the vectors must be finite, correct, and free of non-finite constants."""
+    F, G, dF = _degenerate_pair(cplx)
+    solve = lambda t: sx.generalized_eigenpairs(_along(F, dF, t), G, 1.0, 2)  # noqa: E731
+    mean = lambda t: solve(t).values.mean()  # noqa: E731
+    r = solve(0.0)
+    assert bool(r.converged) and float(r.gap) > 0.5
+    Y = np.asarray(r.vectors).reshape(-1, 2)
+    projected_trace = np.trace(Y.conj().T @ np.asarray(_dense(_hermitian(dF))) @ Y).real / 2
+    h = 1e-6
+    fd = (mean(h) - mean(-h)) / (2 * h)
+    np.testing.assert_allclose(jax.grad(mean)(0.0), projected_trace, atol=1e-12)
+    np.testing.assert_allclose(fd, projected_trace, atol=1e-8)
+
+    weights = jax.random.normal(jax.random.PRNGKey(0), (4, 4))
+
+    def invariant(t):  # the projector on the pair does not depend on the gauge
+        Yt = solve(t).vectors.reshape(4, 2)
+        return jnp.sum(weights * jnp.real(Yt @ jnp.conj(Yt.T)))
+
+    pullback = jax.vjp(invariant, 0.0)[1]
+    np.testing.assert_allclose(
+        pullback(1.0)[0], (invariant(h) - invariant(-h)) / (2 * h), atol=1e-7
+    )
+    for fn in (jax.vjp(mean, 0.0)[1], pullback):
+        consts = jax.make_jaxpr(fn)(1.0).consts
+        assert all(
+            np.isfinite(np.asarray(c)).all() for c in consts if np.asarray(c).dtype.kind in "fc"
+        )
 
 
 def test_jit_and_vmap(pencil):
