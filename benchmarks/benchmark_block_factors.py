@@ -41,6 +41,8 @@ ROUTES = {
     "normalized": partial(block_thomas_factor, normalized=True),
     "stored-f32lu": partial(block_thomas_factor, factor_dtype=jnp.float32),
     "normalized-f32lu": partial(block_thomas_factor, factor_dtype=jnp.float32, normalized=True),
+    # All-FP32 factor arithmetic: the bands are rounded to FP32 before the sweep.
+    "stored-f32": lambda *bands: block_thomas_factor(*(b.astype(jnp.float32) for b in bands)),
 }
 
 
