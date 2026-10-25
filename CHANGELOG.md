@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- `fast_diagonal(..., weights=[w_a])` solves `shift - coefficient * sum_a w_a laplacian_a`: the
+  eigenvectors are the unweighted ones, only the eigenvalue sum changes. Weights are differentiable.
+- `fast_diagonal_schur(widths, kinds, component_shifts, viscous_coefficient)` is the spectral
+  multiplier `sum_c lam_c / (s_c + nu sum_a lam_a)` of the Schur complement `-D H^-1 G` of a
+  constraint stage `H u + G q = b`, `D u = 0` with component-wise damping and implicit viscosity:
+  its `solve` is exact where the viscous operator commutes with the gradient, and
+  `solve_exact(rhs, gradient, divergence, helmholtz)` is the exact stage by PCG on the Schur
+  complement preconditioned with the multiplier (volume-mean gauge for no-flux pressure, reported
+  defect, NaN value and derivatives on failure, implicit derivatives in whatever the callables
+  close over). Closes #159.
+
 - `fast_diagonal(widths, kinds, shift, coefficient)` factors `shift - coefficient * laplacian` on a
   rectilinear cell-centred grid (Dirichlet, Neumann or periodic axes) into three contractions and a
   divide: `FastDiagonal.solve` with a real `transpose=True`, a zero-volume-mean pseudo-inverse on the

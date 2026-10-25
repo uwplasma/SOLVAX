@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+from collections.abc import Callable, Sequence
 from typing import Any, NamedTuple
 
 import equinox as eqx
@@ -39,9 +40,11 @@ from solvax.pcg import pcg_linear_solve
 
 __all__ = [
     "FastDiagonal",
+    "FastDiagonalSchur",
     "FluxFormOperator",
     "SpdSolveInfo",
     "fast_diagonal",
+    "fast_diagonal_schur",
     "flux_form_operator",
 ]
 
@@ -118,14 +121,18 @@ def _is_zero(value) -> bool:
 
 
 class FastDiagonal(eqx.Module):
-    """The separable operator ``shift - coefficient * laplacian``, applied and inverted spectrally.
+    """The separable operator ``shift - coefficient * sum_a weights[a] * laplacian_a``.
 
-    Cell-space convention: ``solve(r)`` returns ``x`` with ``(shift - coefficient * laplacian) x
-    = r``, ``laplacian`` the finite-volume one (per unit volume), so the operator is symmetric
-    only in the volume-weighted inner product and ``transpose=True`` solves the plain transpose.
-    With ``shift == 0`` and no Dirichlet axis the constants are its null space (``singular``):
-    the solve is the pseudo-inverse, which drops the volume-mean part of ``r`` and returns zero
-    volume mean. ``shift`` and ``coefficient`` are leaves and differentiable (the solve is a
+    It is applied and inverted spectrally. The eigenvectors are the unweighted ones: ``weights``
+    (one scalar per axis) only change the eigenvalue sum, so the solve stays three contractions
+    and a divide.
+
+    Cell-space convention: ``solve(r)`` returns ``x`` with ``(shift - coefficient * laplacian) x =
+    r``, ``laplacian`` the finite-volume one (per unit volume), so the operator is symmetric only
+    in the volume-weighted inner product and ``transpose=True`` solves the plain transpose. With
+    ``shift == 0`` and no Dirichlet axis the constants are its null space (``singular``): the
+    solve is the pseudo-inverse, which drops the volume-mean part of ``r`` and returns zero volume
+    mean. ``shift``, ``coefficient`` and ``weights`` are leaves and differentiable (the solve is a
     direct formula in them); the widths are geometry and are not differentiated. Build with
     :func:`fast_diagonal`.
     """
@@ -136,13 +143,20 @@ class FastDiagonal(eqx.Module):
     volumes: jax.Array
     shift: jax.Array
     coefficient: jax.Array
+    weights: jax.Array
     singular: bool = eqx.field(static=True)
+
+    def _axes(self) -> list[jax.Array]:
+        """The 1-D eigenvalues of ``-laplacian_a``, each broadcast along its own axis."""
+        n = len(self.basis)
+        return [
+            lam.reshape([-1 if i == a else 1 for i in range(n)])
+            for a, lam in enumerate(self.eigenvalues)
+        ]
 
     def symbol(self) -> jax.Array:
         """The eigenvalue of every mode, on the grid shape."""
-        total: Any = 0.0
-        for axis, lam in enumerate(self.eigenvalues):
-            total = total + lam.reshape([-1 if i == axis else 1 for i in range(len(self.basis))])
+        total: Any = sum(w * lam for w, lam in zip(self.weights, self._axes(), strict=True))
         return self.shift + self.coefficient * total
 
     def matvec(self, x: jax.Array) -> jax.Array:
@@ -166,24 +180,38 @@ class FastDiagonal(eqx.Module):
         return jnp.sum(self.symbol()) / (self.volumes.size - self.singular)
 
 
-def fast_diagonal(widths, kinds, *, shift=0.0, coefficient=1.0) -> FastDiagonal:
-    """Factor ``shift - coefficient * laplacian`` on cells of ``widths`` (one 1-D array per axis).
-
-    ``kinds`` gives each axis ``"dirichlet"``, ``"neumann"`` or ``"periodic"``, all homogeneous
-    (boundary data belong in the right-hand side). The widths must be concrete. ``shift == 0``,
-    concretely, on a grid with no Dirichlet axis is the singular case of :class:`FastDiagonal`.
-    """
+def _factor(widths, kinds) -> dict[str, Any]:
+    """The eigen-factors, volumes and null-space flag shared by every separable operator."""
     if len(widths) != len(kinds):
         raise ValueError("widths and kinds need one entry per axis")
     modes = [_axis_modes(w, k) for w, k in zip(widths, kinds, strict=True)]
     real = jnp.result_type(float)
+    return dict(
+        basis=tuple(jnp.asarray(m[0], real) for m in modes),
+        inverse=tuple(jnp.asarray(m[1], real) for m in modes),
+        eigenvalues=tuple(jnp.asarray(m[2], real) for m in modes),
+        volumes=jnp.asarray(_volumes(widths), real),
+    )
+
+
+def fast_diagonal(widths, kinds, *, shift=0.0, coefficient=1.0, weights=None) -> FastDiagonal:
+    """Factor ``shift - coefficient * sum_a weights[a] * laplacian_a`` on cells of ``widths``.
+
+    ``widths`` is one 1-D array of cell widths per axis. ``kinds`` gives each axis
+    ``"dirichlet"``, ``"neumann"`` or ``"periodic"``, all homogeneous (boundary data belong in the
+    right-hand side). ``weights`` is one scalar per axis (default one). The widths must be
+    concrete. ``shift == 0``, concretely, on a grid with no Dirichlet axis is the singular case
+    of :class:`FastDiagonal`.
+    """
+    real = jnp.result_type(float)
+    weights = jnp.ones(len(widths), real) if weights is None else jnp.asarray(weights, real)
+    if weights.shape != (len(widths),):
+        raise ValueError("weights needs one scalar per axis")
     return FastDiagonal(
-        tuple(jnp.asarray(m[0], real) for m in modes),
-        tuple(jnp.asarray(m[1], real) for m in modes),
-        tuple(jnp.asarray(m[2], real) for m in modes),
-        jnp.asarray(_volumes(widths), real),
-        jnp.asarray(shift, real),
-        jnp.asarray(coefficient, real),
+        **_factor(widths, kinds),
+        shift=jnp.asarray(shift, real),
+        coefficient=jnp.asarray(coefficient, real),
+        weights=weights,
         singular=_is_zero(shift) and "dirichlet" not in kinds,
     )
 
@@ -412,3 +440,104 @@ def flux_form_operator(widths, kinds, conductivity, shift, coefficient) -> FluxF
     )
     widths = tuple(jnp.asarray(w, real) for w in widths)
     return FluxFormOperator(widths, k, s, c, lax.stop_gradient(pre), tuple(kinds))
+
+
+class FastDiagonalSchur(FastDiagonal):
+    """The spectral multiplier of the Schur complement ``S = -D H^{-1} G`` of a constraint stage.
+
+    The stage is ``H u + G q = b``, ``D u = 0`` with ``u`` one component per axis, ``G`` the
+    gradient from the pressure cells to the component faces, ``D`` the divergence, and ``H_c = s_c
+    - nu laplacian_c`` for component ``c`` (``s_c`` its shift, such as ``1 + dt * damping``; ``nu``
+    the viscous coefficient, such as ``dt * viscosity``; ``q = dt * p`` for a pressure ``p``).
+    Eliminating ``u`` leaves ``S q = -D H^{-1} b``. Where the viscous operator commutes with the
+    gradient (periodic axes, uniform spacing) ``S`` is diagonal in the pressure eigenbasis,
+
+        sum_c lam_c / (s_c + nu sum_a lam_a),
+
+    a multiplier that is not a Kronecker sum (with ``nu = 0`` it is one, ``weights = 1 / s_c``).
+    :meth:`solve` applies its inverse, exact on commuting axes; with walls it is a
+    preconditioner, and :meth:`solve_exact` is the exact stage. Cell-space and null-space
+    conventions are those of :class:`FastDiagonal` (``shift``, ``coefficient`` and ``weights`` are
+    unused); ``component_shifts`` and ``viscous_coefficient`` are differentiable leaves.
+    """
+
+    component_shifts: jax.Array
+    viscous_coefficient: jax.Array
+
+    def symbol(self) -> jax.Array:
+        axes = self._axes()
+        total: Any = sum(axes)
+        parts = (
+            a / (c + self.viscous_coefficient * total)
+            for a, c in zip(axes, self.component_shifts, strict=True)
+        )
+        return sum(parts)  # type: ignore[return-value]
+
+    def solve_exact(
+        self,
+        rhs: jax.Array,
+        gradient: Callable[[jax.Array], Sequence[jax.Array]],
+        divergence: Callable[[Sequence[jax.Array]], jax.Array],
+        helmholtz: Sequence[Callable[[jax.Array], jax.Array]],
+        *,
+        rtol: float | None = None,
+        max_steps: int = 200,
+        x0: jax.Array | None = None,
+        defect_rtol: float | None = None,
+    ) -> tuple[jax.Array, SpdSolveInfo]:
+        """Return ``q`` with ``-D H^{-1} G q = rhs`` exactly, and a :class:`SpdSolveInfo`.
+
+        ``gradient(q)`` returns the component fields ``G q``; ``divergence(fields)`` returns ``D``
+        of component fields, per unit volume; ``helmholtz[c](f)`` returns ``H_c^{-1} f``, the
+        caller's own solve of the component's viscous system with its wall conditions. PCG on
+        ``V S`` (``S`` is symmetric in the volume inner product) with :meth:`solve` as
+        preconditioner. For ``H u + G q = b``, ``D u = 0``: ``rhs = -D H^{-1} b``, then ``u =
+        H^{-1} (b - G q)``. All-Neumann pressure axes make ``S`` singular: the gauge,
+        compatibility defect and failure semantics are those of :meth:`FluxFormOperator.solve`,
+        and the solve is implicitly differentiable in ``rhs`` and in whatever the three callables
+        close over.
+        """
+        pre, volumes = lax.stop_gradient(self), self.volumes
+
+        def schur(p):
+            return -volumes * divergence(
+                [h(g) for h, g in zip(helmholtz, gradient(p), strict=True)]
+            )
+
+        valid = jnp.all(self.component_shifts > 0.0) & (self.viscous_coefficient >= 0.0)
+        return _spd_solve(
+            schur,
+            lambda r: pre.solve(r / volumes),
+            volumes * rhs,
+            volumes,
+            pre.scale,
+            pre.singular,
+            valid,
+            x0=x0,
+            rtol=rtol,
+            max_steps=max_steps,
+            defect_rtol=defect_rtol,
+        )
+
+
+def fast_diagonal_schur(
+    widths, kinds, component_shifts, viscous_coefficient=0.0
+) -> FastDiagonalSchur:
+    """Build :class:`FastDiagonalSchur` for pressure cells of ``widths`` and pressure ``kinds``.
+
+    ``component_shifts`` holds ``s_c`` for each axis' velocity component, ``viscous_coefficient``
+    the scalar ``nu``. ``kinds`` are the pressure's (no-flux walls are ``"neumann"``).
+    """
+    real = jnp.result_type(float)
+    shifts = jnp.asarray(component_shifts, real)
+    if shifts.shape != (len(widths),):
+        raise ValueError("component_shifts needs one entry per axis")
+    return FastDiagonalSchur(
+        **_factor(widths, kinds),
+        shift=jnp.zeros((), real),
+        coefficient=jnp.ones((), real),
+        weights=jnp.ones(len(widths), real),
+        singular="dirichlet" not in kinds,
+        component_shifts=shifts,
+        viscous_coefficient=jnp.asarray(viscous_coefficient, real),
+    )
