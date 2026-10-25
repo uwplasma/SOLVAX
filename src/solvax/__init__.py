@@ -24,13 +24,22 @@ from solvax.banded import (
     lu_solve_banded,
     lu_solve_banded_periodic,
 )
-from solvax.compression import column_groups, matrix_from_products, verify_products
+from solvax.compression import (
+    block_tridiagonal_from_products,
+    column_groups,
+    matrix_from_products,
+    verify_products,
+)
 from solvax.direct import (
     BlockTridiagFactors,
     ChainWindowPlan,
+    CyclicReductionFactors,
+    CyclicReductionLevel,
     GeneratedBlockTridiagFactors,
     LocalizationWindow,
+    NormalizedBlockTridiagFactors,
     OperatorBlockTridiagFactors,
+    block_cyclic_reduction_factor,
     block_thomas,
     block_thomas_checkpointed_fn,
     block_thomas_factor,
@@ -52,7 +61,7 @@ from solvax.direct import (
     plan_chain_windows,
     suggest_adjoint_window,
 )
-from solvax.eigen import eigenpair_reverse
+from solvax.eigen import EigenpairResult, eigenpair_reverse, generalized_eigenpairs
 from solvax.elliptic import (
     FourierHelmholtzOperator,
     build_fourier_helmholtz_operator,
@@ -105,6 +114,19 @@ from solvax.nonlinear import (
     pseudo_arclength_corrector,
     pseudo_arclength_residual,
     pseudo_transient_continuation,
+)
+from solvax.ode import (
+    BS3_2,
+    DOPRI5_4,
+    PAIRS,
+    RK4_2,
+    ERKPair,
+    ERKSolution,
+    PIController,
+    erk_integrate,
+    erk_step,
+    error_norm,
+    step_factor,
 )
 from solvax.operators import (
     BlockTridiagonalOperator,
@@ -203,7 +225,7 @@ from solvax.tridiagonal import (
     tridiagonal_solve_factored_checked,
 )
 
-__version__ = "0.28.2"
+__version__ = "0.33.0"
 
 __all__ = [
     "RECYCLE_DRIFT_ADVISORY",
@@ -226,13 +248,19 @@ __all__ = [
     "lu_solve_banded",
     "lu_solve_banded_periodic",
     "BlockTridiagFactors",
+    "CyclicReductionFactors",
+    "CyclicReductionLevel",
     "GeneratedBlockTridiagFactors",
+    "NormalizedBlockTridiagFactors",
     "OperatorBlockTridiagFactors",
     "block_tridiag_matvec",
     "block_tridiag_relative_residual",
     "eigenpair_reverse",
+    "EigenpairResult",
+    "generalized_eigenpairs",
     "estimate_rk4_timestep",
     "exponential_eigenpairs",
+    "block_cyclic_reduction_factor",
     "block_thomas",
     "ChainWindowPlan",
     "certified_adjoint_window",
@@ -375,10 +403,22 @@ __all__ = [
     "sparse_eigenvalue",
     "sparse_solve",
     "sparse_operator_matrix",
+    "block_tridiagonal_from_products",
     "column_groups",
     "matrix_from_products",
     "verify_products",
     "Equilibration",
     "equilibrate",
+    "BS3_2",
+    "DOPRI5_4",
+    "PAIRS",
+    "RK4_2",
+    "ERKPair",
+    "ERKSolution",
+    "PIController",
+    "erk_integrate",
+    "erk_step",
+    "error_norm",
+    "step_factor",
     "__version__",
 ]

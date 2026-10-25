@@ -2,6 +2,130 @@
 
 ## Unreleased
 
+## 0.33.0 - 2026-10-24
+
+- `factor_dtype` given as a real dtype for complex bands now selects the complex
+  dtype of that width (`float32` gives `complex64`) in `block_thomas_factor`,
+  `block_thomas_factor_fn` and `block_thomas_factor_ops`. It previously cast the
+  Schur blocks to a real dtype and discarded the imaginary part (relative solve
+  error 0.71 on a random complex128 chain).
+- `block_thomas_factor(..., normalized=True)` returns
+  `NormalizedBlockTridiagFactors(delta_lu, delta_piv, coupling, upper)`, which
+  keeps `C_k = Delta_k^{-1} L_k` from the Schur sweep so that `A = U_hat L_hat`.
+  `block_thomas_solve` accepts it directly and applies each Schur LU once per
+  block (`N` applications instead of `2N-1`) in the primal and the `transpose=True`
+  and `adjoint=True` solves, without a second factorization. The default record
+  and its field meanings are unchanged; the normalized record holds `N m^2`
+  more scalars while the input bands stay live. `benchmarks/benchmark_block_factors.py`
+  compares the routes on saved bands. See `docs/solvers/block_tridiagonal.md`.
+
+- `block_cyclic_reduction_factor(lower, diag, upper, cutoff=8, factor_dtype=None)`
+  factors a block-tridiagonal matrix by cyclic reduction: each level eliminates
+  the odd block rows with one batched LU per level and the combined right-hand
+  side `[L U]`, until at most `cutoff` rows remain, which are factored by
+  normalized block Thomas. The returned `CyclicReductionFactors` are applied by
+  `block_thomas_solve` (primal, `transpose=True`, `adjoint=True`, vector or
+  matrix right-hand sides, JIT, `vmap`, JVP and VJP) from one tree. Opt-in. On an
+  RTX A4000 it factors 1.0-2.5x faster and applies 1.7-4x (transposed 2.5-9x) faster
+  than normalized Thomas on 31-101 blocks of 150-384; on 8 shared CPU cores it
+  factors up to 1.6x slower. It stores about 1.6x the data. See
+  `docs/solvers/block_tridiagonal.md`.
+
+## 0.32.1 - 2026-10-24
+
+- `generalized_eigenpairs`: the eigenvector tangent of an exactly degenerate pair is no longer
+  NaN. The NaN was masked in the forward pass, but reverse mode transposes the whole tangent map,
+  so differentiating only `values` (a cluster mean) gave NaN in the value cotangent on some
+  XLA builds (NaN times a zero cotangent; seen on JAX 0.6.2, Python 3.10, Linux). Inside a
+  degenerate cluster the vector tangent is now the gauge with no intra-cluster rotation, solved
+  away from the cluster, so only subspace-invariant functions of `vectors` are meaningful there;
+  values, cluster means and separated eigenvectors are unchanged (within 1e-15).
+
+## 0.32.0 - 2026-10-24
+
+- `generalized_eigenpairs(F, G, target, count, tol, max_iter)` returns the
+  `count` eigenpairs of the Hermitian block-tridiagonal pencil `F y = λ G y`
+  nearest `target` (real symmetric or complex Hermitian, `G` positive definite
+  and parameter dependent) as an `EigenpairResult`: values, `G`-normalized
+  vectors, relative residuals, `G`-orthogonality error, iterations, a converged
+  flag, the gap to the nearest excluded Ritz value, and whether the dense
+  fallback ran. Shift-invert subspace iteration on `F - σG` factored by
+  `block_thomas_factor`; a probe solve detects a Schur-pivot breakdown (for
+  example the invertible `[[0, 1], [1, 0]]`) and switches to a dense pivoted LU.
+  First-order `jvp`/`vjp` are implicit: `dλ = Re yᴴ(dF - λ dG)y`, a bordered
+  eigenvector tangent with `Re(yᴴ G dy) = -½ yᴴ dG y` and `Im(yᴴ G dy) = 0`, and
+  the cluster mean through the trace of the projected perturbation. The second
+  derivative of the values is tested, that of the vectors is not. Its solves are
+  `lax.scan`s, so compile time does not grow with `n_blocks` (complex128, `m=13`,
+  `count=6`; cold compile plus first call, before to after: forward 1.8-10 s to
+  0.5-0.7 s and `grad` 7.9-167 s to 1.6-2.0 s for 50-400 blocks; warm time
+  unchanged). Reverse mode (`jax.grad`, `vjp`, `jacrev`) is tested on JAX 0.4.38,
+  0.6.2, 0.7.2, 0.9.2 and 0.12, each a CI job: the eigenvector tangent loops
+  over the `count` eigenpairs in Python instead of scanning over them, because
+  JAX's scan transpose raised `AssertionError` or `TypeError` on 0.6.2-0.9.2
+  for the scanned form. See `docs/solvers/generalized_eigenpairs.md`.
+- `block_thomas_solve(..., adjoint=True)` solves with the conjugate transpose
+  `Aᴴ` from the same factors (`transpose=True` is the plain transpose).
+
+## 0.31.0 - 2026-10-20
+
+- `SpluFactorization(backend="mumps")` also runs on the `python-mumps` wheels
+  (`pip install solvax[mumps-wheel]`; sequential MUMPS, no MPI) when PyMUMPS is absent, and takes `out_of_core=True` (ICNTL(22):
+  factors on disk, admission on MUMPS's out-of-core estimate INFOG(26)).
+  Measured on the DKX HSX QHS full-FP matrix (equilibrated, one process, 8
+  pinned cores of a shared 36-core host): 46,204 unknowns 7.4 s, 1.7 GB in core,
+  0.73 GB out of core, against 375 s and 7.8 GB for SuperLU; 66,004 unknowns
+  59 s, 3.8 GB in core, 1.45 GB out of core; 85,804 unknowns 139 s, 6.95 GB in
+  core, 2.8 GB out of core. Residual after five refinement sweeps 4e-15 to
+  2e-14 in every mode. The analysis estimate INFOG(16) was within 5% of the
+  measured peak (3,892 MB against 3.8 GB; 7,170 MB against 6.95 GB). The wheels
+  are built against NumPy 1, so under NumPy 2 (JAX 0.10 requires it) set
+  `SOLVAX_MUMPS_PYTHON` to an interpreter that has them: the matrix and
+  right-hand sides then cross a pipe to a worker process (`_mumps_worker.py`).
+
+## 0.30.0 - 2026-10-20
+
+- `solvax.ode`: `erk_step` (embedded explicit Runge-Kutta step with local-error
+  estimate and an optional stage projection), the `RK4_2`, `BS3_2` and
+  `DOPRI5_4` tableaux, `error_norm`, `PIController`/`step_factor`, and
+  `erk_integrate` (accept/reject loop under `jax.lax.while_loop`).
+
+## 0.29.0 - 2026-10-18
+
+- `block_tridiagonal_from_products(apply, blocks)` recovers a block-tridiagonal
+  operator from `3 ceil(m / batch)` batched products (blocks three apart never
+  share a row); `block_thomas_factor(..., shift=sigma)` factors `A - sigma I`.
+  Together with `factor_dtype=jnp.complex64` and `iterative_refinement` they
+  are a shift-invert solve for operators with a banded unknown ordering.
+- `block_thomas_solve` indexes the bands directly, so jit no longer copies them
+  (removes a GPU out-of-memory failure on large banded factors).
+
+## 0.28.5 - 2026-10-18
+
+- `gmres` and `gcrot` compile once per operator code and shape. Called eagerly
+  with a new closure each time, they retraced and recompiled the whole solve
+  (about 0.15 s of a 0.17 s call at n = 300); the closure's arrays and floats
+  now enter a module-level jit as arguments, so repeated solves reuse one
+  executable. Bound methods, callable objects and traced inputs take the
+  previous direct path; the API and differentiability are unchanged.
+
+## 0.28.4 - 2026-10-18
+
+- `pcg` and `pcg_linear_solve` skip the initial matvec when `x0` is `None`
+  (the residual is `b`), removing one traced copy of the operator per solve;
+  an explicit `x0`, including zeros, still applies it (#130).
+
+## 0.28.3 - 2026-10-15
+
+- `block_thomas_factor` and `block_thomas_factor_fn` run one scan over every
+  row and write the Schur factors straight into its stacked outputs; the bottom
+  row starts from an identity carry instead of being factored apart and
+  concatenated on. Compiled temporaries for a 64-block, 779-wide float64 system
+  fall from 937 MB to 24 MB (stored bands) and 330 MB to 24 MB (generated),
+  and the generated factor-plus-solve from 622 MB to 335 MB.
+
+## 0.23.0 to 0.28.2 - 2026-09-15 to 2026-10-07
+
 - `gcrot` warm starts (`recycle=`) no longer run an SVD on the n-by-k drift
   residual, which some backends serve with an n-by-n workspace (113 GB on a
   119k-unknown DKX deck): a thin QR reduces it to a k-by-k SVD with the same

@@ -102,6 +102,9 @@ factors = sx.block_thomas_factor(lower, diag, upper)
 x1 = sx.block_thomas_solve(factors, rhs1)
 x2 = sx.block_thomas_solve(factors, rhs2)
 
+# normalized=True keeps C_k = Delta_k^{-1} L_k: one Schur LU solve per block (N m^2 more storage)
+normalized = sx.block_thomas_factor(lower, diag, upper, normalized=True)
+
 # Generate each block once when reusable factors are needed without a stored
 # diagonal band. `row(j)` returns the triple (L_j, D_j, U_j) of row j; the
 # parameterized form `block_fn(params, j)` used further down takes the
@@ -239,7 +242,7 @@ within an order of magnitude of the limit as unconfirmed.
 | `solvax.elliptic` | N-D fully periodic Poisson inversion and periodic-by-bounded Fourier--Helmholtz solves, with reusable spectral symbols for timestep loops |
 | `solvax.krylov` | Flexible restarted GMRES (CGS2 + Givens) over arrays, scalars and arbitrary pytrees with optional custom inner products, and GCROT Krylov subspace recycling with FIFO or harmonic-Ritz (GCRO-DR) deflated restarting |
 | `solvax.propagator` | Residual-certified RK4 and nested exponential-Arnoldi eigenmode extraction without materializing the operator |
-| `solvax.eigen` | Solver-independent implicit reverse derivatives for externally certified eigenpairs, including eigenvector observables and exceptional-point guards |
+| `solvax.eigen` | `generalized_eigenpairs`: targeted shift-invert eigenpairs of Hermitian block-tridiagonal pencils `F y = λ G y` with first-order implicit derivatives; and solver-independent implicit reverse derivatives for externally certified eigenpairs, including eigenvector observables and exceptional-point guards |
 | `solvax.pcg` | Matrix-free pytree PCG with preconditioning, fixed-shape residual history, and explicit convergence/breakdown status |
 | `solvax.fixed_point` | Plain and Aitken fixed-point loops, bounded-memory (condition-filtered) Anderson, and matrix-free affine fixed-point FGMRES |
 | `solvax.implicit` | Matrix-free `newton_krylov` (JFNK) plus implicit-function-theorem `linear_solve` and `root_solve` — gradients cost one extra (transposed) solve |

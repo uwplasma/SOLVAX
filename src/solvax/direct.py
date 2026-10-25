@@ -64,7 +64,7 @@ import warnings
 from collections.abc import Callable
 from functools import partial
 from math import isqrt
-from typing import NamedTuple
+from typing import NamedTuple, cast
 
 import jax
 import jax.flatten_util
@@ -72,7 +72,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.scipy.linalg import lu_factor, lu_solve
 
-from solvax.refine import iterative_refinement
+from solvax.refine import _same_kind, iterative_refinement
 
 
 class BlockTridiagFactors(NamedTuple):
@@ -89,6 +89,30 @@ class BlockTridiagFactors(NamedTuple):
     delta_lu: jax.Array
     delta_piv: jax.Array
     lower: jax.Array
+    upper: jax.Array
+
+
+class NormalizedBlockTridiagFactors(NamedTuple):
+    """Reusable factors that keep the normalized lower couplings.
+
+    Returned by :func:`block_thomas_factor` with ``normalized=True``. They
+    represent ``A = U_hat L_hat``: ``U_hat`` is block upper bidiagonal with
+    diagonal ``Delta_k`` and upper band ``U_k``; ``L_hat`` is unit lower
+    bidiagonal with lower band ``C_k = Delta_k^{-1} L_k``. A solve then applies
+    each Schur LU once (``n_blocks`` triangular-solve pairs) instead of twice.
+
+    Attributes:
+        delta_lu: LU factors of every Schur complement ``Delta_k``,
+            shape ``(n_blocks, m, m)``.
+        delta_piv: matching pivot indices, shape ``(n_blocks, m)``.
+        coupling: ``C_k`` in the working precision, shape ``(n_blocks, m, m)``;
+            ``coupling[0]`` is zero.
+        upper: super-diagonal blocks ``U_k`` (``upper[-1]`` unused).
+    """
+
+    delta_lu: jax.Array
+    delta_piv: jax.Array
+    coupling: jax.Array
     upper: jax.Array
 
 
@@ -147,8 +171,14 @@ class GeneratedBlockTridiagFactors:
 
 
 def block_thomas_factor(
-    lower: jax.Array, diag: jax.Array, upper: jax.Array, factor_dtype=None
-) -> BlockTridiagFactors:
+    lower: jax.Array,
+    diag: jax.Array,
+    upper: jax.Array,
+    factor_dtype=None,
+    shift=None,
+    *,
+    normalized: bool = False,
+) -> BlockTridiagFactors | NormalizedBlockTridiagFactors:
     """Run the downward Schur sweep once, for reuse across right-hand sides.
 
     Args:
@@ -167,27 +197,66 @@ def block_thomas_factor(
             accuracy on fast low-precision hardware. Practically this is
             ``jnp.float32``: ``lu_factor`` dispatches to LAPACK/cuSOLVER
             ``getrf``, which has float32 and float64 kernels but no half
-            precision, so bfloat16/float16 fail at tracing or execution.
+            precision, so bfloat16/float16 fail at tracing or execution. For
+            complex bands a real ``factor_dtype`` selects the complex dtype of
+            that width (``float32`` gives ``complex64``).
+        shift: if given, factor ``A - shift I`` (subtracted from ``diag``, in
+            its dtype), the operator of a shift-invert eigensolve. The solves
+            then apply ``(A - shift I)^{-1}`` and, with ``transpose=True``,
+            its transpose.
+        normalized: return :class:`NormalizedBlockTridiagFactors`, which keep
+            ``C_k = Delta_k^{-1} L_k`` (computed by the sweep in any case) in
+            place of ``L_k``. Each later solve, primal or transposed, then
+            applies the Schur LU factors once per block instead of twice. The
+            couplings are new storage, ``n_blocks * m * m`` working-precision
+            scalars, where the default record aliases ``lower``.
 
     Returns:
         Factors for :func:`block_thomas_solve`.
     """
+    if shift is not None:
+        diag = diag - jnp.asarray(shift, diag.dtype) * jnp.eye(diag.shape[-1], dtype=diag.dtype)
     work = jnp.result_type(diag)
-    fdt = work if factor_dtype is None else factor_dtype
+    fdt = work if factor_dtype is None else _same_kind(factor_dtype, work)
+    first_row = jnp.arange(diag.shape[0]) == 0
+    last_row = jnp.arange(diag.shape[0]) == diag.shape[0] - 1
 
+    if normalized:
+        # Row k factors Delta_k = D_k - U_k C_{k+1} and emits C_k with it. The
+        # ignored lower[0] is replaced by zeros before the solve, so coupling[0]
+        # is exactly zero whatever the caller stored there.
+        def normalized_step(coupling_next, inputs):
+            d_k, u_k, l_k, first, last = inputs
+            delta_k = lu_factor((d_k - jnp.where(last, 0, u_k) @ coupling_next).astype(fdt))
+            coupling_k = lu_solve(delta_k, jnp.where(first, 0, l_k).astype(fdt)).astype(work)
+            return coupling_k, (delta_k, coupling_k)
+
+        _, ((delta_lu, delta_piv), coupling) = jax.lax.scan(
+            normalized_step,
+            jnp.zeros_like(diag[0]),
+            (diag, upper, lower, first_row, last_row),
+            reverse=True,
+        )
+        return NormalizedBlockTridiagFactors(delta_lu, delta_piv, coupling, upper)
+
+    m = diag.shape[-1]
+    identity = lu_factor(jnp.eye(m, dtype=fdt))
+    # One scan over all rows, written straight into its stacked outputs: the
+    # bottom row sees an identity carry and a masked coupling, so no
+    # concatenate copies the whole factor band after the sweep.
     def down_step(carry, inputs):
-        delta_next = carry
-        d_k, u_k, l_next = inputs
+        delta_next, l_next = carry
+        d_k, u_k, l_k, last_row = inputs
         x = lu_solve(delta_next, l_next.astype(fdt)).astype(work)
-        delta_k = lu_factor((d_k - u_k @ x).astype(fdt))
-        return delta_k, delta_k
+        delta_k = lu_factor((d_k - jnp.where(last_row, 0, u_k @ x)).astype(fdt))
+        return (delta_k, l_k), delta_k
 
-    last = lu_factor(diag[-1].astype(fdt))
-    inputs = (diag[:-1], upper[:-1], lower[1:])  # steps k = n-2 .. 0
-    _, (lus, pivs) = jax.lax.scan(down_step, last, inputs, reverse=True)
-
-    delta_lu = jnp.concatenate([lus, last[0][None]], axis=0)
-    delta_piv = jnp.concatenate([pivs, last[1][None]], axis=0)
+    _, (delta_lu, delta_piv) = jax.lax.scan(
+        down_step,
+        (identity, jnp.zeros_like(diag[0])),
+        (diag, upper, lower, last_row),
+        reverse=True,
+    )
     return BlockTridiagFactors(delta_lu, delta_piv, lower, upper)
 
 
@@ -239,32 +308,34 @@ def block_thomas_factor_fn(
     if n_blocks < 1:
         raise ValueError("n_blocks must be positive")
 
-    l_last, d_last, u_last = block_fn(jnp.int32(n_blocks - 1))
-    work = jnp.result_type(d_last)
-    fdt = work if factor_dtype is None else factor_dtype
-    last = lu_factor(d_last.astype(fdt))
+    _, d_probe, _ = jax.eval_shape(block_fn, jnp.int32(0))
+    work = d_probe.dtype
+    fdt = work if factor_dtype is None else _same_kind(factor_dtype, work)
+    m = d_probe.shape[-1]
+    identity = lu_factor(jnp.eye(m, dtype=fdt))
 
+    # A single scan over every row writes the factors straight into its
+    # stacked outputs. The bottom row starts from an identity carry and a
+    # masked coupling, so no concatenate copies the band after the sweep.
     def down_step(carry, index):
         delta_next, l_next = carry
         lower, diagonal, upper = block_fn(index)
         solved_lower = lu_solve(delta_next, l_next.astype(fdt)).astype(work)
-        delta = lu_factor((diagonal - upper @ solved_lower).astype(fdt))
-        # With the bands dropped nothing of size ``(n_blocks, m, m)`` beyond the
-        # Schur factors is ever stacked; only the running ``L`` sits in the
-        # carry, exactly as it must for the elimination itself.
+        coupling = jnp.where(index == n_blocks - 1, 0, upper @ solved_lower)
+        delta = lu_factor((diagonal - coupling).astype(fdt))
         emitted = (delta[0], delta[1])
         if store_offdiagonals:
             emitted += (lower, upper)
         return (delta, lower), emitted
 
+    zero = jnp.zeros((m, m), work)
     _, emitted = jax.lax.scan(
         down_step,
-        (last, l_last),
-        jnp.arange(n_blocks - 1, dtype=jnp.int32),
+        (identity, zero),
+        jnp.arange(n_blocks, dtype=jnp.int32),
         reverse=True,
     )
-    delta_lu = jnp.concatenate([emitted[0], last[0][None]], axis=0)
-    delta_piv = jnp.concatenate([emitted[1], last[1][None]], axis=0)
+    delta_lu, delta_piv = emitted[0], emitted[1]
     if not store_offdiagonals:
         return GeneratedBlockTridiagFactors(
             delta_lu=delta_lu,
@@ -274,10 +345,7 @@ def block_thomas_factor_fn(
             work_dtype=work,
         )
     return BlockTridiagFactors(
-        delta_lu=delta_lu,
-        delta_piv=delta_piv,
-        lower=jnp.concatenate([emitted[2], l_last[None]], axis=0),
-        upper=jnp.concatenate([emitted[3], u_last[None]], axis=0),
+        delta_lu=delta_lu, delta_piv=delta_piv, lower=emitted[2], upper=emitted[3]
     )
 
 
@@ -625,10 +693,213 @@ def _block_thomas_solve_regenerated(
     return solution
 
 
+def _block_thomas_solve_normalized(
+    factors: NormalizedBlockTridiagFactors, rhs: jax.Array, transpose: bool
+) -> jax.Array:
+    """Substitution through ``A = U_hat L_hat``, one Schur LU solve per block.
+
+    Primal: ``U_hat y = b`` upward, ``y_k = Delta_k^{-1}(b_k - U_k y_{k+1})``,
+    then ``x_k = y_k - C_k x_{k-1}`` downward. Transposed, ``A^T = L_hat^T
+    U_hat^T``: ``y_k = b_k - C_{k+1}^T y_{k+1}`` upward, then
+    ``x_k = Delta_k^{-T}(y_k - U_{k-1}^T x_{k-1})`` downward. Unrolled like the
+    stored-band solve below, for the same transpose reasons.
+    """
+    delta_lu, delta_piv, coupling, upper = factors
+    fdt = delta_lu.dtype
+    work = jnp.result_type(rhs, coupling)
+    n = rhs.shape[0]
+    mT = lambda a: jnp.swapaxes(a, -1, -2)  # noqa: E731
+
+    def tsolve(k, v, trans):
+        return lu_solve((delta_lu[k], delta_piv[k]), v.astype(fdt), trans=trans).astype(work)
+
+    y: list[jax.Array] = [None] * n  # type: ignore[list-item]
+    if transpose:
+        y[-1] = rhs[-1]
+        for k in range(n - 2, -1, -1):
+            y[k] = rhs[k] - mT(coupling[k + 1]) @ y[k + 1]
+        solution = [tsolve(0, y[0], 1)]
+        for k in range(1, n):
+            solution.append(tsolve(k, y[k] - mT(upper[k - 1]) @ solution[-1], 1))
+        return jnp.stack(solution)
+    y[-1] = tsolve(n - 1, rhs[-1], 0)
+    for k in range(n - 2, -1, -1):
+        y[k] = tsolve(k, rhs[k] - upper[k] @ y[k + 1], 0)
+    solution = [y[0]]
+    for k in range(1, n):
+        solution.append(y[k] - coupling[k] @ solution[-1])
+    return jnp.stack(solution)
+
+
+class CyclicReductionLevel(NamedTuple):
+    """One odd-row elimination of :func:`block_cyclic_reduction_factor`.
+
+    Attributes:
+        odd_lu, odd_piv: LU factors of the eliminated diagonal blocks ``D_j``.
+        lower_transfer, upper_transfer: ``P_j = D_j^{-1} L_j`` and
+            ``Q_j = D_j^{-1} U_j``, in the working precision.
+        even_lower, even_upper: the retained rows' couplings ``L_i``, ``U_i``
+            to the eliminated rows, needed by both substitution directions.
+    """
+
+    odd_lu: jax.Array
+    odd_piv: jax.Array
+    lower_transfer: jax.Array
+    upper_transfer: jax.Array
+    even_lower: jax.Array
+    even_upper: jax.Array
+
+
+class CyclicReductionFactors(NamedTuple):
+    """Reusable cyclic-reduction tree: reduction levels, then a Thomas leaf.
+
+    Returned by :func:`block_cyclic_reduction_factor` and accepted by
+    :func:`block_thomas_solve`, primal, transposed and adjoint.
+    """
+
+    levels: tuple[CyclicReductionLevel, ...]
+    leaf: NormalizedBlockTridiagFactors
+
+
+def _blocks_times(blocks, x, transpose=False):
+    """``blocks[k] @ x[k]`` (or ``blocks[k].T @ x[k]``) for vector or matrix ``x[k]``."""
+    return jnp.einsum("kji,kj...->ki..." if transpose else "kij,kj...->ki...", blocks, x)
+
+
+def block_cyclic_reduction_factor(
+    lower: jax.Array,
+    diag: jax.Array,
+    upper: jax.Array,
+    *,
+    cutoff: int = 8,
+    factor_dtype=None,
+) -> CyclicReductionFactors:
+    """Factor by block cyclic reduction down to ``cutoff`` rows, then Thomas.
+
+    Each level eliminates the odd rows ``j``, all at once: with
+    ``P_j = D_j^{-1} L_j`` and ``Q_j = D_j^{-1} U_j`` from one batched LU, the
+    even rows ``i`` form the half-size block-tridiagonal system
+
+        ``L'_i = -L_i P_{i-1}``, ``D'_i = D_i - L_i Q_{i-1} - U_i P_{i+1}``,
+        ``U'_i = -U_i Q_{i+1}``,
+
+    which is reduced again until at most ``cutoff`` rows remain and is then
+    factored by :func:`block_thomas_factor` with ``normalized=True``. Total
+    work stays ``O(n_blocks m^3)`` with a larger constant than Thomas; the
+    dependency chain shortens from ``n_blocks`` to about
+    ``log2(n_blocks / cutoff) + cutoff`` batched steps. Partial pivoting is
+    within blocks only, and the elimination order differs from Thomas, so it
+    can meet a different (possibly singular) diagonal block on the same
+    invertible matrix. Arguments and the ignored ``lower[0]``/``upper[-1]``
+    follow :func:`block_thomas_factor`; ``cutoff >= n_blocks`` is plain
+    Thomas.
+    """
+    if cutoff < 1:
+        raise ValueError("cutoff must be positive")
+    lower, diag, upper = map(jnp.asarray, (lower, diag, upper))
+    work = jnp.result_type(diag)
+    fdt = work if factor_dtype is None else factor_dtype
+    levels = []
+    while diag.shape[0] > cutoff:
+        n = diag.shape[0]
+        n_odd, n_even = n // 2, (n + 1) // 2
+        odd_upper = upper[1::2]
+        if n % 2 == 0:  # the last odd row is the last row: its upper block is ignored
+            odd_upper = odd_upper.at[-1].set(0)
+        odd_lu, odd_piv = jax.vmap(lu_factor)(diag[1::2].astype(fdt))
+        transfers = jax.vmap(lambda a, b, r: lu_solve((a, b), r))(
+            odd_lu, odd_piv, jnp.concatenate((lower[1::2], odd_upper), -1).astype(fdt)
+        ).astype(work)
+        p_odd, q_odd = transfers[..., : diag.shape[-1]], transfers[..., diag.shape[-1] :]
+        even_lower, even_diag, even_upper = lower[0::2], diag[0::2], upper[0::2]
+        zero = jnp.zeros_like(even_diag[:1])
+        new_diag = even_diag.at[1:].add(-(even_lower[1:] @ q_odd[: n_even - 1]))
+        new_diag = new_diag.at[:n_odd].add(-(even_upper[:n_odd] @ p_odd))
+        new_lower = jnp.concatenate((zero, -(even_lower[1:] @ p_odd[: n_even - 1])))
+        new_upper = -(even_upper[:n_odd] @ q_odd)
+        if n_odd < n_even:
+            new_upper = jnp.concatenate((new_upper, zero))
+        levels.append(
+            CyclicReductionLevel(odd_lu, odd_piv, p_odd, q_odd, even_lower, even_upper)
+        )
+        lower, diag, upper = new_lower, new_diag, new_upper
+    leaf = cast(
+        NormalizedBlockTridiagFactors,
+        block_thomas_factor(lower, diag, upper, factor_dtype=factor_dtype, normalized=True),
+    )
+    return CyclicReductionFactors(tuple(levels), leaf)
+
+
+def _cyclic_reduction_solve(
+    factors: CyclicReductionFactors, rhs: jax.Array, transpose: bool
+) -> jax.Array:
+    """Primal or transposed substitution through a cyclic-reduction tree.
+
+    With odd rows ordered first, a level is ``[[E, F], [G, H]]``, ``T =
+    E^{-1} F`` and the reduced matrix ``S = H - G T``. Primal: ``g = E^{-1}
+    b_o``, ``x_e = S^{-1}(b_e - G g)``, ``x_o = g - T x_e``. Transposed, from
+    the same tree: ``x_e = S^{-T}(b_e - T^T b_o)``, ``x_o = E^{-T}(b_o - G^T
+    x_e)``.
+    """
+    rhs = jnp.asarray(rhs)
+    fdt = factors.leaf.delta_lu.dtype
+    work = jnp.result_type(rhs, factors.leaf.coupling)
+    trans = int(transpose)
+
+    def odd_solve(level, v):
+        return jax.vmap(lambda a, b, r: lu_solve((a, b), r.astype(fdt), trans=trans))(
+            level.odd_lu, level.odd_piv, v
+        ).astype(work)
+
+    def pad(v, n):  # append zero rows up to length n
+        return jnp.concatenate((v, jnp.zeros((n - v.shape[0], *v.shape[1:]), v.dtype)))
+
+    stack = []
+    for level in factors.levels:
+        n_odd, n_even = level.odd_lu.shape[0], level.even_lower.shape[0]
+        b_odd, b_even = rhs[1::2], rhs[0::2]
+        if transpose:
+            moved = _blocks_times(level.lower_transfer, b_odd, True)
+            reduced = b_even - pad(moved, n_even)
+            reduced = reduced.at[1:].add(
+                -_blocks_times(level.upper_transfer[: n_even - 1], b_odd[: n_even - 1], True)
+            )
+            stack.append((level, b_odd))
+        else:
+            g = odd_solve(level, b_odd)
+            reduced = b_even.at[1:].add(-_blocks_times(level.even_lower[1:], g[: n_even - 1]))
+            reduced = reduced.at[:n_odd].add(-_blocks_times(level.even_upper[:n_odd], g))
+            stack.append((level, g))
+        rhs = reduced
+    x = _block_thomas_solve_normalized(factors.leaf, rhs, transpose)
+    for level, saved in reversed(stack):
+        n_odd = level.odd_lu.shape[0]
+        x_prev, x_next = x[:n_odd], pad(x[1:], n_odd)[:n_odd]
+        if transpose:
+            from_next = _blocks_times(level.even_lower[1:], x[1:], True)
+            pulled = _blocks_times(level.even_upper[:n_odd], x_prev, True) + pad(
+                from_next, n_odd
+            )[:n_odd]
+            x_odd = odd_solve(level, saved - pulled)
+        else:
+            x_odd = (
+                saved
+                - _blocks_times(level.lower_transfer, x_prev)
+                - _blocks_times(level.upper_transfer, x_next)
+            )
+        merged = jnp.zeros((x.shape[0] + n_odd, *x.shape[1:]), work)
+        x = merged.at[0::2].set(x).at[1::2].set(x_odd)
+    return x
+
+
 def block_thomas_solve(
-    factors: BlockTridiagFactors | GeneratedBlockTridiagFactors,
+    factors: BlockTridiagFactors
+    | NormalizedBlockTridiagFactors
+    | CyclicReductionFactors
+    | GeneratedBlockTridiagFactors,
     rhs: jax.Array,
     transpose: bool = False,
+    adjoint: bool = False,
 ) -> jax.Array:
     """Solve using precomputed factors.
 
@@ -650,25 +921,44 @@ def block_thomas_solve(
     transposed solve is exact under that policy too, because it needs the same
     two blocks per row.
 
+    :class:`NormalizedBlockTridiagFactors` (``normalized=True``) solve through
+    the stored ``C_k`` and apply each Schur LU once rather than twice, with the
+    same transpose and adjoint contracts, and so do the
+    :class:`CyclicReductionFactors` of :func:`block_cyclic_reduction_factor`.
+
     Args:
         factors: output of :func:`block_thomas_factor` or
-            :func:`block_thomas_factor_fn`, under either storage policy.
+            :func:`block_thomas_factor_fn`, under any storage policy.
         rhs: ``(n_blocks, m)`` or ``(n_blocks, m, n_rhs)``.
         transpose: if True, solve ``A^T x = rhs`` instead of ``A x = rhs``.
+            ``A^T`` is the plain transpose, without conjugation.
+        adjoint: if True, solve ``A^H x = rhs`` (conjugate transpose) from the
+            same factors, as ``x = conj(A^{-T} conj(rhs))``. For a Hermitian
+            ``A`` this equals the forward solve. Exclusive with ``transpose``.
 
     Returns:
         Solution with the same shape as ``rhs``.
     """
+    if adjoint:
+        if transpose:
+            raise ValueError("transpose and adjoint are mutually exclusive")
+        return jnp.conj(block_thomas_solve(factors, jnp.conj(rhs), transpose=True))
     if isinstance(factors, GeneratedBlockTridiagFactors):
         return _block_thomas_solve_regenerated(factors, rhs, transpose)
+    if isinstance(factors, NormalizedBlockTridiagFactors):
+        return _block_thomas_solve_normalized(factors, rhs, transpose)
+    if isinstance(factors, CyclicReductionFactors):
+        return _cyclic_reduction_solve(factors, rhs, transpose)
     delta_lu, delta_piv, lower, upper = factors
+    # Indexing the stored bands directly, not through ``upper[:-1]`` / ``lower[1:]``:
+    # inside ``jit`` the slice of a parameter materializes a copy of the band.
     if transpose:
-        down_blocks = jnp.swapaxes(lower[1:], -1, -2)
-        up_blocks = jnp.swapaxes(upper[:-1], -1, -2)
+        down_block = lambda k: jnp.swapaxes(lower[k + 1], -1, -2)  # noqa: E731
+        up_block = lambda k: jnp.swapaxes(upper[k - 1], -1, -2)  # noqa: E731
         trans = 1
     else:
-        down_blocks = upper[:-1]
-        up_blocks = lower[1:]
+        down_block = lambda k: upper[k]  # noqa: E731
+        up_block = lambda k: lower[k]  # noqa: E731
         trans = 0
 
     # When the factors were built with a low ``factor_dtype`` (delta_lu below
@@ -699,7 +989,7 @@ def block_thomas_solve(
     sigma: list[jax.Array] = [None] * rhs.shape[0]  # type: ignore[list-item]
     sigma[-1] = rhs[-1]
     for k in range(rhs.shape[0] - 2, -1, -1):
-        sigma[k] = rhs[k] - down_blocks[k] @ tsolve(
+        sigma[k] = rhs[k] - down_block(k) @ tsolve(
             delta_lu[k + 1], delta_piv[k + 1], sigma[k + 1]
         )
 
@@ -709,7 +999,7 @@ def block_thomas_solve(
             tsolve(
                 delta_lu[k],
                 delta_piv[k],
-                sigma[k] - up_blocks[k - 1] @ solution[-1],
+                sigma[k] - up_block(k) @ solution[-1],
             )
         )
     return jnp.stack(solution)
@@ -825,7 +1115,7 @@ def block_thomas_factor_ops(
 
     d_last = diag_fn(jnp.int32(n_blocks - 1))
     work = jnp.result_type(d_last)
-    fdt = work if factor_dtype is None else factor_dtype
+    fdt = work if factor_dtype is None else _same_kind(factor_dtype, work)
     apply = partial(couple, params)
     indices = jnp.arange(n_blocks - 1, dtype=jnp.int32)
     pivots: jax.Array | None

@@ -181,3 +181,45 @@ def test_colouring_reproduces_the_greedy_reference(shape, density, seed) -> None
     assert len(actual) == len(expected)
     for a, b in zip(actual, expected, strict=True):
         np.testing.assert_array_equal(a, b)
+
+
+def _block_tridiagonal(n_blocks: int, m: int, seed: int, pad: int = 0):
+    """Dense block-tridiagonal matrix with scrambled unknown order and ``pad`` dummies."""
+    rng = np.random.default_rng(seed)
+    n = n_blocks * m - pad
+    perm = rng.permutation(n)
+    blocks = -np.ones(n_blocks * m, int)
+    blocks[: n] = perm
+    blocks = blocks.reshape(n_blocks, m)
+    dense = np.zeros((n, n), complex)
+    for k in range(n_blocks):
+        for j in (k - 1, k, k + 1):
+            if 0 <= j < n_blocks:
+                rows = blocks[k][blocks[k] >= 0]
+                cols = blocks[j][blocks[j] >= 0]
+                shape = (rows.size, cols.size)
+                re, im = rng.standard_normal((2, *shape))
+                dense[np.ix_(rows, cols)] = re + 1j * im
+    return dense, blocks
+
+
+@pytest.mark.parametrize("pad", [0, 3])
+def test_block_tridiagonal_recovery_is_exact(pad: int) -> None:
+    from solvax import block_tridiag_matvec, block_tridiagonal_from_products
+
+    dense, blocks = _block_tridiagonal(7, 10, seed=2, pad=pad)
+    products = []
+
+    def apply(v):
+        products.append(v)  # one entry per trace: the probes are batched
+        return jnp.asarray(dense) @ v
+
+    lower, diag, upper = block_tridiagonal_from_products(apply, blocks, batch=5)
+    assert len(products) == 1
+    rng = np.random.default_rng(0)
+    x = rng.standard_normal(dense.shape[0]) + 1j * rng.standard_normal(dense.shape[0])
+    xb = np.append(x, 0.0)[np.where(blocks < 0, dense.shape[0], blocks)]
+    got = np.asarray(block_tridiag_matvec(lower, diag, upper, jnp.asarray(xb)))
+    ref = (dense @ x)[np.where(blocks < 0, 0, blocks)] * (blocks >= 0)
+    np.testing.assert_allclose(got, ref, atol=1e-12)
+    assert float(jnp.abs(lower[0]).max()) == 0.0 and float(jnp.abs(upper[-1]).max()) == 0.0

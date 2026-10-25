@@ -18,6 +18,7 @@ requirements. No solver is uniformly best.
 | Difficult nonlinear root with hard physical bounds | pseudo-transient continuation | undamped Newton--Krylov | metric and admissibility predicate must represent the physics |
 | Root family ending near a fold | adaptive continuation, then pseudo-arclength | independent cold roots | branch tangent and bordered preconditioner need validation |
 | Slowly varying sequence | GCROT | warm-started FGMRES | recycle storage and startup QR cost |
+| A few eigenpairs of a Hermitian block-tridiagonal pencil `F y = λ G y` near a target, with derivatives | `generalized_eigenpairs` | dense `eigh` for small problems | first-order derivatives only; block Thomas with a dense fallback |
 | A few eigenvalues far from the bulk | GCROT with harmonic deflation | FGMRES with a spectral preconditioner | small dense eigensolve per cycle, CPU-lowered |
 | Structured grid, directional coupling | semicoarsened `multigrid` with a matching smoother | FGMRES + line preconditioner | smoother and coarsening must be complementary; measure the smoothing factor |
 | Contractive nonlinear partitioned map | `fixed_point_iteration` | Aitken or Anderson mixing | none makes a noncontractive map globally convergent |

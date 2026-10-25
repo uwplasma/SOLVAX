@@ -13,6 +13,7 @@ api/elliptic
 api/krylov
 api/eigen
 api/propagator
+api/ode
 api/pcg
 api/fixed_point
 api/nonlinear
