@@ -10,6 +10,7 @@ from typing import Any, NamedTuple
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax import lax
 from jax.scipy.linalg import lu_factor, lu_solve, solve_triangular
 
 from solvax.direct import (
@@ -18,7 +19,13 @@ from solvax.direct import (
     block_tridiag_relative_residual,
 )
 
-__all__ = ["EigenpairResult", "eigenpair_reverse", "generalized_eigenpairs"]
+__all__ = [
+    "EigenpairResult",
+    "InverseIterationInfo",
+    "eigenpair_reverse",
+    "generalized_eigenpairs",
+    "inverse_iteration",
+]
 
 
 PrimalSolver = Callable[
@@ -516,3 +523,75 @@ def generalized_eigenpairs(
     result, sep = stop(solved)
     values, vectors = _attach(F, G, result.values, result.vectors, sep, dense_limit)
     return result._replace(values=values, vectors=vectors)
+
+
+class InverseIterationInfo(NamedTuple):
+    """Certificate of :func:`inverse_iteration`.
+
+    Attributes:
+        converged: traced boolean: ``residual <= tol``, the eigenvalue is finite and positive and
+            every weight is positive.
+        residual: ``||K^{-1} W v - mu v||_W / (|mu| ||v||_W)`` for the returned ``v`` and
+            ``mu = 1 / lam``; ``|lam - lam_k| <= residual * lam`` for the nearest eigenvalue
+            ``lam_k``.
+        iterations: inverse-iteration steps taken.
+    """
+
+    converged: jax.Array
+    residual: jax.Array
+    iterations: jax.Array
+
+
+def inverse_iteration(
+    solve: Callable[[jax.Array], jax.Array],
+    weight: jax.Array,
+    v0: jax.Array,
+    *,
+    tol: float,
+    max_steps: int,
+) -> tuple[jax.Array, jax.Array, InverseIterationInfo]:
+    """Smallest eigenpair of the symmetric-definite pencil ``K v = lam W v``, from ``K^{-1}``.
+
+    ``W = diag(weight)`` with ``weight > 0`` (real arrays of any shape), ``K`` real symmetric
+    positive definite and known only through ``solve = K^{-1}``, which may close over traced
+    parameters.
+    Iterates ``v <- K^{-1} W v`` from ``v0`` in a ``lax.while_loop`` until the residual of
+    :class:`InverseIterationInfo` is at most ``tol`` or ``max_steps`` is reached: one solve per step
+    plus two, about ``log(tol) / log(lam_1 / lam_2)`` steps. The residual certifies an eigenpair,
+    not that it is the smallest: ``v0`` must have a ``W``-component along the lowest mode. ``v`` is
+    ``W``-normalized, its sign arbitrary.
+
+    Derivative contract: ``lam`` is the Rayleigh quotient ``v.Wv / (Wv.K^{-1}Wv)`` of the converged
+    ``v`` held fixed. It is stationary there, so its first derivative in whatever ``solve`` and
+    ``weight`` depend on is exact, differentiating through ``solve`` once and never the loop. Second
+    derivatives of ``lam`` are not supported. The derivative of ``v`` is not supported: it is
+    returned under ``stop_gradient`` (zero), so differentiate only functionals of ``lam``. If not
+    converged, ``lam`` is NaN and so are its derivatives, provided ``solve`` carries a NaN
+    cotangent (:func:`solvax.pcg_linear_solve` does).
+    """
+    fixed = lax.stop_gradient(weight)
+
+    def norm(v):
+        return jnp.sqrt(jnp.sum(fixed * v * v))
+
+    def measure(w, v, u):
+        wv = w * v
+        mu = jnp.sum(wv * u) / jnp.sum(wv * v)
+        return mu, jnp.sqrt(jnp.sum(w * (u - mu * v) ** 2) / jnp.sum(wv * v)) / jnp.abs(mu)
+
+    def unfinished(carry):
+        v, u, count = carry
+        return (measure(fixed, v, u)[1] > tol) & (count < max_steps)
+
+    def step(carry):
+        u = carry[1]
+        v = u / norm(u)
+        return v, solve(fixed * v), carry[2] + 1
+
+    v = jnp.asarray(v0, fixed.dtype)
+    v = v / norm(v)
+    v, _, count = lax.while_loop(unfinished, step, (v, solve(fixed * v), jnp.int32(0)))
+    v = lax.stop_gradient(v)
+    mu, residual = measure(weight, v, solve(weight * v))
+    ok = (residual <= tol) & (mu > 0.0) & jnp.all(weight > 0.0)
+    return (1.0 / mu) * jnp.where(ok, 1.0, jnp.nan), v, InverseIterationInfo(ok, residual, count)

@@ -84,6 +84,7 @@ solvers/generalized_eigenpairs
 solvers/banded
 solvers/tridiagonal
 solvers/elliptic
+solvers/separable
 ```
 
 ```{toctree}

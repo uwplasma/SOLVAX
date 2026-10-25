@@ -10,6 +10,7 @@ field reference.
 api/operators
 api/direct
 api/elliptic
+api/separable
 api/krylov
 api/eigen
 api/propagator

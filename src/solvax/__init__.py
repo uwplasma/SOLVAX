@@ -61,7 +61,13 @@ from solvax.direct import (
     plan_chain_windows,
     suggest_adjoint_window,
 )
-from solvax.eigen import EigenpairResult, eigenpair_reverse, generalized_eigenpairs
+from solvax.eigen import (
+    EigenpairResult,
+    InverseIterationInfo,
+    eigenpair_reverse,
+    generalized_eigenpairs,
+    inverse_iteration,
+)
 from solvax.elliptic import (
     FourierHelmholtzOperator,
     build_fourier_helmholtz_operator,
@@ -173,6 +179,13 @@ from solvax.randomized import (
     nystrom_preconditioner_adaptive,
 )
 from solvax.refine import as_low_precision, iterative_refinement
+from solvax.separable import (
+    FastDiagonal,
+    FluxFormOperator,
+    SpdSolveInfo,
+    fast_diagonal,
+    flux_form_operator,
+)
 from solvax.smoothers import (
     alternating_smoother,
     block_jacobi_smoother,
@@ -246,6 +259,8 @@ __all__ = [
     "eigenpair_reverse",
     "EigenpairResult",
     "generalized_eigenpairs",
+    "inverse_iteration",
+    "InverseIterationInfo",
     "estimate_rk4_timestep",
     "exponential_eigenpairs",
     "block_cyclic_reduction_factor",
@@ -275,6 +290,11 @@ __all__ = [
     "solve_fourier_helmholtz",
     "solve_periodic_poisson",
     "solve_periodic_poisson_spectral",
+    "FastDiagonal",
+    "FluxFormOperator",
+    "SpdSolveInfo",
+    "fast_diagonal",
+    "flux_form_operator",
     "TridiagonalFactors",
     "tridiagonal_factor",
     "tridiagonal_solve",
