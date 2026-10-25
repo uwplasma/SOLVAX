@@ -181,9 +181,11 @@ from solvax.randomized import (
 from solvax.refine import as_low_precision, iterative_refinement
 from solvax.separable import (
     FastDiagonal,
+    FastDiagonalSchur,
     FluxFormOperator,
     SpdSolveInfo,
     fast_diagonal,
+    fast_diagonal_schur,
     flux_form_operator,
 )
 from solvax.smoothers import (
@@ -291,9 +293,11 @@ __all__ = [
     "solve_periodic_poisson",
     "solve_periodic_poisson_spectral",
     "FastDiagonal",
+    "FastDiagonalSchur",
     "FluxFormOperator",
     "SpdSolveInfo",
     "fast_diagonal",
+    "fast_diagonal_schur",
     "flux_form_operator",
     "TridiagonalFactors",
     "tridiagonal_factor",

@@ -16,6 +16,37 @@ xt = fd.solve(r, transpose=True)     # the plain transpose, which differs: M = W
 `shift == 0` and no Dirichlet axis the constants are the null space: `solve` is the
 pseudo-inverse, drops the volume-mean part of `r` and returns zero volume mean.
 
+## Axis weights
+
+`weights=[w_0, w_1, ...]` (one scalar per axis) gives $\sum_a w_a\,\partial_a^2$. The
+eigenvectors are the unweighted ones and only the eigenvalue sum changes, so the solve is
+still three contractions and a divide; the weights are differentiable leaves.
+
+## Constraint stages with component-wise damping
+
+A momentum stage $H u + G q = b,\ D u = 0$ with one velocity component per axis and
+$H_c = s_c - \nu\nabla_c^2$ (for example $s_c = 1 + \Delta t\,\lambda_c$ and
+$\nu = \Delta t\,\mu$; $q = \Delta t\,p$) reduces to $S q = -D H^{-1} b$ with
+$S = -D H^{-1} G$. With $\nu = 0$, $S$ is the weighted Laplacian above with
+$w_c = 1/s_c$. Where the viscous operator commutes with the gradient (periodic axes,
+uniform spacing), $S$ is diagonal in the pressure eigenbasis,
+$\sum_c \lambda_c / (s_c + \nu \sum_a \lambda_a)$, a multiplier that is not a Kronecker sum:
+
+```python
+schur = sx.fast_diagonal_schur(widths, pressure_kinds, component_shifts, viscous_coefficient)
+q = schur.solve(rhs)            # exact on commuting axes, a preconditioner with walls
+q, info = schur.solve_exact(rhs, gradient, divergence, helmholtz)   # exact stage
+```
+
+`solve_exact` runs PCG on $V S$ with the multiplier as preconditioner. `gradient(q)`
+returns the component fields $G q$, `divergence(fields)` returns $D$ of them and
+`helmholtz[c](f)` returns $H_c^{-1} f$ with the component's own wall conditions, so
+SOLVAX owns no staggered fields. Afterwards $u = H^{-1}(b - G q)$. Status, the volume-mean
+gauge for no-flux pressure axes, the reported net-source defect and the NaN-with-NaN-
+derivatives failure are those of the flux-form operator; the solve is implicitly
+differentiable in `rhs` and in whatever the three callables close over. A divergence of
+the wrong sign is reported as nonpositive curvature, not solved.
+
 ## Variable coefficients
 
 `flux_form_operator` is $A x=V\,(s\,x-c\,\nabla\!\cdot(G\nabla x))$ for cell arrays
@@ -69,6 +100,7 @@ cotangent (`pcg_linear_solve` does).
 ## API summary
 
 - {func}`solvax.separable.fast_diagonal`, {class}`solvax.separable.FastDiagonal`
+- {func}`solvax.separable.fast_diagonal_schur`, {class}`solvax.separable.FastDiagonalSchur`
 - {func}`solvax.separable.flux_form_operator`, {class}`solvax.separable.FluxFormOperator`,
   {class}`solvax.separable.SpdSolveInfo`
 - {func}`solvax.eigen.inverse_iteration`, {class}`solvax.eigen.InverseIterationInfo`

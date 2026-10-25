@@ -496,3 +496,264 @@ def test_unconverged_or_invalid_eigenproblem_is_nan_with_nan_derivative():
     assert not bool(info.converged) and np.isnan(lam)
     lam, _, info = eigenvalue(1.0, steps=500)
     assert bool(info.converged) and np.isfinite(jax.grad(lambda s: eigenvalue(s, 500)[0])(1.0))
+
+
+# ---------------------------------------------------------------------------------------------
+# axis weights and the Schur complement of a constraint stage
+
+
+def _one_dimensional(w, kind):
+    """``M = W^{-1} K`` of one axis from the face-by-face reference assembly."""
+    return dense_flux_form([w], [kind], np.ones(len(w)), np.zeros(len(w)), 1.0) / w[:, None]
+
+
+def test_axis_weights_match_the_dense_weighted_kronecker_sum():
+    widths, weights = _widths((5, 4, 3), seed=6), np.array([0.3, 2.0, 0.7])
+    kinds = ("dirichlet", "periodic", "neumann")
+    mats = [_one_dimensional(w, k) for w, k in zip(widths, kinds, strict=True)]
+    eye = [np.eye(len(w)) for w in widths]
+    dense = 0.4 * np.eye(60) + 1.1 * (
+        weights[0] * np.kron(np.kron(mats[0], eye[1]), eye[2])
+        + weights[1] * np.kron(np.kron(eye[0], mats[1]), eye[2])
+        + weights[2] * np.kron(np.kron(eye[0], eye[1]), mats[2])
+    )
+    fd = sx.fast_diagonal(widths, kinds, shift=0.4, coefficient=1.1, weights=weights)
+    x = np.random.default_rng(20).standard_normal((5, 4, 3))
+    assert np.allclose(fd.matvec(x).ravel(), dense @ x.ravel(), rtol=1e-12)
+    assert np.allclose(fd.solve(x).ravel(), np.linalg.solve(dense, x.ravel()), rtol=1e-10)
+    assert np.allclose(
+        fd.solve(x, transpose=True).ravel(), np.linalg.solve(dense.T, x.ravel()), rtol=1e-10
+    )
+
+
+def test_axis_weighted_poisson_converges_at_second_order_to_a_manufactured_solution():
+    # w_x u_xx + w_y u_yy = f for u = sin(pi x) cos(2 pi y): Dirichlet in x, Neumann in y.
+    def error(n):
+        widths = [np.diff(np.linspace(0, 1, n + 1) ** 1.3)] * 2
+        x, y = np.meshgrid(*[np.cumsum(w) - w / 2 for w in widths], indexing="ij")
+        u = np.sin(np.pi * x) * np.cos(2 * np.pi * y)
+        fd = sx.fast_diagonal(widths, ("dirichlet", "neumann"), weights=[0.25, 4.0])
+        return float(np.max(np.abs(fd.solve((0.25 * np.pi**2 + 16 * np.pi**2) * u) - u)))
+
+    assert 3.3 < error(16) / error(32) < 4.7
+
+
+def test_axis_weight_derivative_follows_taylor():
+    widths, rhs = _widths((5, 4), seed=7), np.random.default_rng(21).standard_normal((5, 4))
+
+    def f(h):
+        fd = sx.fast_diagonal(widths, ("neumann", "dirichlet"), weights=[1.0 + h, 2.0 - h])
+        return jnp.sum(jnp.sin(fd.solve(rhs)))
+
+    slope = jax.grad(f)(0.0)
+    r = [abs(f(h) - f(0.0) - h * slope) for h in (1e-2, 5e-3, 2.5e-3)]
+    assert 3.6 < r[0] / r[1] < 4.4 and 3.6 < r[1] / r[2] < 4.4
+    with pytest.raises(ValueError, match="one scalar per axis"):
+        sx.fast_diagonal(widths, ("neumann", "dirichlet"), weights=[1.0])
+
+
+def _stage(widths, pressure_kinds, shifts, nu):
+    """Dense staggered ``G_c``, ``D_c`` and ``H_c`` of a 2-D stage: no-slip walls, periodic wraps.
+
+    Component ``c`` lives on the lower face of every cell along axis ``c`` (interior faces only
+    on a wall axis); ``H_c = s_c + nu (-laplacian_c)`` with the normal second difference over
+    the dual cell and the tangential cell-centred one with a wall half a cell away.
+    """
+    sizes = [len(w) for w in widths]
+    pieces = []
+    for c in range(2):
+        w, n, periodic = widths[c], sizes[c], pressure_kinds[c] == "periodic"
+        faces = list(range(n)) if periodic else list(range(1, n))
+        g = np.zeros((len(faces), n))
+        d = np.zeros((n, len(faces)))
+        m = np.zeros((len(faces), len(faces)))
+        for a, f in enumerate(faces):
+            lo, hi = (f - 1) % n, f
+            dist = (w[lo] + w[hi]) / 2
+            g[a, hi] += 1 / dist
+            g[a, lo] -= 1 / dist
+            d[hi, a] -= 1 / w[hi]
+            d[lo, a] += 1 / w[lo]
+            m[a, a] += (1 / w[hi] + 1 / w[lo]) / dist
+            for b, width in ((a + 1, w[hi]), (a - 1, w[lo])):
+                if periodic:
+                    m[a, b % len(faces)] -= 1 / (width * dist)
+                elif 0 <= b < len(faces):
+                    m[a, b] -= 1 / (width * dist)
+        o = 1 - c
+        tangential = _one_dimensional(
+            widths[o], "periodic" if pressure_kinds[o] == "periodic" else "dirichlet"
+        )
+        eye_f, eye_o = np.eye(len(faces)), np.eye(sizes[o])
+        order = (lambda a, b: np.kron(a, b)) if c == 0 else (lambda a, b: np.kron(b, a))
+        h = shifts[c] * np.eye(len(faces) * sizes[o]) + nu * (
+            order(m, eye_o) + order(eye_f, tangential)
+        )
+        pieces.append(
+            (order(g, eye_o), order(d, eye_o), h, (len(faces), sizes[o])[:: 1 if c == 0 else -1])
+        )
+    return pieces
+
+
+def _dense_schur(pieces):
+    return -sum(d @ np.linalg.solve(h, g) for g, d, h, _ in pieces)
+
+
+def _callables(pieces, shape):
+    def gradient(p):
+        return [(g @ p.ravel()).reshape(s) for g, _, _, s in pieces]
+
+    def divergence(fields):
+        return sum(d @ f.ravel() for (_, d, _, _), f in zip(pieces, fields, strict=True)).reshape(
+            shape
+        )
+
+    helmholtz = [
+        lambda f, h=h, s=s: jnp.linalg.solve(h, f.ravel()).reshape(s) for _, _, h, s in pieces
+    ]
+    return gradient, divergence, helmholtz
+
+
+def _kkt(pieces, b, cells):
+    """Dense saddle point ``[[H, G], [D, 0]] [u; q] = [b; 0]`` by minimum-norm least squares.
+
+    ``q`` is determined up to a constant, so it is returned with its plain mean removed.
+    """
+    sizes = [len(p[0]) for p in pieces]
+    top = np.hstack(
+        [scipy.linalg.block_diag(*[p[2] for p in pieces]), np.vstack([p[0] for p in pieces])]
+    )
+    bottom = np.hstack([*[p[1] for p in pieces], np.zeros((cells, cells))])
+    sol = np.linalg.lstsq(
+        np.vstack([top, bottom]), np.concatenate([*b, np.zeros(cells)]), rcond=None
+    )[0]
+    q = sol[sum(sizes) :]
+    return np.split(sol[: sum(sizes)], np.cumsum(sizes)[:-1]), q - q.mean()
+
+
+def _stage_rhs(pieces, shape, seed):
+    b = [np.random.default_rng(seed + c).standard_normal(len(p[0])) for c, p in enumerate(pieces)]
+    gradient, divergence, helmholtz = _callables(pieces, shape)
+    fields = [
+        h(jnp.asarray(bc.reshape(p[3]))) for h, bc, p in zip(helmholtz, b, pieces, strict=True)
+    ]
+    return b, -divergence(fields), (gradient, divergence, helmholtz)
+
+
+def test_schur_multiplier_is_exact_where_the_viscous_operator_commutes():
+    # periodic, uniform: H_c commutes with G, so the multiplier inverts -D H^-1 G to rounding
+    widths, kinds = [np.full(8, 0.25), np.full(6, 0.4)], ("periodic", "periodic")
+    shifts, nu = np.array([1.3, 3.5]), 0.07
+    pieces = _stage(widths, kinds, shifts, nu)
+    fd = sx.fast_diagonal_schur(widths, kinds, shifts, nu)
+    r = np.random.default_rng(22).standard_normal((8, 6))
+    r = r - r.mean()
+    q = fd.solve(r)
+    assert np.allclose(_dense_schur(pieces) @ q.ravel(), r.ravel(), atol=1e-11)
+    assert abs(q.mean()) < 1e-13
+    # with nu = 0 the multiplier is the axis-weighted Kronecker sum, weights 1 / s_c
+    weighted = sx.fast_diagonal(widths, kinds, weights=1 / shifts)
+    assert np.allclose(
+        sx.fast_diagonal_schur(widths, kinds, shifts, 0.0).solve(r), weighted.solve(r)
+    )
+    # the exact stage agrees with a dense saddle-point solve, in one or two iterations
+    b, rhs, (gradient, divergence, helmholtz) = _stage_rhs(pieces, (8, 6), 23)
+    q, info = fd.solve_exact(rhs, gradient, divergence, helmholtz)
+    u, q_dense = _kkt(pieces, b, 48)
+    assert bool(info.converged) and int(info.iterations) <= 2
+    assert np.allclose(q.ravel(), q_dense, atol=1e-9)
+    velocity = [
+        h(jnp.asarray(bc.reshape(p[3])) - g)
+        for h, bc, p, g in zip(helmholtz, b, pieces, gradient(q), strict=True)
+    ]
+    assert all(np.allclose(v.ravel(), uc, atol=1e-9) for v, uc in zip(velocity, u, strict=True))
+    assert np.max(np.abs(divergence(velocity))) < 1e-9
+
+
+def test_schur_exact_stage_with_no_slip_walls_needs_the_inner_iteration():
+    widths, kinds = _widths((7, 6), seed=8), ("neumann", "neumann")
+    shifts, nu = np.array([1.5, 4.0]), 0.05
+    pieces = _stage(widths, kinds, shifts, nu)
+    volumes = _volumes(widths)
+    schur = _dense_schur(pieces)
+    assert np.allclose(
+        volumes.ravel()[:, None] * schur, (volumes.ravel()[:, None] * schur).T, atol=1e-10
+    )
+    fd = sx.fast_diagonal_schur(widths, kinds, shifts, nu)
+    b, rhs, (gradient, divergence, helmholtz) = _stage_rhs(pieces, (7, 6), 30)
+    rhs = rhs - jnp.sum(volumes * rhs) / volumes.sum()  # compatible
+    q, info = fd.solve_exact(rhs, gradient, divergence, helmholtz)
+    # with walls the multiplier alone is only a preconditioner
+    assert np.max(np.abs(schur @ fd.solve(rhs).ravel() - rhs.ravel())) > 1e-3 * np.max(np.abs(rhs))
+    assert bool(info.converged) and 3 <= int(info.iterations) < 40
+    assert np.allclose(schur @ q.ravel(), rhs.ravel(), atol=1e-9)
+    assert abs(float(jnp.sum(volumes * q))) < 1e-10
+    u, q_dense = _kkt(pieces, b, 42)
+    assert np.allclose(q.ravel() - np.mean(q), q_dense, atol=1e-8)
+    # the preconditioner helps: unpreconditioned CG on V S needs more iterations
+    plain = sx.pcg(
+        lambda p: volumes * (schur @ p.reshape(-1).copy()).reshape(7, 6),
+        volumes * rhs,
+        rtol=1e-11,
+        max_steps=200,
+    )
+    assert int(plain.iterations) > int(info.iterations)
+
+
+def _gauged_solve(schur, volumes, rhs):
+    """Dense ``S q = rhs`` with the volume-mean-zero gauge, by bordering ``V S`` with ``V``."""
+    n = len(volumes)
+    bordered = jnp.block(
+        [[volumes[:, None] * schur, volumes[:, None]], [volumes[None, :], jnp.zeros((1, 1))]]
+    )
+    return jnp.linalg.solve(bordered, jnp.concatenate([volumes * rhs, jnp.zeros(1)]))[:n]
+
+
+def test_schur_solve_exact_derivatives_and_failure_semantics():
+    widths, kinds = _widths((5, 4), seed=9), ("neumann", "neumann")
+    shifts, volumes = np.array([1.5, 2.5]), _volumes(widths)
+    weight = np.random.default_rng(31).standard_normal((5, 4))
+    rhs = np.random.default_rng(32).standard_normal((5, 4))
+    rhs = rhs - np.sum(volumes * rhs) / volumes.sum()
+    fd = sx.fast_diagonal_schur(widths, kinds, shifts, 0.05)
+
+    def exact(nu, steps=200):
+        pieces = _stage(widths, kinds, shifts, nu)
+        q, info = fd.solve_exact(jnp.asarray(rhs), *_callables(pieces, (5, 4)), max_steps=steps)
+        return jnp.sum(weight * q), info
+
+    def dense(nu):
+        schur = _dense_schur_jax(_stage(widths, kinds, shifts, nu))
+        return jnp.sum(weight.ravel() * _gauged_solve(schur, volumes.ravel(), rhs.ravel()))
+
+    assert abs(exact(0.05)[0] - dense(0.05)) < 1e-10
+    assert jax.grad(lambda n: exact(n)[0])(0.05) == pytest.approx(jax.grad(dense)(0.05), rel=1e-7)
+    # an unconverged exact stage is NaN with NaN derivatives in the closed-over parameter
+    value, info = exact(0.05, steps=1)
+    assert not bool(info.converged) and np.isnan(value)
+    assert np.isnan(jax.grad(lambda n: exact(n, 1)[0])(0.05))
+    # an operator of the wrong sign is reported, not solved
+    gradient, divergence, helmholtz = _callables(_stage(widths, kinds, shifts, 0.05), (5, 4))
+    q, info = fd.solve_exact(jnp.asarray(rhs), gradient, lambda f: -divergence(f), helmholtz)
+    assert not bool(info.converged) and np.isnan(q).all()
+
+
+def _dense_schur_jax(pieces):
+    return -sum(
+        jnp.asarray(d) @ jnp.linalg.solve(jnp.asarray(h), jnp.asarray(g)) for g, d, h, _ in pieces
+    )
+
+
+def test_schur_singular_pressure_reports_a_net_source_and_rejects_bad_shifts():
+    widths, kinds = _widths((5, 4), seed=10), ("neumann", "neumann")
+    pieces = _stage(widths, kinds, np.array([1.2, 1.7]), 0.1)
+    fd = sx.fast_diagonal_schur(widths, kinds, [1.2, 1.7], 0.1)
+    gradient, divergence, helmholtz = _callables(pieces, (5, 4))
+    q, info = fd.solve_exact(0.4 + jnp.zeros((5, 4)), gradient, divergence, helmholtz)
+    assert not bool(info.converged) and np.isnan(q).all() and abs(float(info.defect) - 0.4) < 1e-12
+    with pytest.raises(ValueError, match="one entry per axis"):
+        sx.fast_diagonal_schur(widths, kinds, [1.0])
+    bad = sx.fast_diagonal_schur(widths, kinds, [1.2, -1.0], 0.1)
+    rhs = jnp.asarray(np.random.default_rng(33).standard_normal((5, 4)))
+    q, info = bad.solve_exact(rhs - rhs.mean(), gradient, divergence, helmholtz)
+    assert not bool(info.converged)
