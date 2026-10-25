@@ -240,7 +240,7 @@ from solvax.tridiagonal import (
     tridiagonal_solve_factored_checked,
 )
 
-__version__ = "0.33.0"
+__version__ = "0.34.0"
 
 __all__ = [
     "RECYCLE_DRIFT_ADVISORY",

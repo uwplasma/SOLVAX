@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.34.0 - 2026-10-25
+
+- `plan_exponential_action`, `exponential_action` and `plan_chebyshev_action` apply the exponential
+  of an operator to real or complex arrays with a fixed, host-chosen plan (checkpointed shifted Taylor
+  or fixed-horizon Chebyshev), so value, JVP and VJP differentiate the same finite polynomial. The
+  result carries a truncation bound; the Chebyshev plan needs SciPy on the host
+  (`pip install solvax[native]`). See `docs/api/propagator.md`.
+- Propagator eigenpair certification rejects zero and nonfinite vectors instead of accepting them.
+
 - `fast_diagonal(..., weights=[w_a])` solves `shift - coefficient * sum_a w_a laplacian_a`: the
   eigenvectors are the unweighted ones, only the eigenvalue sum changes. Weights are differentiable.
 - `fast_diagonal_schur(widths, kinds, component_shifts, viscous_coefficient)` is the spectral
