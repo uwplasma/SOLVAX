@@ -413,7 +413,8 @@ def pcg_linear_solve(
     derivatives do not trace through iteration-count branches. The operator is
     assumed Hermitian positive definite; the transpose preconditioner defaults
     to the primal preconditioner, while transpose tolerances may be controlled
-    independently.
+    independently. A nonfinite right-hand side of the transpose solve (a NaN cotangent) returns NaN
+    rather than the zero start, so it reaches the parameters instead of vanishing.
     """
 
     adjoint_precond = precond if transpose_precond is None else transpose_precond
@@ -444,7 +445,9 @@ def pcg_linear_solve(
             max_steps=adjoint_steps,
             single_reduction=single_reduction,
         )
-        return solution.x, _diagnostics(solution)
+        # A nonfinite cotangent must reach the leaves as NaN, not be absorbed as a zero gradient.
+        nan = jnp.where(solution.status == NONFINITE, jnp.nan, 1.0)
+        return jax.tree.map(lambda leaf: leaf * nan, solution.x), _diagnostics(solution)
 
     x, diagnostics = jax.lax.custom_linear_solve(
         matvec,

@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- `fast_diagonal(widths, kinds, shift, coefficient)` factors `shift - coefficient * laplacian` on a
+  rectilinear cell-centred grid (Dirichlet, Neumann or periodic axes) into three contractions and a
+  divide: `FastDiagonal.solve` with a real `transpose=True`, a zero-volume-mean pseudo-inverse on the
+  singular (constants) case, and derivatives in `shift` and `coefficient`.
+- `flux_form_operator(widths, kinds, conductivity, shift, coefficient)` is `A x = V (s x - c div(G
+  grad x))` with series-resistance (harmonic) face conductances, solved by `pcg_linear_solve`
+  preconditioned with the separable inverse at the volume means. `FluxFormOperator.solve` returns
+  `(x, SpdSolveInfo)`; an unconverged solve, bad coefficient or incompatible singular right-hand side
+  gives NaN and NaN derivatives in every input. `with_coefficients` swaps traced leaves without
+  recompiling, `lift` adds Dirichlet or Neumann data, and `shift=0` is the singular variant with a
+  reported compatibility defect. Closes #158.
+- `inverse_iteration(solve, weight, v0, tol, max_steps)` returns the smallest eigenpair of a
+  symmetric-definite pencil from `K^-1`, with a residual certificate. Its eigenvalue has an exact first
+  derivative (Rayleigh quotient at the held converged vector); the eigenvector derivative is unsupported
+  (`stop_gradient`).
+- `pcg_linear_solve`: a nonfinite cotangent in the transposed solve now returns NaN instead of the zero
+  start, so it reaches the parameters rather than appearing as a zero gradient.
+
 ## 0.33.0 - 2026-10-24
 
 - `factor_dtype` given as a real dtype for complex bands now selects the complex

@@ -234,3 +234,15 @@ def test_pcg_zero_start_skips_initial_matvec(single_reduction):
     assert count(x0=jnp.zeros(2)) == count() + 1
     solution = pcg(matvec, rhs, rtol=1.0e-12, single_reduction=single_reduction)
     assert jnp.allclose(solution.x, jnp.linalg.solve(matrix, rhs))
+
+
+def test_pcg_linear_solve_adjoint_carries_a_nonfinite_cotangent():
+    # A NaN cotangent used to be absorbed by the zero-started adjoint solve: a silent zero gradient.
+    matrix = jnp.diag(jnp.array([1.0, 2.0, 3.0]))
+
+    def total(scale, cotangent_scale):
+        x = pcg_linear_solve(lambda v: scale * matrix @ v, jnp.ones(3)).x
+        return jnp.sum(x * cotangent_scale)
+
+    assert jnp.isfinite(jax.grad(total)(1.0, 1.0))
+    assert jnp.isnan(jax.grad(total)(1.0, jnp.nan))

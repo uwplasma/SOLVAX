@@ -10,6 +10,8 @@ requirements. No solver is uniformly best.
 | Scalar tridiagonal, many columns | `tridiagonal_solve` | banded LU | no pivoting; requires a stable tridiagonal system |
 | Scalar periodic (cyclic) tridiagonal | `cyclic_tridiagonal_solve` | periodic banded LU | corner coupling limited to one sub- and superdiagonal |
 | Separable Helmholtz on periodic x bounded grid | `solve_fourier_helmholtz` | FGMRES + line preconditioner | coefficients must be independent of the periodic axis |
+| Variable-coefficient conduction `V(s x - c div(G grad x))` on a rectilinear grid | `flux_form_operator` | PCG with your own preconditioner | contrast raises the iteration count with mesh refinement; Dirichlet, Neumann, periodic axes |
+| Smallest eigenpair of a symmetric-definite pencil given `K^-1` inside `jit` | `inverse_iteration` | `generalized_eigenpairs` | eigenvalue first derivative only; eigenvector derivative unsupported |
 | Dense block-tridiagonal | block Thomas | GMRES + block-Thomas preconditioner | block elimination assumes nonsingular Schur complements |
 | Narrow nonperiodic band | banded LU | GMRES + banded preconditioner | static rather than dynamic pivoting |
 | Narrow periodic band | periodic banded LU | GMRES with core inverse | low-rank corner model must match the operator |
