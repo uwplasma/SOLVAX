@@ -179,6 +179,7 @@ jobs:
         tests/test_multigrid.py tests/test_eigen.py tests/test_generalized_eigenpairs.py
         tests/test_sharding.py
         tests/test_least_squares.py tests/test_sparse_direct.py tests/test_ode.py
+        tests/test_propagator.py
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
