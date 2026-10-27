@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.34.1 - 2026-10-27
+
+- `block_cyclic_reduction_factor(..., factor_dtype=...)` keeps the complex kind: complex bands with a
+  real low-precision `factor_dtype` no longer drop their imaginary parts in the reduction levels (#175).
+
 ## 0.34.0 - 2026-10-25
 
 - `plan_exponential_action`, `exponential_action` and `plan_chebyshev_action` apply the exponential
