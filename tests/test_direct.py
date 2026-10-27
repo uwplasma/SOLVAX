@@ -1343,6 +1343,43 @@ def test_cyclic_reduction_complex_and_float32_schur_lu(dtype, tol):
     np.testing.assert_allclose(block_thomas_solve(mixed, b), reference, rtol=1e-4, atol=1e-5)
 
 
+@pytest.mark.parametrize("n_blocks", [1, 2, 3, 5])
+@pytest.mark.parametrize("cutoff", [1, 2])
+@pytest.mark.parametrize("n_rhs", [None, 2])
+def test_cyclic_reduction_low_precision_factors_keep_complex_kind(n_blocks, cutoff, n_rhs):
+    rng = np.random.default_rng(n_blocks)
+    m = 2
+    z = rng.standard_normal((3, 2, n_blocks, m, m))
+    lower, diag, upper = z[:, 0] + 1j * z[:, 1]
+    diag = diag + 3 * np.array([[0.1, 1], [1, 0.1]]) * (1 + 1j)  # off-diagonal pivots
+    shape = (n_blocks, m) if n_rhs is None else (n_blocks, m, n_rhs)
+    rhs = rng.standard_normal(shape) + 1j * rng.standard_normal(shape)
+    dense = _dense(lower, diag, upper)
+    flat = rhs.reshape(n_blocks * m, -1)
+    factors = block_cyclic_reduction_factor(
+        lower, diag, upper, cutoff=cutoff, factor_dtype=jnp.float32
+    )
+    assert factors.leaf.delta_lu.dtype == jnp.complex64
+    for level in factors.levels:
+        assert level.lower_transfer.dtype == jnp.complex128
+    for mode, matrix in (("primal", dense), ("transpose", dense.T), ("adjoint", dense.conj().T)):
+        got = block_thomas_solve(
+            factors, rhs, transpose=mode == "transpose", adjoint=mode == "adjoint"
+        )
+        want = np.linalg.solve(matrix, flat)
+        assert got.dtype == jnp.complex128
+        err = np.linalg.norm(np.asarray(got).reshape(want.shape) - want)
+        assert err < 1e-4 * np.linalg.norm(want)
+
+
+def test_cyclic_reduction_scalar_complex_float32_regression():
+    zero = jnp.zeros((2, 1, 1), complex)
+    diag = jnp.array([1 + 2j, 3 + 4j])[:, None, None]
+    factors = block_cyclic_reduction_factor(zero, diag, zero, cutoff=1, factor_dtype=jnp.float32)
+    x = block_thomas_solve(factors, jnp.ones((2, 1)))
+    np.testing.assert_allclose(x[:, 0], [0.2 - 0.4j, 0.12 - 0.16j], rtol=1e-6)
+
+
 def test_cyclic_reduction_derivatives_and_transforms():
     (lower, diag, upper, rhs), _ = make_system(9, 3, seed=11, dominance=1.0)
     rng = np.random.default_rng(12)
