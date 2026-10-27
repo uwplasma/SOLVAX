@@ -798,7 +798,7 @@ def block_cyclic_reduction_factor(
         raise ValueError("cutoff must be positive")
     lower, diag, upper = map(jnp.asarray, (lower, diag, upper))
     work = jnp.result_type(diag)
-    fdt = work if factor_dtype is None else factor_dtype
+    fdt = work if factor_dtype is None else _same_kind(factor_dtype, work)
     levels = []
     while diag.shape[0] > cutoff:
         n = diag.shape[0]
