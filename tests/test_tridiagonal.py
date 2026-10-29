@@ -123,13 +123,13 @@ def test_factored_solve_reuses_bands_for_multiple_right_hand_sides():
     second_rhs = (1.5 - 0.2j) * rhs
     second = solve(second_rhs)
     assert first == pytest.approx(
-        tridiagonal_solve(lower, diag, upper, rhs, method="thomas"), abs=1.0e-13
+        np.asarray(tridiagonal_solve(lower, diag, upper, rhs, method="thomas")), abs=1.0e-13
     )
     assert second == pytest.approx(
         dense_solve(lower, diag, upper, second_rhs), abs=1.0e-12
     )
     checked = tridiagonal_solve_factored_checked(factors, second_rhs)
-    assert checked.solution == pytest.approx(second, abs=1.0e-12)
+    assert checked.solution == pytest.approx(np.asarray(second), abs=1.0e-12)
     assert not np.any(np.asarray(checked.diagnostics.fallback_used))
 
 
@@ -286,7 +286,7 @@ def test_complex_rhs_preserves_real_bands_and_is_differentiable(method):
     value, gradient = jax.value_and_grad(
         lambda scale: jnp.real(jnp.vdot(solve(scale * rhs), solve(scale * rhs)))
     )(jnp.asarray(1.0))
-    assert gradient == pytest.approx(2.0 * value, rel=1.0e-10)
+    assert gradient == pytest.approx(float(2.0 * value), rel=1.0e-10)
 
 
 @pytest.mark.parametrize("method", ["thomas", "lax", "auto"])
@@ -315,7 +315,7 @@ def test_complex64_rhs_supports_forward_and_reverse_transforms():
     _, pullback = jax.vjp(solve, rhs)
     assert solved.dtype == jnp.complex64
     assert solved == pytest.approx(dense_solve(lower, diag, upper, rhs), abs=2.0e-5)
-    assert tangent == pytest.approx(0.1 * solved, abs=2.0e-6)
+    assert tangent == pytest.approx(np.asarray(0.1 * solved), abs=2.0e-6)
     assert pullback(solved)[0].shape == rhs.shape
 
 
@@ -348,7 +348,7 @@ def test_checked_solve_matches_direct_and_reports_stable_columns():
         )
     )(rhs)
     expected = tridiagonal_solve(lower, diag, upper, rhs, method="thomas")
-    assert result.solution == pytest.approx(expected, abs=1.0e-13)
+    assert result.solution == pytest.approx(np.asarray(expected), abs=1.0e-13)
     assert np.all(np.asarray(result.diagnostics.well_conditioned))
     assert np.all(np.asarray(result.diagnostics.residual_acceptable))
     assert not np.any(np.asarray(result.diagnostics.fallback_used))
@@ -374,7 +374,7 @@ def test_checked_solve_falls_back_only_for_singular_coefficient_column():
     expected_safe = tridiagonal_solve(
         lower[:, 1], diag[:, 1], upper[:, 1], rhs[:, 1], method="thomas"
     )
-    assert result.solution[:, 1] == pytest.approx(expected_safe, abs=1.0e-13)
+    assert result.solution[:, 1] == pytest.approx(np.asarray(expected_safe), abs=1.0e-13)
     assert np.array_equal(
         np.asarray(result.diagnostics.fallback_used), np.asarray([True, False])
     )
@@ -497,7 +497,7 @@ def test_cyclic_jit_vmap_and_gradient():
     step = 1e-6
     perturbation = jnp.zeros_like(diag).at[4].set(step)
     finite_difference = (loss(diag + perturbation) - loss(diag - perturbation)) / (2 * step)
-    assert gradient[4] == pytest.approx(finite_difference, rel=1e-5)
+    assert gradient[4] == pytest.approx(float(finite_difference), rel=1e-5)
 
 
 @pytest.mark.parametrize("method", ["thomas", "lax", "auto"])
