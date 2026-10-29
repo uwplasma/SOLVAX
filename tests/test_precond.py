@@ -346,7 +346,7 @@ def test_additive_tridiagonal_periodic_line_is_dense_exact_and_differentiable():
     np.testing.assert_allclose(jax.jit(solve)(rhs), jnp.linalg.solve(dense, rhs))
     objective = lambda scale: jnp.sum(solve(scale * rhs) ** 2)  # noqa: E731
     value, gradient = jax.value_and_grad(objective)(jnp.asarray(1.0))
-    assert gradient == pytest.approx(2.0 * value, rel=1.0e-12)
+    assert gradient == pytest.approx(float(2.0 * value), rel=1.0e-12)
 
 
 def poisson_hierarchy():
@@ -611,7 +611,7 @@ def test_galerkin_deflation_is_spd_jittable_and_accelerates_pcg():
     left = jnp.asarray(rng.standard_normal(n_fine))
     right = jnp.asarray(rng.standard_normal(n_fine))
     assert jnp.vdot(left, precond(right)) == pytest.approx(
-        jnp.vdot(precond(left), right), abs=1e-12
+        float(jnp.vdot(precond(left), right)), abs=1e-12
     )
 
     # Materializing this small test operator verifies positive definiteness;

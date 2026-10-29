@@ -32,7 +32,7 @@ def test_fixed_point_iteration_supports_a_physical_residual_norm():
     assert solution.converged
     assert solution.iterations < 40
     assert solution.residual_norm <= 1.0e-8
-    assert solution.x == pytest.approx(target, abs=1.0e-8)
+    assert solution.x == pytest.approx(np.asarray(target), abs=1.0e-8)
 
     default_norm = fixed_point_iteration(
         lambda x: 0.5 * (x + target),
@@ -42,7 +42,7 @@ def test_fixed_point_iteration_supports_a_physical_residual_norm():
         max_steps=40,
     )
     assert default_norm.converged
-    assert default_norm.x == pytest.approx(target, abs=2.0e-8)
+    assert default_norm.x == pytest.approx(np.asarray(target), abs=2.0e-8)
 
 
 def test_fixed_point_iteration_can_run_exactly_the_declared_steps():
@@ -114,7 +114,7 @@ def test_aitken_fixed_point_accelerates_slow_affine_vector_map():
     solution = aitken_fixed_point(mapping, jnp.zeros_like(target), max_steps=20, rtol=1.0e-6)
     assert solution.converged
     assert solution.iterations < 10
-    assert solution.x == pytest.approx(target, rel=5.0e-6, abs=5.0e-6)
+    assert solution.x == pytest.approx(np.asarray(target), rel=5.0e-6, abs=5.0e-6)
     assert solution.residual_norm <= 1.0e-6
 
 
@@ -130,7 +130,7 @@ def test_aitken_fixed_point_is_jittable_and_vmappable():
 
     values = jnp.asarray([1.0, 2.0, 3.0])
     roots, converged = jax.jit(jax.vmap(solve))(values)
-    assert roots == pytest.approx(values, rel=1.0e-6, abs=1.0e-6)
+    assert roots == pytest.approx(np.asarray(values), rel=1.0e-6, abs=1.0e-6)
     assert jnp.all(converged)
 
 
@@ -146,7 +146,7 @@ def test_complex_aitken_and_anderson_converge_with_real_safeguards():
     )()
     assert solution.converged
     assert not jnp.issubdtype(solution.relaxation.dtype, jnp.complexfloating)
-    assert solution.x == pytest.approx(target, rel=2.0e-6, abs=2.0e-6)
+    assert solution.x == pytest.approx(np.asarray(target), rel=2.0e-6, abs=2.0e-6)
 
     iterates = jnp.stack([jnp.zeros_like(target), 0.2 * target])
     residuals = jnp.stack([0.2 * target, 0.16 * target])
@@ -284,7 +284,7 @@ def test_anderson_mixing_accelerates_a_multimode_affine_map():
         residuals.append(residual)
         x = anderson_mixing(jnp.stack(iterates[-4:]), jnp.stack(residuals[-4:]))
 
-    assert x == pytest.approx(target, rel=2.0e-5, abs=2.0e-5)
+    assert x == pytest.approx(np.asarray(target), rel=2.0e-5, abs=2.0e-5)
 
 
 def test_affine_fixed_point_gmres_solves_a_slow_multimode_map():
@@ -301,7 +301,7 @@ def test_affine_fixed_point_gmres_solves_a_slow_multimode_map():
 
     assert solution.converged
     assert solution.iterations <= 3
-    assert solution.x == pytest.approx(target, rel=2.0e-5, abs=2.0e-5)
+    assert solution.x == pytest.approx(np.asarray(target), rel=2.0e-5, abs=2.0e-5)
 
 
 def test_affine_fixed_point_gmres_uses_an_implicit_accurate_derivative():
@@ -329,8 +329,8 @@ def test_affine_fixed_point_gmres_uses_an_implicit_accurate_derivative():
 
     value, gradient = jax.jit(jax.value_and_grad(objective))(parameters)
     expected_value, expected_gradient = jax.value_and_grad(exact)(parameters)
-    assert value == pytest.approx(expected_value, rel=2.0e-10)
-    assert gradient == pytest.approx(expected_gradient, rel=2.0e-9, abs=2.0e-10)
+    assert value == pytest.approx(float(expected_value), rel=2.0e-10)
+    assert gradient == pytest.approx(np.asarray(expected_gradient), rel=2.0e-9, abs=2.0e-10)
     assert "custom_linear_solve" in str(jax.make_jaxpr(jax.grad(objective))(parameters))
     reverse_memory = {
         restarts: jax.jit(
@@ -371,10 +371,10 @@ def test_affine_fixed_point_gmres_supports_pytrees_and_custom_inner_products():
 
     assert solution.converged
     assert solution.x["flow"] == pytest.approx(
-        target["flow"], rel=2.0e-5, abs=2.0e-5
+        np.asarray(target["flow"]), rel=2.0e-5, abs=2.0e-5
     )
     assert solution.x["potential"] == pytest.approx(
-        target["potential"], rel=2.0e-5, abs=2.0e-5
+        np.asarray(target["potential"]), rel=2.0e-5, abs=2.0e-5
     )
 
 
