@@ -143,7 +143,7 @@ from solvax.operators import (
     schur_complement_precond,
     schur_projected_precond,
 )
-from solvax.parallel import axis_inner_product, shard_batch
+from solvax.parallel import available_cpus, axis_inner_product, map_independent, shard_batch
 from solvax.pcg import PCGDiagnostics, PCGSolution, pcg, pcg_linear_solve, status_name
 from solvax.precond import (
     MultigridHierarchy,
@@ -364,6 +364,8 @@ __all__ = [
     "BorderedOperator",
     "schur_complement_precond",
     "schur_projected_precond",
+    "available_cpus",
+    "map_independent",
     "shard_batch",
     "additive_preconditioner",
     "alfven_block",

@@ -14,6 +14,10 @@ pinned here rather than asserted in prose:
    collectives.
 """
 
+import math
+import multiprocessing
+import os
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -21,9 +25,13 @@ import pytest
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
+import solvax.parallel
 from solvax import (
+    available_cpus,
+    chunk_map,
     gmres,
     linear_solve,
+    map_independent,
     pcg,
     pcg_linear_solve,
     shard_batch,
@@ -106,6 +114,122 @@ def test_shard_batch_validates_layout():
         )
     with pytest.raises(ValueError, match="no axis"):
         shard_batch(identity, mesh=mesh, input_rank=1, output_rank=1, axis_name="missing")
+
+
+def test_shard_batch_check_vma_admits_custom_linear_solve():
+    mesh = _mesh()
+    values = jnp.arange(1.0, 17.0)
+
+    def solve_one(value):
+        return jax.lax.custom_linear_solve(lambda x: value * x, value**2, lambda _, b: b / value)
+
+    def local(batch):
+        return jax.lax.map(solve_one, batch)
+
+    mapped = shard_batch(
+        local, mesh=mesh, input_rank=1, output_rank=1, axis_name="i", check_vma=False
+    )
+    assert np.allclose(mapped(values), values)
+
+
+@pytest.mark.parametrize("chunk_size", [None, 2])
+@pytest.mark.parametrize("size", [3, 8, 13])
+def test_chunk_map_on_a_mesh_pads_shards_and_trims(chunk_size, size):
+    mesh = _mesh()
+    xs = {"a": jnp.arange(float(size)), "b": jnp.arange(2.0 * size).reshape(size, 2)}
+
+    def fun(item):
+        return {"sum": item["a"] + item["b"].sum(), "pair": item["b"] * item["a"]}
+
+    got = jax.jit(lambda v: chunk_map(fun, v, chunk_size=chunk_size, mesh=mesh))(xs)
+    expected = jax.vmap(fun)(xs)
+    for key in expected:
+        assert got[key].shape == expected[key].shape
+        assert np.allclose(got[key], expected[key])
+
+
+def test_chunk_map_on_a_mesh_differentiates_and_handles_edges():
+    mesh = _mesh()
+    xs = jnp.arange(1.0, 12.0)
+    grad = jax.grad(lambda v: jnp.sum(chunk_map(lambda x: x**2, v, chunk_size=2, mesh=mesh)))(xs)
+    assert np.allclose(grad, 2 * xs)
+    assert chunk_map(lambda x: x, jnp.zeros((0, 2)), mesh=mesh).shape == (0, 2)
+    with pytest.raises(ValueError, match="native backend"):
+        chunk_map(lambda x: x, xs, backend="adv", mesh=mesh)
+    with pytest.raises(TypeError, match="unsupported keyword"):
+        chunk_map(lambda x: x, xs, mesh=mesh, in_axes=0)
+    square = Mesh(np.array(jax.devices()[:8]).reshape(2, 4), axis_names=("i", "j"))
+    with pytest.raises(ValueError, match="one axis"):
+        chunk_map(lambda x: x, xs, mesh=square)
+
+
+@pytest.mark.parametrize(
+    ("variables", "cgroup", "expected"),
+    [
+        ({"SLURM_CPUS_PER_TASK": "3"}, {}, 3),
+        ({"PBS_NP": "4", "LSB_DJOB_NUMPROC": "2"}, {}, 2),
+        ({"NSLOTS": "bad", "PBS_NP": "0"}, {}, 16),
+        ({}, {"cpu.max": "250000 100000\n"}, 3),
+        ({}, {"cpu.max": "max 100000\n"}, 16),
+        ({}, {"cpu.max": "broken\n"}, 16),
+        ({}, {"cpu/cpu.cfs_quota_us": "500000\n", "cpu/cpu.cfs_period_us": "100000\n"}, 5),
+        ({}, {"cpu/cpu.cfs_quota_us": "-1\n", "cpu/cpu.cfs_period_us": "100000\n"}, 16),
+        ({"SLURM_CPUS_PER_TASK": "9"}, {"cpu.max": "400000 100000\n"}, 4),
+    ],
+)
+def test_available_cpus_takes_smallest_limit(monkeypatch, tmp_path, variables, cgroup, expected):
+    for name in solvax.parallel._SCHEDULER_CPU_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+    for name, value in variables.items():
+        monkeypatch.setenv(name, value)
+    for name, text in cgroup.items():
+        (tmp_path / name).parent.mkdir(exist_ok=True)
+        (tmp_path / name).write_text(text)
+    monkeypatch.setattr(solvax.parallel, "_CGROUP_ROOT", str(tmp_path))
+    monkeypatch.setattr(os, "cpu_count", lambda: 16)
+    monkeypatch.setattr(os, "sched_getaffinity", lambda _: set(range(32)), raising=False)
+    assert available_cpus() == expected
+    monkeypatch.setattr(os, "sched_getaffinity", lambda _: {0, 1})
+    assert available_cpus() == min(expected, 2)
+    monkeypatch.delattr(os, "sched_getaffinity")
+    assert available_cpus() == expected
+
+
+def _child_process(_):
+    return multiprocessing.get_start_method(allow_none=True), os.getpid()
+
+
+@pytest.mark.parametrize("workers", [None, 1, 3, 100])
+def test_map_independent_threads_match_a_serial_loop(workers):
+    assert map_independent(lambda x: x**2, range(7), workers=workers) == [x**2 for x in range(7)]
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_map_independent_reports_failures_in_input_order(workers):
+    def fail_on_odd(x):
+        if x % 2:
+            raise ValueError(f"item {x}")
+        return x
+
+    results = map_independent(fail_on_odd, range(4), workers=workers, return_exceptions=True)
+    assert [results[0], results[2]] == [0, 2]
+    assert [str(results[1]), str(results[3])] == ["item 1", "item 3"]
+    with pytest.raises(ValueError, match="item 1"):
+        map_independent(fail_on_odd, range(4), workers=workers)
+
+
+def test_map_independent_edges_and_spawned_processes():
+    assert map_independent(abs, [], executor="process") == []
+    with pytest.raises(ValueError, match="executor"):
+        map_independent(abs, [1], executor="fork")
+    assert map_independent(math.sqrt, [4.0, 9.0], workers=2, executor="process") == [2.0, 3.0]
+    results = map_independent(
+        math.sqrt, [4.0, -1.0], workers=2, executor="process", return_exceptions=True
+    )
+    assert results[0] == 2.0 and isinstance(results[1], ValueError)
+    # One worker still gets a child: callers rely on it to set its own device environment.
+    [(method, pid)] = map_independent(_child_process, [0], workers=1, executor="process")
+    assert method == "spawn" and pid != os.getpid()
 
 
 def test_sharded_batched_tridiagonal_is_collective_free_forward_and_reverse():

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- `available_cpus()` returns the smallest CPU limit on this process: affinity, cgroup quota, Slurm, PBS,
+  SGE, LSF, `os.cpu_count()`.
+- `map_independent(fn, items, *, workers=None, executor="thread", return_exceptions=False)` maps
+  independent Python tasks in input order. `executor="process"` is spawn-only.
+- `shard_batch(..., check_vma=True)` exposes the varying-axis check; pass `False` for local programs it
+  wrongly rejects, such as `custom_linear_solve`.
+- `chunk_map(..., mesh=None)` runs chunks per device on a one-axis mesh, padding an uneven tail by
+  repeating the last item and trimming the results.
+
 ## 0.34.1 - 2026-10-27
 
 - `block_cyclic_reduction_factor(..., factor_dtype=...)` keeps the complex kind: complex bands with a
