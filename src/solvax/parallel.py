@@ -61,18 +61,15 @@ def available_cpus() -> int:
     cgroup CPU quota, and the Slurm, PBS, SGE and LSF allocation variables.
     Unset or malformed limits are ignored. The result is at least 1.
     """
-    limits = [os.cpu_count() or 1]
     affinity = getattr(os, "sched_getaffinity", None)
-    if affinity is not None:
-        limits.append(len(affinity(0)))
-    quota = _cgroup_cpus()
-    if quota is not None:
-        limits.append(quota)
-    for name in _SCHEDULER_CPU_VARIABLES:
-        value = os.environ.get(name, "")
-        if value.isdecimal() and int(value) > 0:
-            limits.append(int(value))
-    return max(min(limits), 1)
+    values = (os.environ.get(name, "") for name in _SCHEDULER_CPU_VARIABLES)
+    limits = [
+        os.cpu_count() or 1,
+        len(affinity(0)) if affinity else None,
+        _cgroup_cpus(),
+        *(int(value) for value in values if value.isdecimal() and int(value) > 0),
+    ]
+    return max(min(limit for limit in limits if limit is not None), 1)
 
 
 def map_independent(
@@ -116,8 +113,7 @@ def map_independent(
     tasks = list(items)
     if not tasks:
         return []
-    count = available_cpus() if workers is None else int(workers)
-    count = max(1, min(count, len(tasks)))
+    count = max(1, min(available_cpus() if workers is None else int(workers), len(tasks)))
 
     def collect(calls: Iterable[Callable[[], Any]]) -> list[Any]:
         results: list[Any] = []
@@ -132,12 +128,11 @@ def map_independent(
 
     if executor == "thread" and count == 1:
         return collect(partial(fn, task) for task in tasks)
-    pool: ThreadPoolExecutor | ProcessPoolExecutor
-    if executor == "thread":
-        pool = ThreadPoolExecutor(count)
-    else:
-        pool = ProcessPoolExecutor(count, mp_context=multiprocessing.get_context("spawn"))
-    with pool:
+    with (
+        ThreadPoolExecutor(count)
+        if executor == "thread"
+        else ProcessPoolExecutor(count, mp_context=multiprocessing.get_context("spawn"))
+    ) as pool:
         try:
             return collect([pool.submit(fn, task).result for task in tasks])
         except BaseException:
@@ -188,9 +183,7 @@ def shard_batch(
     if output_rank < 1:
         raise ValueError("output_rank must be at least 1")
     if not -output_rank <= output_batch_axis < output_rank:
-        raise ValueError(
-            f"output_batch_axis must index an output with rank {output_rank}"
-        )
+        raise ValueError(f"output_batch_axis must index an output with rank {output_rank}")
     normalized_output_axis = output_batch_axis % output_rank
     if axis_name not in mesh.axis_names:
         raise ValueError(f"mesh has no axis named {axis_name!r}")
