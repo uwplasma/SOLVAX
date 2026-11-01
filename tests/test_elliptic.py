@@ -157,7 +157,7 @@ def test_periodic_poisson_recovers_fourier_mode(shape, spacing, mode):
 
     recovered = solve_periodic_poisson(eigenvalue * solution, spacing=spacing)
 
-    assert recovered == pytest.approx(solution, rel=1.0e-11, abs=1.0e-11)
+    assert recovered == pytest.approx(np.asarray(solution), rel=1.0e-11, abs=1.0e-11)
 
 
 def test_periodic_poisson_projects_rhs_mean_and_sets_solution_mean():
@@ -168,7 +168,7 @@ def test_periodic_poisson_projects_rhs_mean_and_sets_solution_mean():
     applied = jnp.fft.ifftn(symbol * jnp.fft.fftn(zero_mean_solution)).real
 
     assert jnp.mean(solution) == pytest.approx(2.5)
-    assert applied == pytest.approx(rhs - jnp.mean(rhs), rel=1.0e-10, abs=1.0e-10)
+    assert applied == pytest.approx(np.asarray(rhs - jnp.mean(rhs)), rel=1.0e-10, abs=1.0e-10)
 
 
 def test_periodic_poisson_spectral_api_is_complex_jit_and_grad_transparent():
@@ -199,7 +199,7 @@ def test_periodic_poisson_spacing_is_differentiable_under_jit():
 
     spacing = jnp.asarray(0.2)
     value, derivative = jax.jit(jax.value_and_grad(objective))(spacing)
-    assert derivative == pytest.approx(4.0 * value / spacing, rel=2.0e-12)
+    assert derivative == pytest.approx(float(4.0 * value / spacing), rel=2.0e-12)
     invalid = jax.jit(periodic_poisson_eigenvalues, static_argnums=0)((size,), -spacing)
     assert jnp.isnan(invalid).all()
 

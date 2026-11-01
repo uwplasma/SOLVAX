@@ -447,8 +447,8 @@ def test_eigenvalue_first_derivative_exact_scaling_and_dense_finite_differences(
 
     lam = eigenvalue(1.0, 1.0)
     # K is linear in k and the weight enters inversely: lam ~ k / f, so both derivatives are exact
-    assert jax.grad(eigenvalue, 0)(1.0, 1.0) == pytest.approx(lam, rel=1e-8)
-    assert jax.grad(eigenvalue, 1)(1.0, 1.0) == pytest.approx(-lam, rel=1e-8)
+    assert jax.grad(eigenvalue, 0)(1.0, 1.0) == pytest.approx(float(lam), rel=1e-8)
+    assert jax.grad(eigenvalue, 1)(1.0, 1.0) == pytest.approx(float(-lam), rel=1e-8)
     # a nonuniform perturbation against dense central differences of the generalized eigenvalue
     direction = np.random.default_rng(18).standard_normal((5, 4))
     grad = jax.grad(lambda h: eigenvalue(1.0, 1.0, k * (1 + h * direction)))(0.0)
@@ -462,7 +462,7 @@ def test_eigenvalue_first_derivative_exact_scaling_and_dense_finite_differences(
     assert grad == pytest.approx((dense(1e-5) - dense(-1e-5)) / 2e-5, rel=1e-6)
     # forward mode agrees with reverse mode
     assert jax.jvp(lambda h: eigenvalue(1.0 + h, 1.0), (0.0,), (1.0,))[1] == pytest.approx(
-        lam, rel=1e-8
+        float(lam), rel=1e-8
     )
 
 
@@ -727,7 +727,9 @@ def test_schur_solve_exact_derivatives_and_failure_semantics():
         return jnp.sum(weight.ravel() * _gauged_solve(schur, volumes.ravel(), rhs.ravel()))
 
     assert abs(exact(0.05)[0] - dense(0.05)) < 1e-10
-    assert jax.grad(lambda n: exact(n)[0])(0.05) == pytest.approx(jax.grad(dense)(0.05), rel=1e-7)
+    assert jax.grad(lambda n: exact(n)[0])(0.05) == pytest.approx(
+        float(jax.grad(dense)(0.05)), rel=1e-7
+    )
     # an unconverged exact stage is NaN with NaN derivatives in the closed-over parameter
     value, info = exact(0.05, steps=1)
     assert not bool(info.converged) and np.isnan(value)
