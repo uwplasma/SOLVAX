@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.35.0 - 2026-11-02
+
 - `available_cpus()` returns the smallest CPU limit on this process: affinity, cgroup quota, Slurm, PBS,
   SGE, LSF, `os.cpu_count()`.
 - `map_independent(fn, items, *, workers=None, executor="thread", return_exceptions=False)` maps
