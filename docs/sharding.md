@@ -43,6 +43,19 @@ stays sharded. No collective is needed when the local program does not add
 one. The test records zero collectives and checks the local batch size on an
 eight-device mesh.
 
+A `custom_linear_solve` in the local program needs `check_vma=False`.
+`sx.chunk_map(fun, xs, chunk_size=k, mesh=mesh)` does the same for per-item
+functions with any batch length: it pads an uneven tail by repeating the last
+item, evaluates those padded items, and trims their results.
+
+## Independent Python tasks
+
+`sx.map_independent(fn, items, workers=None, executor="thread")` is for work
+that cannot share one compiled program, such as whole solves. It keeps input
+order and defaults to `sx.available_cpus()` workers, which respects affinity,
+cgroup quotas and Slurm, PBS, SGE and LSF allocations. Threads overlap
+GIL-releasing XLA execution. `executor="process"` always uses `spawn` children.
+
 ## Counting communication
 
 Because solves are jit-compiled, their communication is inspectable: count the

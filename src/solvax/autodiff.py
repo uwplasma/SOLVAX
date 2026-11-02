@@ -93,6 +93,9 @@ from typing import Literal
 
 import jax
 import jax.numpy as jnp
+from jax.sharding import Mesh
+
+from solvax.parallel import _sharded_map
 
 __all__ = [
     "checkpointed_fori_loop",
@@ -242,6 +245,7 @@ def chunk_map(
     *,
     chunk_size: int | None = None,
     backend: Backend | None = None,
+    mesh: Mesh | None = None,
     **kwargs,
 ) -> jax.Array:
     """Map ``fun`` over the leading axis of ``xs`` in fixed-size chunks.
@@ -262,10 +266,28 @@ def chunk_map(
         fun: callable applied to a single leading-axis slice of ``xs``.
         xs: array (or pytree of arrays) with a common leading axis.
         chunk_size: chunk width, or ``None`` for a single vmap.
+        mesh: one-axis device mesh. Each device then maps its own part of the
+            leading axis, with ``chunk_size`` applying per device. A tail that
+            does not divide evenly is padded by repeating the last item, whose
+            extra results are dropped, so the padded items are evaluated. Needs
+            the native backend. Wrap the call in :func:`jax.jit` to reuse the
+            compiled program.
 
     Returns:
         The stacked results, leading axis equal to ``len(xs)``.
     """
+    if mesh is not None:
+        if backend == "adv":
+            raise ValueError("chunk_map(mesh=...) needs the native backend")
+        _reject_adv_only(kwargs, "chunk_map")
+        size = jnp.shape(jax.tree.leaves(xs)[0])[0]
+        if size:
+            return _sharded_map(
+                lambda local: chunk_map(fun, local, chunk_size=chunk_size, backend="native"),
+                xs,
+                mesh,
+            )
+        backend = "native"
     if _resolve_backend(backend) == "adv":
         return _adv().batch_vmap(fun, batch_size=chunk_size, **kwargs)(xs)
     _reject_adv_only(kwargs, "chunk_map")
