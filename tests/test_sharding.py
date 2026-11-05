@@ -36,6 +36,7 @@ from solvax import (
     pcg_linear_solve,
     shard_batch,
     tridiagonal_solve,
+    tridiagonal_solve_checked,
 )
 
 jax.config.update("jax_enable_x64", True)
@@ -232,7 +233,8 @@ def test_map_independent_edges_and_spawned_processes():
     assert method == "spawn" and pid != os.getpid()
 
 
-def test_sharded_batched_tridiagonal_is_collective_free_forward_and_reverse():
+@pytest.mark.parametrize("checked", [False, True])
+def test_sharded_batched_tridiagonal_is_collective_free_forward_and_reverse(checked):
     # Columns are independent systems: sharding the batch axis must produce a
     # solve with zero collectives -- and the same must hold for its gradient.
     n, cols = 32, 64
@@ -244,6 +246,10 @@ def test_sharded_batched_tridiagonal_is_collective_free_forward_and_reverse():
     rhs = _shard(mesh, jnp.asarray(rng.standard_normal((n, cols))), P(None, "i"))
 
     def solve(d):
+        if checked:
+            return tridiagonal_solve_checked(
+                lower, d, upper, rhs, method="thomas"
+            ).solution
         return tridiagonal_solve(lower, d, upper, rhs, method="thomas")
 
     solution = jax.jit(solve)(diag)

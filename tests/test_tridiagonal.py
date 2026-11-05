@@ -20,6 +20,7 @@ from solvax import (
     tridiagonal_solve_factored,
     tridiagonal_solve_factored_checked,
 )
+from solvax.tridiagonal import _checked_tridiagonal_result, _thomas_pivots
 
 jax.config.update("jax_enable_x64", True)
 
@@ -369,13 +370,15 @@ def test_unknown_method_raises():
         tridiagonal_solve(lower, diag, upper, rhs, method="bogus")
 
 
-def test_checked_solve_matches_direct_and_reports_stable_columns():
-    lower, diag, upper, rhs = make_tridiag(12, (3,), 2, seed=17)
+@pytest.mark.parametrize("n,fields", [(1, (2,)), (2, (2, 3)), (12, (2,))])
+def test_checked_solve_matches_direct_and_reports_stable_columns(n, fields):
+    lower, diag, upper, _ = make_tridiag(n, (3,), seed=17)
+    rhs = jnp.arange(n * 3 * np.prod(fields), dtype=float).reshape((n, 3) + fields) + 1
     result = jax.jit(
-        lambda b: tridiagonal_solve_checked(
-            lower, diag, upper, b, method="thomas"
+        lambda d, b: tridiagonal_solve_checked(
+            lower, d, upper, b, method="thomas"
         )
-    )(rhs)
+    )(diag, rhs)
     expected = tridiagonal_solve(lower, diag, upper, rhs, method="thomas")
     assert result.solution == pytest.approx(np.asarray(expected), abs=1.0e-13)
     assert np.all(np.asarray(result.diagnostics.well_conditioned))
@@ -383,9 +386,38 @@ def test_checked_solve_matches_direct_and_reports_stable_columns():
     assert not np.any(np.asarray(result.diagnostics.fallback_used))
     assert np.all(np.asarray(result.diagnostics.minimum_relative_pivot) > 0.8)
     assert np.all(np.asarray(result.diagnostics.relative_residual) < 1.0e-15)
+    def replay(diagonal, value):
+        return _checked_tridiagonal_result(
+            tridiagonal_solve(lower, diagonal, upper, value, method="thomas"),
+            lower, diagonal, upper, value, _thomas_pivots(lower, diagonal, upper),
+            pivot_rtol=1.0e-8, residual_rtol=1.0e-8, fallback="identity",
+        )
+
+    for actual, reference in zip(
+        jax.tree.leaves(result), jax.tree.leaves(jax.jit(replay)(diag, rhs)), strict=True
+    ):
+        np.testing.assert_array_equal(actual, reference)
+    def pivot(diagonal):
+        return tridiagonal_solve_checked(
+            lower, diagonal, upper, rhs, method="thomas"
+        ).diagnostics.minimum_relative_pivot
+
+    replay_pivot = lambda diagonal: replay(diagonal, rhs).diagnostics.minimum_relative_pivot  # noqa: E731
+    np.testing.assert_allclose(
+        jax.grad(lambda diagonal: jnp.sum(pivot(diagonal)))(diag),
+        jax.grad(lambda diagonal: jnp.sum(replay_pivot(diagonal)))(diag),
+        rtol=1.0e-13, atol=1.0e-13,
+    )
+    np.testing.assert_allclose(
+        jax.jvp(pivot, (diag,), (jnp.ones_like(diag),))[1],
+        jax.jvp(replay_pivot, (diag,), (jnp.ones_like(diag),))[1],
+        rtol=1.0e-13, atol=1.0e-13,
+    )
 
 
-def test_checked_solve_falls_back_only_for_singular_coefficient_column():
+@pytest.mark.parametrize("fallback", ["identity", "nan", "none"])
+@pytest.mark.parametrize("complex_bands", [False, True])
+def test_checked_solve_falls_back_only_for_singular_coefficient_column(fallback, complex_bands):
     lower = jnp.asarray(
         [[0.0, 0.0], [1.0, -0.2], [1.0, -0.2], [1.0, -0.2]]
     )
@@ -395,17 +427,29 @@ def test_checked_solve_falls_back_only_for_singular_coefficient_column():
     upper = jnp.asarray(
         [[1.0, -0.2], [1.0, -0.2], [1.0, -0.2], [0.0, 0.0]]
     )
+    if complex_bands:
+        lower, diag, upper = 2j * lower, diag.astype(jnp.complex128), -0.5j * upper
     rhs = jnp.arange(16.0).reshape(4, 2, 2) + 1.0
     result = tridiagonal_solve_checked(
-        lower, diag, upper, rhs, method="thomas", fallback="identity"
+        lower, diag, upper, rhs, method="thomas", fallback=fallback
     )
-    assert np.array_equal(np.asarray(result.solution[:, 0]), np.asarray(rhs[:, 0]))
+    replay = _checked_tridiagonal_result(
+        tridiagonal_solve(lower, diag, upper, rhs, method="thomas"),
+        lower, diag, upper, rhs, _thomas_pivots(lower, diag, upper),
+        pivot_rtol=1.0e-8, residual_rtol=1.0e-8, fallback=fallback,
+    )
+    for actual, reference in zip(jax.tree.leaves(result), jax.tree.leaves(replay), strict=True):
+        np.testing.assert_array_equal(actual, reference)
+    if fallback == "identity":
+        np.testing.assert_array_equal(result.solution[:, 0], rhs[:, 0])
+    elif fallback == "nan":
+        assert np.all(np.isnan(np.asarray(result.solution[:, 0])))
     expected_safe = tridiagonal_solve(
         lower[:, 1], diag[:, 1], upper[:, 1], rhs[:, 1], method="thomas"
     )
     assert result.solution[:, 1] == pytest.approx(np.asarray(expected_safe), abs=1.0e-13)
     assert np.array_equal(
-        np.asarray(result.diagnostics.fallback_used), np.asarray([True, False])
+        np.asarray(result.diagnostics.fallback_used), np.asarray([fallback != "none", False])
     )
     assert result.diagnostics.minimum_relative_pivot[0] == 0.0
 
