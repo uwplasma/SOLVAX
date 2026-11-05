@@ -551,8 +551,16 @@ def test_degenerate_shapes_are_handled_rather_than_crashing():
     dense = jnp.asarray([[4.0, 1.0], [1.0, 4.0]])
     assert jnp.allclose(two.ravel(), jnp.linalg.solve(dense, jnp.ones(2)))
 
+    for shape in ((5, 0), (5, 2, 0)):
+        bands = jnp.ones(shape)
+        solve = jax.jit(
+            lambda b, bands=bands: tridiagonal_solve(bands, 3 * bands, bands, b, method="pallas")
+        )
+        assert solve(bands).shape == shape
+        assert jax.grad(lambda b, solve=solve: jnp.sum(solve(b)))(bands).shape == shape
 
-def test_pallas_gradient_matches_thomas():
+
+def test_pallas_gradient_matches_thomas(monkeypatch):
     lower, diag, upper, rhs = make_tridiag(9, (5,), None)
 
     def loss(method, d, b):
@@ -562,3 +570,17 @@ def test_pallas_gradient_matches_thomas():
     g = jax.grad(lambda d, b: loss("pallas", d, b), argnums=(0, 1))(diag, rhs)
     for a, b in zip(g, g_ref, strict=True):
         assert np.allclose(np.asarray(a), np.asarray(b), atol=1e-9)
+
+    import solvax.tridiagonal as implementation
+
+    def forbidden_kernel(*args):
+        pytest.fail("the legacy fallback must not call the Pallas kernel")
+
+    monkeypatch.setattr(jax, "__version_info__", (0, 4, 38))
+    monkeypatch.setattr(implementation, "_pallas_solve_raw", forbidden_kernel)
+    value, gradients = jax.jit(
+        jax.value_and_grad(lambda d, b: loss("pallas", d, b), argnums=(0, 1))
+    )(diag, rhs)
+    np.testing.assert_allclose(value, loss("thomas", diag, rhs), atol=1e-12)
+    for actual, expected in zip(gradients, g_ref, strict=True):
+        np.testing.assert_allclose(actual, expected, atol=1e-12)
