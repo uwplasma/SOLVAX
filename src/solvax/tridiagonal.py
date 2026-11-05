@@ -58,6 +58,7 @@ References
 
 from __future__ import annotations
 
+from functools import partial
 from typing import NamedTuple
 
 import jax
@@ -366,7 +367,7 @@ def tridiagonal_solve_checked(
     r"""Solve and guard a batched tridiagonal preconditioner.
 
     The ordinary direct solve intentionally retains its historical behavior.
-    This opt-in interface additionally replays Thomas elimination on the
+    This opt-in interface additionally checks Thomas elimination on the
     coefficient bands, evaluates the smallest modified pivot relative to the
     corresponding original diagonal, and verifies a normwise backward
     residual.  A failed coefficient column can then be replaced by the
@@ -385,8 +386,18 @@ def tridiagonal_solve_checked(
     """
     _validate_checked_policy(pivot_rtol, residual_rtol, fallback)
     lower, diag, upper, rhs = map(jnp.asarray, (lower, diag, upper, rhs))
-    solution = tridiagonal_solve(lower, diag, upper, rhs, method=method)
-    pivots = _thomas_pivots(lower, diag, upper) if rhs.shape[0] else diag
+    dtype = jnp.result_type(lower, diag, upper, rhs)
+    if (method == "thomas" and rhs.shape[0]
+            and _platform_dependent is not None
+            and lower.dtype == diag.dtype == upper.dtype == dtype
+            and not jnp.issubdtype(dtype, jnp.complexfloating)):
+        solution, pivots = _platform_dependent(
+            *(value.astype(dtype) for value in (lower, diag, upper, rhs)),
+            cuda=_THOMAS_WITH_PIVOTS, default=_thomas_and_pivots,
+        )
+    else:
+        solution = tridiagonal_solve(lower, diag, upper, rhs, method=method)
+        pivots = _thomas_pivots(lower, diag, upper) if rhs.shape[0] else diag
     return _checked_tridiagonal_result(
         solution,
         lower,
@@ -622,8 +633,10 @@ def _sweep(body, initial, values, *, reverse=False):
     return run(initial, values)  # pragma: no cover
 
 
-def _thomas_solve(lower: jax.Array, diag: jax.Array, upper: jax.Array, rhs: jax.Array) -> jax.Array:
+def _thomas_solve(lower: jax.Array, diag: jax.Array, upper: jax.Array, rhs: jax.Array,
+                  *, return_pivots: bool = False):
     """Two-sweep ``lax.scan`` Thomas elimination (bit-reproducible)."""
+    pivot_shape = diag.shape
     if rhs.ndim > diag.ndim:
         expand = (1,) * (rhs.ndim - diag.ndim)
         upper = upper.reshape(upper.shape + expand)
@@ -639,18 +652,31 @@ def _thomas_solve(lower: jax.Array, diag: jax.Array, upper: jax.Array, rhs: jax.
     x0 = rhs[0] / diag0
 
     def forward(carry, inputs):
-        upper_prev, x_prev = carry
+        upper_prev, x_prev = carry[:2]
         upper_j, diag_j, lower_j, rhs_j = inputs
         denom = diag_j - upper_prev * lower_j
         denom = jnp.where(denom != 0.0, denom, eps)
         upper_new = upper_j / denom
         x_new = (rhs_j - x_prev * lower_j) / denom
-        return (upper_new, x_new), (upper_new, x_new)
+        next_carry, values = (upper_new, x_new), (upper_new, x_new)
+        if return_pivots:
+            # Keep the diagnostic's unregularized recurrence, including its
+            # unit substitute at zero pivots, alongside the guarded solve.
+            pivot = diag_j - carry[2] * lower_j
+            checked_upper = upper_j / jnp.where(pivot != 0.0, pivot, jnp.ones_like(pivot))
+            next_carry += (checked_upper,)
+            values += (pivot,)
+        return next_carry, values
 
     if n_rows == 1:
-        return x0[None, ...]
+        solution = x0[None, ...]
+        return (solution, diag.reshape(pivot_shape)) if return_pivots else solution
     inputs = (upper[1:], diag[1:], lower[1:], rhs[1:])
-    _, (upper_rest, x_rest) = _sweep(forward, (upper0, x0), inputs)
+    initial = (upper0, x0)
+    if return_pivots:
+        initial += (upper[0] / jnp.where(diag[0] != 0.0, diag[0], jnp.ones_like(diag[0])),)
+    _, values = _sweep(forward, initial, inputs)
+    upper_rest, x_rest = values[:2]
     upper_norm = jnp.concatenate([upper0[None, ...], upper_rest], axis=0)
     x = jnp.concatenate([x0[None, ...], x_rest], axis=0)
 
@@ -661,7 +687,11 @@ def _thomas_solve(lower: jax.Array, diag: jax.Array, upper: jax.Array, rhs: jax.
 
     x_last = x[-1]
     _, x_body = _sweep(backward, x_last, (upper_norm[:-1], x[:-1]), reverse=True)
-    return jnp.concatenate([x_body, x_last[None, ...]], axis=0)
+    solution = jnp.concatenate([x_body, x_last[None, ...]], axis=0)
+    if return_pivots:
+        pivots = jnp.concatenate((diag[:1], values[2]), axis=0).reshape(pivot_shape)
+        return solution, pivots
+    return solution
 
 
 def _thomas_pivots(lower: jax.Array, diag: jax.Array, upper: jax.Array) -> jax.Array:
@@ -684,6 +714,14 @@ def _thomas_pivots(lower: jax.Array, diag: jax.Array, upper: jax.Array) -> jax.A
         eliminate, upper0, (upper[1:], diag[1:], lower[1:])
     )
     return jnp.concatenate((pivot0[None, ...], remaining), axis=0)
+
+
+_THOMAS_WITH_PIVOTS = partial(_thomas_solve, return_pivots=True)
+
+
+def _thomas_and_pivots(lower, diag, upper, rhs):
+    """Keep the separate-sweep CPU implementation."""
+    return _thomas_solve(lower, diag, upper, rhs), _thomas_pivots(lower, diag, upper)
 
 
 def _tridiagonal_matvec(
