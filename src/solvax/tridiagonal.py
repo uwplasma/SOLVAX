@@ -302,6 +302,9 @@ def tridiagonal_solve(
               CPU path).
             - ``"lax"``: fused :func:`jax.lax.linalg.tridiagonal_solve`
               (cuSPARSE on GPU).
+            - ``"pallas"``: opt-in batched Thomas kernel on NVIDIA GPU.
+              CPU lowering uses the same kernel in interpret mode for
+              verification; use ``"thomas"`` for CPU performance.
             - ``"auto"`` (default): Thomas when lowering for CPU, fused
               otherwise, chosen with :func:`jax.lax.platform_dependent`;
               systems with ``n < 3`` always use Thomas.
@@ -314,7 +317,7 @@ def tridiagonal_solve(
 
     Raises:
         ValueError: if ``method`` is not one of ``"auto"``, ``"thomas"``,
-            ``"lax"``.
+            ``"lax"``, ``"pallas"``.
     """
     lower, diag, upper, rhs = map(jnp.asarray, (lower, diag, upper, rhs))
     n_rows = int(rhs.shape[0])
@@ -675,6 +678,9 @@ def _pallas_solve_raw(lower, diag, upper, rhs, *, block=None, num_warps=None):
     CPU lowering the identical kernel runs in Pallas interpret mode, which is
     the reference used by the tests (slow, not a production path).
     """
+    if rhs.size == 0:
+        return rhs
+
     from jax.experimental import pallas as pl
 
     n = rhs.shape[0]
