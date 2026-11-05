@@ -304,7 +304,9 @@ def tridiagonal_solve(
               (cuSPARSE on GPU).
             - ``"pallas"``: opt-in batched Thomas kernel on NVIDIA GPU.
               CPU lowering uses the same kernel in interpret mode for
-              verification; use ``"thomas"`` for CPU performance.
+              verification; use ``"thomas"`` for CPU performance. JAX 0.4
+              uses portable Thomas on every platform because its conditional
+              lowering cannot safely select the Pallas backend.
             - ``"auto"`` (default): Thomas when lowering for CPU, fused
               otherwise, chosen with :func:`jax.lax.platform_dependent`;
               systems with ``n < 3`` always use Thomas.
@@ -563,6 +565,8 @@ def _lax_solve(lower: jax.Array, diag: jax.Array, upper: jax.Array, rhs: jax.Arr
 
 def _pallas_solve(lower: jax.Array, diag: jax.Array, upper: jax.Array, rhs: jax.Array) -> jax.Array:
     """Differentiable wrapper around the one-launch Pallas Thomas kernel."""
+    if jax.__version_info__ < (0, 5):
+        return _thomas_solve(lower, diag, upper, rhs)
     return _linear_solve(_pallas_solve_raw, lower, diag, upper, rhs)
 
 

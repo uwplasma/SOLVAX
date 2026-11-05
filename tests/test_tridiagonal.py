@@ -560,5 +560,5 @@ def test_pallas_gradient_matches_thomas():
 
     g_ref = jax.grad(lambda d, b: loss("thomas", d, b), argnums=(0, 1))(diag, rhs)
     g = jax.grad(lambda d, b: loss("pallas", d, b), argnums=(0, 1))(diag, rhs)
-    for a, b in zip(g, g_ref):
+    for a, b in zip(g, g_ref, strict=True):
         assert np.allclose(np.asarray(a), np.asarray(b), atol=1e-9)
