@@ -107,6 +107,35 @@ def test_matches_dense(method, n, columns, n_fields):
     assert np.allclose(np.asarray(x), x_ref, atol=1e-10)
 
 
+@pytest.mark.parametrize("method", ["thomas", "lax", "auto"])
+@pytest.mark.parametrize("band_shape", [(), (1, 2), (5, 1)])
+def test_broadcast_bands_match_dense_values_diagnostics_and_gradients(method, band_shape):
+    lower = jnp.full(band_shape, 0.2)
+    upper = jnp.full(band_shape, -0.3)
+    diag = jnp.full((5, 2), 4.0)
+    rhs = jnp.arange(30.0).reshape(5, 2, 3) / 10.0
+
+    def reference(lo):
+        return dense_solve(np.broadcast_to(lo, diag.shape), diag,
+                           np.broadcast_to(upper, diag.shape), rhs)
+
+    checked = jax.jit(lambda lo: tridiagonal_solve_checked(lo, diag, upper, rhs, method=method))
+    result = checked(lower)
+    np.testing.assert_allclose(result.solution, reference(lower), rtol=1e-13, atol=1e-13)
+    np.testing.assert_allclose(
+        result.solution, tridiagonal_solve(lower, diag, upper, rhs, method=method),
+        rtol=1e-13, atol=1e-13,
+    )
+    assert result.diagnostics.fallback_used.shape == diag.shape[1:]
+    assert not np.any(result.diagnostics.fallback_used)
+    loss = lambda lo: jnp.sum(checked(lo).solution ** 2)  # noqa: E731
+    directional = jnp.sum(jax.grad(loss)(lower))
+    step = 1e-5
+    finite_difference = (np.sum(reference(lower + step) ** 2)
+                         - np.sum(reference(lower - step) ** 2)) / (2 * step)
+    np.testing.assert_allclose(directional, finite_difference, rtol=2e-8, atol=1e-10)
+
+
 def test_thomas_matches_textbook_reference():
     lower, diag, upper, rhs = make_tridiag(12, (), None, seed=3)
     x = tridiagonal_solve(lower, diag, upper, rhs, method="thomas")
