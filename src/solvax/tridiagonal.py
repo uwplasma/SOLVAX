@@ -318,6 +318,8 @@ def tridiagonal_solve(
             ``"lax"``.
     """
     lower, diag, upper, rhs = map(jnp.asarray, (lower, diag, upper, rhs))
+    lower = jnp.broadcast_to(lower, diag.shape)
+    upper = jnp.broadcast_to(upper, diag.shape)
     n_rows = int(rhs.shape[0])
     if n_rows == 0:
         return rhs
@@ -386,6 +388,8 @@ def tridiagonal_solve_checked(
     """
     _validate_checked_policy(pivot_rtol, residual_rtol, fallback)
     lower, diag, upper, rhs = map(jnp.asarray, (lower, diag, upper, rhs))
+    lower = jnp.broadcast_to(lower, diag.shape)
+    upper = jnp.broadcast_to(upper, diag.shape)
     dtype = jnp.result_type(lower, diag, upper, rhs)
     if (method == "thomas" and rhs.shape[0]
             and _platform_dependent is not None
