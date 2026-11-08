@@ -354,16 +354,15 @@ def _fgmres_cycle(
     R = jnp.zeros((m, m), dtype)  # Givens-rotated triangular factor
     B = jnp.zeros((k, m), dtype)
     real_dtype = jnp.real(r0).dtype
-    cs = jnp.zeros((m,), real_dtype)
-    sn = jnp.zeros((m,), dtype)
+    Q = jnp.eye(m + 1, dtype=dtype)
     g = jnp.zeros((m + 1,), dtype).at[0].set(beta)
 
     def cond_fun(state):
-        j, _, _, _, _, _, _, _, _, res_est = state
+        j, _, _, _, _, _, _, _, res_est = state
         return (j < m) & (res_est > tol)
 
     def body_fun(state):
-        j, V, Z, H, R, B, cs, sn, g, _ = state
+        j, V, Z, H, R, B, Q, g, _ = state
 
         z = _gmres_precondition(precond, V[j])
         w = _gmres_matvec(matvec, z)
@@ -388,18 +387,8 @@ def _fgmres_cycle(
         h = h.at[j + 1].set(h_next)
         H = H.at[:, j].set(h)  # unrotated column, keeps A Z = C B + V H
 
-        # Apply the accumulated Givens rotations to the new column.
-        def apply_rotation(i, hc):
-            hi, hi1 = hc[i], hc[i + 1]
-            return hc.at[i].set(cs[i] * hi + sn[i] * hi1).at[i + 1].set(
-                -jnp.conj(sn[i]) * hi + cs[i] * hi1
-            )
-
-        # A static trip count with masked updates is bitwise identical to
-        # ``fori_loop(0, j, ...)``, but XLA:GPU runs a dynamic-bound loop as a
-        # host-synchronised while (one device->host copy per rotation), which
-        # dominated GPU FGMRES time.  See ``_masked_rotations``.
-        h = _masked_rotations(apply_rotation, j, m, h)
+        # Accumulated Givens rotations as one matrix: a matvec instead of a sequential loop.
+        h = Q @ h
 
         # New rotation annihilating h[j + 1]; happy breakdown (rho == 0)
         # degenerates to the identity rotation.
@@ -413,28 +402,28 @@ def _fgmres_cycle(
         B = B.at[:, j].set(b_j)
         if store_z:
             Z = Z.at[j].set(z)
-        cs = cs.at[j].set(c_j)
-        sn = sn.at[j].set(s_j)
-        return (j + 1, V, Z, H, R, B, cs, sn, g, res_est)
+        Qj, Qj1 = Q[j], Q[j + 1]
+        Q = Q.at[j].set(c_j * Qj + s_j * Qj1).at[j + 1].set(-jnp.conj(s_j) * Qj + c_j * Qj1)
+        return (j + 1, V, Z, H, R, B, Q, g, res_est)
 
-    init = (jnp.int32(0), V, Z, H, R, B, cs, sn, g, beta)
+    init = (jnp.int32(0), V, Z, H, R, B, Q, g, beta)
     if fixed_work:
         def scan_body(carry, index):
-            used_count, V, Z, H, R, B, cs, sn, g, res_est = carry
+            used_count, V, Z, H, R, B, Q, g, res_est = carry
             active = res_est > tol
-            current = (index, V, Z, H, R, B, cs, sn, g, res_est)
+            current = (index, V, Z, H, R, B, Q, g, res_est)
             candidate = lax.cond(active, body_fun, lambda state: state, current)
-            _, V, Z, H, R, B, cs, sn, g, res_est = candidate
+            _, V, Z, H, R, B, Q, g, res_est = candidate
             return (
                 used_count + active.astype(jnp.int32), V, Z, H, R, B,
-                cs, sn, g, res_est,
+                Q, g, res_est,
             ), None
 
-        fixed_init = (jnp.int32(0), V, Z, H, R, B, cs, sn, g, beta)
+        fixed_init = (jnp.int32(0), V, Z, H, R, B, Q, g, beta)
         fixed_final, _ = lax.scan(scan_body, fixed_init, jnp.arange(m, dtype=jnp.int32))
-        j_f, V, Z, H, R, B, cs, sn, g, res_est = fixed_final
+        j_f, V, Z, H, R, B, Q, g, res_est = fixed_final
     else:
-        j_f, V, Z, H, R, B, cs, sn, g, res_est = lax.while_loop(
+        j_f, V, Z, H, R, B, Q, g, res_est = lax.while_loop(
             cond_fun, body_fun, init
         )
 
