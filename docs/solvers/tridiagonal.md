@@ -213,7 +213,9 @@ no preconditioning instead of returning a potentially enormous finite update.
 
 The checked path deliberately adds one coefficient-only Thomas sweep and a
 matrix-vector residual. It is intended for robustness-sensitive preconditioners
-rather than throughput-only direct solves.
+rather than throughput-only direct solves. On CUDA the Thomas solve and its pivots come from one fused
+Pallas kernel when at most 4096 systems are batched; results are bitwise equal to the scan and tangents use
+the scan.
 
 ## Differentiation
 

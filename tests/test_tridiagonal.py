@@ -20,7 +20,13 @@ from solvax import (
     tridiagonal_solve_factored,
     tridiagonal_solve_factored_checked,
 )
-from solvax.tridiagonal import _checked_tridiagonal_result, _thomas_pivots
+from solvax.tridiagonal import (
+    _THOMAS_WITH_PIVOTS,
+    _checked_tridiagonal_result,
+    _pallas_thomas,
+    _scan_with_pivots,
+    _thomas_pivots,
+)
 
 jax.config.update("jax_enable_x64", True)
 
@@ -623,3 +629,35 @@ def test_degenerate_shapes_are_handled_rather_than_crashing():
     )
     dense = jnp.asarray([[4.0, 1.0], [1.0, 4.0]])
     assert jnp.allclose(two.ravel(), jnp.linalg.solve(dense, jnp.ones(2)))
+
+
+@pytest.mark.parametrize(
+    "n,shape,fields", [(1, (3,), 0), (2, (5,), 2), (9, (20,), 0), (14, (3, 4), 2)]
+)
+def test_pallas_thomas_matches_scan_in_interpret_mode(n, shape, fields):
+    rng = np.random.default_rng(n)
+    lower, upper = (rng.normal(size=(n, *shape)) for _ in range(2))
+    diag = 4.0 + rng.normal(size=(n, *shape))
+    diag[n // 2, ..., 0] = 0.0  # exercises the zero-pivot guard
+    rhs = rng.normal(size=(n, *shape, *(fields * (2,))))
+    args = tuple(jnp.asarray(a) for a in (lower, diag, upper, rhs))
+    got, want = _pallas_thomas(*args, interpret=True), _scan_with_pivots(*args)
+    for g, w in zip(got, want, strict=True):  # FMA contraction may differ by an ulp on CPU
+        np.testing.assert_allclose(g, w, rtol=1e-13, atol=1e-14)
+
+
+def test_cuda_thomas_branch_dispatch_and_jvp_match_scan():
+    rng = np.random.default_rng(0)
+    args = tuple(jnp.asarray(rng.normal(size=(7, 3))) for _ in range(4))
+    args = (args[0], args[1] + 5.0, args[2], args[3])
+    tangents = tuple(jnp.asarray(rng.normal(size=a.shape)) for a in args)
+    want = jax.jvp(_scan_with_pivots, args, tangents)
+    got = jax.jvp(_THOMAS_WITH_PIVOTS, args, tangents)  # tangent rule: scan on any platform
+    for g, w in zip(jax.tree.leaves(got), jax.tree.leaves(want), strict=True):
+        assert jnp.array_equal(g, w)
+    # The auto dispatch still lowers (and runs the scan branch) on CPU.
+    solution = tridiagonal_solve(*args[:3], args[3], method="thomas")
+    assert jnp.array_equal(solution, _scan_with_pivots(*args)[0])
+    # Very wide batches keep the scan (the Pallas path would fail to lower on CPU).
+    wide = tuple(jnp.ones((3, 4100)) * v for v in (0.1, 4.0, 0.1, 1.0))
+    assert jnp.array_equal(_THOMAS_WITH_PIVOTS(*wide)[0], _scan_with_pivots(*wide)[0])

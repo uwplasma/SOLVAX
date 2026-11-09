@@ -720,7 +720,96 @@ def _thomas_pivots(lower: jax.Array, diag: jax.Array, upper: jax.Array) -> jax.A
     return jnp.concatenate((pivot0[None, ...], remaining), axis=0)
 
 
-_THOMAS_WITH_PIVOTS = partial(_thomas_solve, return_pivots=True)
+_scan_with_pivots = partial(_thomas_solve, return_pivots=True)
+
+_UNROLL, _BLOCK = 4, 16  # rows per loop trip; systems per Pallas program
+_MAX_WIDTH = 4096  # beyond this many systems the parallel scan is faster on GPU
+
+
+def _thomas_kernel(l_ref, d_ref, u_ref, r_ref, eps_ref, x_ref, uu_ref, p_ref, *, n):
+    """Fused forward/backward Thomas sweep for ``_BLOCK`` independent systems.
+
+    Same recurrences, in the same order, as ``_thomas_solve``, so results are
+    bitwise equal. ``n`` is ``1 + k * _UNROLL`` (the host pads with identity rows).
+    """
+    eps = eps_ref[...]
+    d0 = d_ref[0, :]
+    dg = jnp.where(d0 != 0.0, d0, eps)
+    uu_ref[0, :], x_ref[0, :], p_ref[0, :] = u_ref[0, :] / dg, r_ref[0, :] / dg, d0
+    c0 = u_ref[0, :] / jnp.where(d0 != 0.0, d0, 1.0)
+
+    def forward(i, carry):
+        up, xp, cp = carry
+        j0 = 1 + i * _UNROLL
+        rows = [tuple(ref[j0 + k, :] for ref in (l_ref, d_ref, u_ref, r_ref))
+                for k in range(_UNROLL)]
+        for k, (lj, dj, uj, rj) in enumerate(rows):
+            den = dj - up * lj
+            den = jnp.where(den != 0.0, den, eps)
+            piv = dj - cp * lj
+            up, xp, cp = (uj / den, (rj - xp * lj) / den,
+                          uj / jnp.where(piv != 0.0, piv, 1.0))
+            uu_ref[j0 + k, :], x_ref[j0 + k, :], p_ref[j0 + k, :] = up, xp, piv
+        return up, xp, cp
+
+    lax.fori_loop(0, (n - 1) // _UNROLL, forward,
+                  (uu_ref[0, :], x_ref[0, :], c0))
+
+    def backward(i, x_next):
+        j0 = n - 2 - i * _UNROLL
+        rows = [(x_ref[j0 - k, :], uu_ref[j0 - k, :]) for k in range(_UNROLL)]
+        for k, (xj, uj) in enumerate(rows):
+            x_next = xj - uj * x_next
+            x_ref[j0 - k, :] = x_next
+        return x_next
+
+    lax.fori_loop(0, (n - 1) // _UNROLL, backward, x_ref[n - 1, :])
+
+
+def _pallas_thomas(lower, diag, upper, rhs, *, interpret=False):
+    """Solve and return pivots with one fused Pallas launch (CUDA branch)."""
+    from jax.experimental import pallas as pl
+    pivot_shape = diag.shape
+    if rhs.ndim > diag.ndim:
+        expand = (1,) * (rhs.ndim - diag.ndim)
+        lower, diag, upper = (a.reshape(a.shape + expand) for a in (lower, diag, upper))
+    n0, full = rhs.shape[0], rhs.shape
+    eps = _pivot_guard(diag, lower, upper)
+    n = 1 + -(-(n0 - 1) // _UNROLL) * _UNROLL
+    width = int(np.prod(full[1:], dtype=np.int64))
+    wpad = -(-width // _BLOCK) * _BLOCK
+
+    def prep(a, fill=0.0):
+        a = jnp.broadcast_to(a, full).reshape(n0, width)
+        return jnp.pad(a, ((0, n - n0), (0, wpad - width)), constant_values=fill)
+
+    eps = jnp.pad(jnp.broadcast_to(eps, full[1:]).reshape(width), (0, wpad - width),
+                  constant_values=1.0)
+    spec = pl.BlockSpec((n, _BLOCK), lambda i: (0, i))
+    x, _, piv = pl.pallas_call(
+        partial(_thomas_kernel, n=n),
+        out_shape=[jax.ShapeDtypeStruct((n, wpad), rhs.dtype)] * 3,
+        grid=(wpad // _BLOCK,),
+        in_specs=[spec] * 4 + [pl.BlockSpec((_BLOCK,), lambda i: (i,))],
+        out_specs=[spec] * 3,
+        interpret=interpret,
+    )(prep(lower), prep(diag, 1.0), prep(upper), prep(rhs), eps)
+    piv = piv[:n0, :width].reshape(full)
+    piv = piv[(slice(None),) * len(pivot_shape) + (0,) * (rhs.ndim - len(pivot_shape))]
+    return x[:n0, :width].reshape(full), piv
+
+
+@jax.custom_jvp
+def _THOMAS_WITH_PIVOTS(lower, diag, upper, rhs):
+    if int(np.prod(rhs.shape[1:], dtype=np.int64)) > _MAX_WIDTH:
+        return _scan_with_pivots(lower, diag, upper, rhs)
+    return _pallas_thomas(lower, diag, upper, rhs)
+
+
+@_THOMAS_WITH_PIVOTS.defjvp
+def _thomas_with_pivots_jvp(primals, tangents):
+    # Tangents go through the scan, which JAX can differentiate.
+    return jax.jvp(_scan_with_pivots, primals, tangents)
 
 
 def _thomas_and_pivots(lower, diag, upper, rhs):
