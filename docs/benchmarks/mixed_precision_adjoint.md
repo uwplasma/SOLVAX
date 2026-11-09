@@ -1,10 +1,11 @@
 # Mixed-precision amortized adjoint
 
-What it measures: the gradient accuracy and backward cost of
-`mixed_precision_block_thomas(implicit_adjoint=True)` — float32 factors reused
-(transposed) for the adjoint refinement — against the default unrolled
-differentiation of the refinement loop and against the bare low-precision
-gradient. See the {doc}`../solvers/mixed_precision` guide.
+What it measures: the gradient accuracy and backward cost of the implicit
+derivative of `mixed_precision_block_thomas` (now the default) — float32 factors
+reused (transposed) for the adjoint refinement — against the previous
+unrolled differentiation of the refinement loop and against the bare
+low-precision gradient. The recorded "unrolled" columns are from before the
+implicit derivative became the default. See the {doc}`../solvers/mixed_precision` guide.
 
 Reproduce:
 

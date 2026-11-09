@@ -199,6 +199,20 @@ def test_implicit_adjoint_gradient_matches_exact_fp64(n_rhs):
         assert rel < 1e-9
 
 
+def test_default_derivatives_include_forward_mode():
+    # Forward mode, forward-over-reverse and the Jacobian match the exact fp64 solve
+    # (the default differentiates the solve implicitly, not the refinement loop).
+    lower, diag, upper, rhs = make_system(9, 5, seed=11)
+    args = (lower, diag, upper, rhs)
+    tangents = tuple(jnp.cos(jnp.arange(a.size, dtype=a.dtype).reshape(a.shape)) for a in args)
+    exact = jax.jvp(block_thomas, args, tangents)[1]
+    mixed = jax.jvp(mixed_precision_block_thomas, args, tangents)[1]
+    assert float(jnp.linalg.norm(mixed - exact) / jnp.linalg.norm(exact)) < 1e-9
+    jac = jax.jacfwd(lambda b: mixed_precision_block_thomas(lower, diag, upper, b))(rhs)
+    ref = jax.jacrev(lambda b: block_thomas(lower, diag, upper, b))(rhs)
+    assert float(jnp.linalg.norm(jac - ref) / jnp.linalg.norm(ref)) < 1e-9
+
+
 def test_implicit_adjoint_primal_identical_to_default_path():
     lower, diag, upper, rhs = make_system(12, 5, seed=8)
     x_default = mixed_precision_block_thomas(lower, diag, upper, rhs, refine_steps=2)
