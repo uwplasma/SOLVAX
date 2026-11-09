@@ -1283,7 +1283,13 @@ def block_thomas(
     Returns:
         ``x`` with the same shape as ``rhs``.
     """
-    return block_thomas_solve(block_thomas_factor(lower, diag, upper), rhs)
+    factors = block_thomas_factor(lower, diag, upper)
+    return jax.lax.custom_linear_solve(
+        lambda x: block_tridiag_matvec(lower, diag, upper, x),
+        rhs.astype(jnp.result_type(lower, diag, upper, rhs)),
+        solve=lambda _, b: block_thomas_solve(factors, b),
+        transpose_solve=lambda _, b: block_thomas_solve(factors, b, transpose=True),
+    )
 
 
 def block_tridiag_matvec(
@@ -1380,9 +1386,9 @@ def mixed_precision_block_thomas(
             the derivatives inherit the refined working-precision error.
 
     Returns:
-        ``x`` with the same shape and precision as ``rhs``.
+        ``x`` with the shape of ``rhs`` and the promoted precision of the bands and ``rhs``.
     """
-    residual_dtype = jnp.result_type(rhs)
+    dtype = jnp.result_type(lower, diag, upper, rhs)
     factors = block_thomas_factor(lower, diag, upper, factor_dtype=factor_dtype)
     lower_t, diag_t, upper_t = _transpose_bands(lower, diag, upper)
 
@@ -1401,7 +1407,7 @@ def mixed_precision_block_thomas(
 
     return jax.lax.custom_linear_solve(
         lambda x: block_tridiag_matvec(lower, diag, upper, x),
-        rhs.astype(residual_dtype),
+        rhs.astype(dtype),
         solve=refined((lower, diag, upper), False),
         transpose_solve=refined((lower_t, diag_t, upper_t), True),
     )

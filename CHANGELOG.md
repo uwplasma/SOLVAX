@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `block_thomas` differentiates implicitly through `jax.lax.custom_linear_solve`: tangents and adjoints
+  reuse the one factorization (transposed solves) instead of taping the elimination. Reverse mode with
+  respect to the bands and right-hand side is 3.3-5x faster (31 x 150: 46 to 14 ms; 100 x 64: 29 to 7 ms;
+  200 x 16: 6.6 to 1.3 ms), takes 2.6-3.5x less temporary memory and compiles about 2x faster; the
+  forward solve and the gradient values are unchanged (relative difference 1e-15).
 - `mixed_precision_block_thomas` differentiates the solve implicitly by default, through
   `jax.lax.custom_linear_solve`: tangent and adjoint systems are solved by the same refinement on the
   float32 factors (transposed for the adjoint), with no taping of the refinement loop. Reverse mode of a
