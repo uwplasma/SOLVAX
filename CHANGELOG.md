@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- `mixed_precision_block_thomas` differentiates the solve implicitly by default, through
+  `jax.lax.custom_linear_solve`: tangent and adjoint systems are solved by the same refinement on the
+  float32 factors (transposed for the adjoint), with no taping of the refinement loop. Reverse mode of a
+  gradient with respect to the bands and right-hand side is 3-9x faster (31 x 150: 52 to 18 ms; 64 x 32:
+  12.7 to 1.7 ms; 100 x 64: 88 to 10 ms), takes 3.5-5x less temporary memory and compiles about 3x faster, with
+  the same accuracy (relative error 2e-15 against the float64 solve). Forward mode, `jacfwd` and
+  forward-over-reverse now work, which the former opt-in custom VJP did not support. `implicit_adjoint` is
+  accepted and ignored.
+
 ## 0.35.2 - 2026-11-08
 
 - `block_thomas_factor` and `block_thomas_factor_fn` form `U Delta^{-1} L` with right-side triangular solves on the transposed coupling: 10-25% faster per Schur step on one CPU thread for dense blocks of 64 to 800, equal to rounding.

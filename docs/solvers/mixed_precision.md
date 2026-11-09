@@ -85,12 +85,11 @@ x = sx.mixed_precision_block_thomas(
 This factors Schur complements in float32, applies block-Thomas corrections in
 that precision, and computes block-tridiagonal residuals in working precision.
 
-### Amortized implicit adjoint
+### Implicit derivatives
 
-By default, `jax.grad` differentiates *through* the refinement loop — taping
-every sweep and differentiating the low-precision factorization itself. Passing
-`implicit_adjoint=True` selects a custom VJP that instead solves the adjoint
-system
+`jax.grad`, `jax.jvp`, `jax.jacfwd` and `jax.jacrev` differentiate the solve
+implicitly ({func}`jax.lax.custom_linear_solve`) instead of taping the refinement
+loop and the low-precision factorization. The adjoint system
 
 $$
 A^T\lambda=\bar x
