@@ -1416,3 +1416,22 @@ def test_cyclic_reduction_derivatives_and_transforms():
     )
     with pytest.raises(ValueError, match="cutoff"):
         block_cyclic_reduction_factor(lower, diag, upper, cutoff=0)
+
+
+@pytest.mark.parametrize("dtype", [np.float64, np.complex128])
+def test_schur_coupling_matches_left_side_solve(dtype):
+    from jax.scipy.linalg import lu_factor, lu_solve
+
+    from solvax.direct import _schur_coupling
+
+    rng = np.random.default_rng(7)
+    m = 24
+    lower, upper = (
+        jnp.asarray(rng.standard_normal((m, m)) + 1j * rng.standard_normal((m, m)), dtype)
+        for _ in range(2)
+    )
+    delta = jnp.asarray(rng.standard_normal((m, m)) + 4 * np.eye(m), dtype)
+    factor = lu_factor(delta)
+    expected = upper @ lu_solve(factor, lower)
+    got = _schur_coupling(factor, lower, upper, delta.dtype, delta.dtype)
+    np.testing.assert_allclose(got, expected, rtol=1e-12, atol=1e-12)

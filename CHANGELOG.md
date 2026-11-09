@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `block_thomas_factor` and `block_thomas_factor_fn` form `U Delta^{-1} L` with right-side triangular solves on the transposed coupling: 10-25% faster per Schur step on one CPU thread for dense blocks of 64 to 800, equal to rounding.
+
 ## 0.35.0 - 2026-11-02
 
 - `available_cpus()` returns the smallest CPU limit on this process: affinity, cgroup quota, Slurm, PBS,
