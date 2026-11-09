@@ -21,6 +21,7 @@ from solvax import (
     tridiagonal_solve_factored_checked,
 )
 from solvax.tridiagonal import (
+    _PALLAS_OK,
     _THOMAS_WITH_PIVOTS,
     _checked_tridiagonal_result,
     _pallas_thomas,
@@ -634,6 +635,7 @@ def test_degenerate_shapes_are_handled_rather_than_crashing():
 @pytest.mark.parametrize(
     "n,shape,fields", [(1, (3,), 0), (2, (5,), 2), (9, (20,), 0), (14, (3, 4), 2)]
 )
+@pytest.mark.skipif(not _PALLAS_OK, reason="old jax cannot lower Pallas")
 def test_pallas_thomas_matches_scan_in_interpret_mode(n, shape, fields):
     rng = np.random.default_rng(n)
     lower, upper = (rng.normal(size=(n, *shape)) for _ in range(2))

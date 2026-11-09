@@ -800,16 +800,21 @@ def _pallas_thomas(lower, diag, upper, rhs, *, interpret=False):
 
 
 @jax.custom_jvp
-def _THOMAS_WITH_PIVOTS(lower, diag, upper, rhs):
+def _pallas_with_pivots(lower, diag, upper, rhs):
     if int(np.prod(rhs.shape[1:], dtype=np.int64)) > _MAX_WIDTH:
         return _scan_with_pivots(lower, diag, upper, rhs)
     return _pallas_thomas(lower, diag, upper, rhs)
 
 
-@_THOMAS_WITH_PIVOTS.defjvp
+@_pallas_with_pivots.defjvp
 def _thomas_with_pivots_jvp(primals, tangents):
     # Tangents go through the scan, which JAX can differentiate.
     return jax.jvp(_scan_with_pivots, primals, tangents)
+
+
+# jax < 0.6 lowers every platform branch, and Pallas cannot lower for CPU.
+_PALLAS_OK = jax.__version_info__ >= (0, 6, 2)
+_THOMAS_WITH_PIVOTS = _pallas_with_pivots if _PALLAS_OK else _scan_with_pivots
 
 
 def _thomas_and_pivots(lower, diag, upper, rhs):
