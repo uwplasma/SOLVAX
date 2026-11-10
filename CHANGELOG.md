@@ -4,8 +4,7 @@
 
 - `generalized_eigenpairs` extracts pairs by Rayleigh-Ritz for the shift-invert operator, ranked by
   `|mu|`, over a block Krylov space of three applications per sweep. A target between an isolated and an
-  accumulating eigenvalue no longer stalls on Ritz ghosts. `iterations` and `max_iter` now count sweeps,
-  and `gap` uses the converged pairs only.
+  accumulating eigenvalue no longer stalls on Ritz ghosts. `iterations` and `max_iter` now count sweeps.
 
 ## 0.35.3 - 2026-11-09
 
