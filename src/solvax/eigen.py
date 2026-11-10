@@ -243,7 +243,8 @@ class EigenpairResult(NamedTuple):
             ``||F y - lam G y|| / ((||F|| + |lam| ||G||) ||y||)``, with ``||.||`` the
             infinity norm (largest absolute row sum) of a band.
         orthogonality: ``max |Y^H G Y - I|``.
-        iterations: shift-invert applications performed.
+        iterations: sweeps performed after the first, each applying the shift-invert operator three
+            times (fewer if ``n_blocks m`` is small).
         converged: ``max(residuals) <= tol``; False if anything is not finite.
         gap: ``|lam - target|`` of the nearest excluded Ritz value minus that of the
             farthest selected one. The iteration also converges that excluded pair to ``tol``,
@@ -360,6 +361,9 @@ def _cluster_tol(values, nF, nG):
     return jnp.sqrt(jnp.finfo(values.dtype).eps) * _scale(values, nF, nG)
 
 
+_KRYLOV_BLOCKS = 3  # shift-invert applications per Rayleigh-Ritz step
+
+
 def _subspace_iteration(F, G, target, count, tol, max_iter, dense_limit):
     """Shift-invert subspace iteration; returns the result and each value's Ritz separation."""
     n, m = F[1].shape[:2]
@@ -374,24 +378,45 @@ def _subspace_iteration(F, G, target, count, tol, max_iter, dense_limit):
     matvec = lambda A, X: block_tridiag_matvec(*A, X)  # noqa: E731
     width = min(2 * count + 8, size)
     keep = min(count + 1, width)  # the selected pairs and the nearest excluded one
+    blocks = max(1, min(_KRYLOV_BLOCKS, size // width))  # Krylov blocks per sweep, V full rank
     adjoint = lambda a: jnp.conj(a.T)  # noqa: E731
+    apply = lambda A, Z: matvec(A, Z.reshape(n, m, -1)).reshape(size, -1)  # noqa: E731
+    invert = lambda Z: solve(Z.reshape(n, m, -1)).reshape(size, -1)  # noqa: E731
 
     def sweep(Y):
-        """Orthonormalize ``Y``, Rayleigh-Ritz on ``(F, G)``; return ``G`` times the basis."""
-        Q = jnp.linalg.qr(Y.reshape(size, width))[0]
-        FQ, GQ = (matvec(A, Q.reshape(n, m, width)).reshape(size, width) for A in (F, G))
-        theta, C = _ritz(adjoint(Q) @ FQ, adjoint(Q) @ GQ)
-        order = jnp.argsort(jnp.abs(theta - target))[:keep]
-        X, GX = Q @ C[:, order], GQ @ C[:, order]
-        R = FQ @ C[:, order] - GX * theta[order]
-        scale = (nF + jnp.abs(theta[order]) * nG) * jnp.linalg.norm(X, axis=0)
-        return GQ @ C, theta, order, jnp.linalg.norm(R, axis=0) / scale, X
+        """Rayleigh-Ritz for ``S = (F - sigma G)^-1 G`` on the block Krylov space of ``Y``.
 
-    start = jax.random.normal(jax.random.PRNGKey(0), (n, m, width), dtype)
+        ``S`` is ``G``-self-adjoint with real Ritz values ``mu``; the wanted pairs have the largest
+        ``|mu|`` (``lam = sigma + 1 / mu``). Rayleigh-Ritz on ``F`` itself is indefinite near the
+        target: a mixture of eigenvectors on both sides of it is a ghost pair with ``theta`` near
+        the target and a large residual, which outranks, and then never leaves, the iteration.
+        """
+        basis, images = [jnp.linalg.qr(Y)[0]], []
+        for j in range(blocks):
+            images.append(invert(apply(G, basis[-1])))
+            if j < blocks - 1:  # orthogonalize twice against the blocks so far
+                Z = images[-1]
+                for _ in range(2):
+                    P = jnp.concatenate(basis, 1)
+                    Z = Z - P @ (adjoint(P) @ Z)
+                basis.append(jnp.linalg.qr(Z)[0])
+        V, SV = jnp.concatenate(basis, 1), jnp.concatenate(images, 1)
+        GV = apply(G, V)
+        mu, C = _ritz(adjoint(GV) @ SV, adjoint(GV) @ V)
+        C = C[:, jnp.argsort(-jnp.abs(mu))[:width]]
+        X, GX = V @ C, GV @ C
+        FX = apply(F, X)
+        theta = jnp.real(jnp.sum(jnp.conj(X) * FX, 0))  # Rayleigh quotients, X^H G X = I
+        order = jnp.argsort(jnp.abs(theta - target))[:keep]
+        R = FX[:, order] - GX[:, order] * theta[order]
+        scale = (nF + jnp.abs(theta[order]) * nG) * jnp.linalg.norm(X[:, order], axis=0)
+        return SV @ C, theta, order, jnp.linalg.norm(R, axis=0) / scale, X[:, order]
+
+    start = jax.random.normal(jax.random.PRNGKey(0), (size, width), dtype)
     running = lambda k, res: (k < max_iter) & ~(res.max() <= tol) & jnp.isfinite(res.max())  # noqa: E731
     iterations, _, theta, order, res, X = jax.lax.while_loop(
         lambda s: running(s[0], s[4]),
-        lambda s: (s[0] + 1, *sweep(solve(s[1].reshape(n, m, width)))),
+        lambda s: (s[0] + 1, *sweep(s[1])),
         (jnp.zeros((), jnp.int32), *sweep(start)),
     )
     perm = jnp.argsort(theta[order[:count]])  # ascending values among the selected
@@ -470,16 +495,19 @@ def generalized_eigenpairs(
     ``lower[k] = upper[k-1]^H`` (the conjugate transpose, not the transpose) and ``diag`` is
     replaced by its Hermitian part.
 
-    The method is shift-invert subspace iteration with Rayleigh-Ritz on ``(F, G)``, over
-    ``min(2 count + 8, n_blocks m)`` vectors, factoring ``F - sigma G`` with
-    :func:`block_thomas_factor`. ``sigma`` is ``target`` moved by ``16 eps ||F|| / ||G||``, so
-    that a target equal to an eigenvalue does not give a singular factor. A probe solve checks
-    every factorization (see ``_shifted_solver``): if block Thomas has broken down, a dense
-    pivoted LU takes over and ``fallback`` is True. The dense path exists only if
-    ``n_blocks * m <= dense_limit``; above that a breakdown gives non-finite residuals and
-    ``converged=False``. Under ``vmap`` a ``cond`` runs both branches, so pass
-    ``dense_limit=0`` there to avoid always paying for the dense factorization. ``count``,
-    ``max_iter`` and ``dense_limit`` are static; everything else may be traced.
+    The method is shift-invert subspace iteration over ``min(2 count + 8, n_blocks m)`` vectors,
+    factoring ``F - sigma G`` with :func:`block_thomas_factor`. Each sweep applies the
+    shift-invert operator ``S = (F - sigma G)^-1 G`` three times (a block Krylov space; fewer if
+    it would exceed ``n_blocks m``) and extracts the pairs by Rayleigh-Ritz for ``S``, ranked by
+    ``|mu|``, so that Ritz ghosts between eigenvalues on either side of ``target`` cannot be
+    selected. ``sigma`` is ``target`` moved by ``16 eps ||F|| / ||G||``, so that a target equal to
+    an eigenvalue does not give a singular factor. A probe solve checks every factorization (see
+    ``_shifted_solver``): if block Thomas has broken down, a dense pivoted LU takes over and
+    ``fallback`` is True. The dense path exists only if ``n_blocks * m <= dense_limit``; above
+    that a breakdown gives non-finite residuals and ``converged=False``. Under ``vmap`` a ``cond``
+    runs both branches, so pass ``dense_limit=0`` there to avoid always paying for the dense
+    factorization. ``count``, ``max_iter`` and ``dense_limit`` are static; everything else may be
+    traced.
 
     Derivatives are implicit, so the iteration is not differentiated, and are valid only when
     ``converged`` is True. They support ``jax.jvp``, ``jax.grad`` and ``jax.jacfwd/jacrev``.
@@ -512,7 +540,7 @@ def generalized_eigenpairs(
         target: real number to search near.
         count: number of eigenpairs, at most ``n_blocks * m``.
         tol: relative residual to stop at.
-        max_iter: maximum shift-invert applications.
+        max_iter: maximum sweeps (see ``iterations``).
         dense_limit: largest ``n_blocks * m`` for which the dense fallback is compiled.
     """
     F, G = _hermitian(F), _hermitian(G)

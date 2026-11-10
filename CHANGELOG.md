@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `generalized_eigenpairs` extracts pairs by Rayleigh-Ritz for the shift-invert operator, ranked by
+  `|mu|`, over a block Krylov space of three applications per sweep. A target between an isolated and an
+  accumulating eigenvalue no longer stalls on Ritz ghosts. `iterations` and `max_iter` now count sweeps,
+  and `gap` uses the converged pairs only.
+
 ## 0.35.3 - 2026-11-09
 
 - `block_thomas_factor` and `block_thomas_factor_fn` form the Schur coupling with a left-side solve again, the same

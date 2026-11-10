@@ -165,7 +165,9 @@ def test_count_is_validated():
 
 def _outputs(pencil, t):
     F0, F1, G0, G1 = pencil
-    r = sx.generalized_eigenpairs(_along(F0, F1, t[0]), _along(G0, G1, t[1]), TARGET, COUNT)
+    # tol far below the default: finite differences amplify the 1e-10 stopping residual
+    F, G = _along(F0, F1, t[0]), _along(G0, G1, t[1])
+    r = sx.generalized_eigenpairs(F, G, TARGET, COUNT, tol=1e-13)
     return r.values, r.vectors
 
 
@@ -375,3 +377,34 @@ def test_block_thomas_adjoint_and_transpose_semantics():
         np.testing.assert_allclose(op @ x, flat, atol=1e-12)
     with pytest.raises(ValueError):
         sx.block_thomas_solve(factors, rhs, transpose=True, adjoint=True)
+
+
+def _accumulating_pencil(n=60):
+    """Scalar Jacobi matrix (Lanczos on ``diag(lam)``): eigenvalue 1, a set accumulating at 0.6."""
+    lam = np.sort(np.concatenate([[1.0], 0.6 - 0.2 / np.arange(1, n) ** 2]))
+    Q, a, b = [np.ones(n) / np.sqrt(n)], [], []
+    for k in range(n):
+        w = lam * Q[-1]
+        a.append(Q[-1] @ w)
+        w = w - a[-1] * Q[-1]
+        for _ in range(2):
+            for q in Q:
+                w = w - q * (q @ w)
+        if k < n - 1:
+            b.append(np.linalg.norm(w))
+            Q.append(w / b[-1])
+    z = jnp.zeros((n, 1, 1))
+    F = (z, jnp.asarray(a).reshape(n, 1, 1), jnp.asarray(np.append(b, 0.0)).reshape(n, 1, 1))
+    return F, (z, jnp.ones((n, 1, 1)), z), lam
+
+
+def test_target_between_an_isolated_and_an_accumulating_eigenvalue_converges():
+    """Rayleigh-Ritz on ``F`` itself picks ghost pairs (mixtures of eigenvectors on both sides of
+    the target, with ``theta`` near it): the iteration then stalls at residual ~1e-1 and eigenvalue
+    error 0.3. Rayleigh-Ritz for the shift-invert operator ranks by ``|mu|`` and converges."""
+    F, G, lam = _accumulating_pencil()
+    result = sx.generalized_eigenpairs(F, G, 0.8, 3, 1e-10, 100, 0)
+    want = np.sort(lam[np.argsort(np.abs(lam - 0.8))[:3]])
+    assert bool(result.converged) and int(result.iterations) < 100
+    np.testing.assert_allclose(np.asarray(result.values), want, rtol=1e-12)
+    assert float(result.gap) > 0.0
