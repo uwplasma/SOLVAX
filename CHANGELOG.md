@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.36.0 - 2026-11-10
 
 - `generalized_eigenpairs` extracts pairs by Rayleigh-Ritz for the shift-invert operator, ranked by
   `|mu|`, over a block Krylov space of three applications per sweep. A target between an isolated and an
