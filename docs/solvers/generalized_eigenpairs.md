@@ -29,9 +29,12 @@ needs only the forward solve.
 
 Shift-invert subspace iteration. With $S=F-\sigma G$ factored once by
 {func}`~solvax.direct.block_thomas_factor`, a block of
-$p=\min(2\,\text{count}+8,\ N m)$ vectors $Y$ is advanced by $Y\leftarrow
-\mathrm{qr}(S^{-1} G Y_{\text{Ritz}})$, followed by Rayleigh--Ritz on
-$(Y^H F Y,\ Y^H G Y)$ through a Cholesky reduction. The `count` Ritz values
+$p=\min(2\,\text{count}+8,\ N m)$ vectors $Y$ spans, per sweep, the block Krylov space
+$[Y,\ TY,\ T^2Y]$ of $T=S^{-1}G$ (orthogonalized twice; fewer blocks if it would exceed $N m$).
+Rayleigh--Ritz for $T$ on that space, through a Cholesky reduction, gives real values $\mu$; the
+$p$ largest $|\mu|$ are kept, with $\lambda=\sigma+1/\mu$. Ranking by $|\mu|$ keeps a Ritz ghost,
+a mixture of eigenvectors on both sides of `target` with $\mu\approx0$, out of the selection;
+Rayleigh--Ritz on $F$ itself cannot. The `count` Rayleigh quotients
 nearest `target`, and the nearest excluded one, must reach the relative residual
 
 $$
@@ -66,7 +69,7 @@ large problems.
 | `vectors` | `(n_blocks, m, count)`, $y^H G y=1$, phase arbitrary |
 | `residuals` | the relative residual above, per pair |
 | `orthogonality` | $\max\lvert Y^H G Y-I\rvert$ |
-| `iterations` | shift-invert applications |
+| `iterations` | sweeps after the first, each applying $T$ three times |
 | `converged` | `max(residuals) <= tol`, False if non-finite |
 | `gap` | $\lvert\lambda-\text{target}\rvert$ of the nearest excluded Ritz value minus that of the farthest selected one |
 | `fallback` | the dense pivoted path ran |
@@ -138,8 +141,8 @@ listed above are untested.
 
 ## Cost
 
-One block-Thomas factorization of $F-\sigma G$ ($O(Nm^3)$), then per iteration one
-solve with $p$ right-hand sides ($O(Nm^2p)$), two band products, and a
+One block-Thomas factorization of $F-\sigma G$ ($O(Nm^3)$), then per sweep three
+solves with $p$ right-hand sides ($O(Nm^2p)$), two band products, and a
 $p\times p$ Ritz problem. The eigenvector tangent factors one shifted band per
 returned eigenpair.
 
