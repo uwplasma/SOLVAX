@@ -150,13 +150,15 @@ def test_gmres_accepts_custom_inner_product():
 
 
 @pytest.mark.parametrize("fixed_work", [False, True])
-@pytest.mark.parametrize("case", ["real", "complex", "float32", "identity", "two_eigenvalues", "zero_rhs"])
+@pytest.mark.parametrize("case", [
+    "real", "complex", "float32", "identity", "two_eigenvalues", "zero_rhs"])
 @pytest.mark.parametrize("restart", [1, 2, 6, 12])
 def test_flat_rotation_matrix_matches_pytree_rotation_loop(restart, case, fixed_work):
-    """The flat path (accumulated Givens matrix) takes the iterates of the pytree path (rotation loop): same
-    iteration count and solution, for restart 1, 2 and m, breakdown at the first and the second Arnoldi step, b = 0."""
+    """Flat path (Givens matrix) = pytree path (rotation loop): same iterations and solution
+    for restart 1, 2 and m, breakdown at the first and the second Arnoldi step, b = 0."""
     n = 12
-    matrix, rhs = random_complex_system(n, seed=5) if case == "complex" else random_system(n, seed=5, spread=0.4)
+    system = random_complex_system if case == "complex" else random_system
+    matrix, rhs = system(n, seed=5) if case == "complex" else system(n, seed=5, spread=0.4)
     if case == "float32":
         matrix, rhs = matrix.astype(jnp.float32), rhs.astype(jnp.float32)
     if case == "identity":
@@ -173,7 +175,8 @@ def test_flat_rotation_matrix_matches_pytree_rotation_loop(restart, case, fixed_
     assert bool(flat.converged) == bool(loop.converged)
     assert np.all(np.isfinite(np.asarray(flat.x)))
     scale = float(jnp.linalg.norm(loop.x)) + 1.0e-30
-    assert float(jnp.linalg.norm(flat.x - loop.x)) <= (1.0e-5 if case == "float32" else 1.0e-11) * scale
+    accuracy = 1.0e-5 if case == "float32" else 1.0e-11
+    assert float(jnp.linalg.norm(flat.x - loop.x)) <= accuracy * scale
     if case in ("identity", "zero_rhs"):
         assert int(flat.iterations) <= 1
     if case == "two_eigenvalues":

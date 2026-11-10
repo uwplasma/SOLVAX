@@ -353,7 +353,6 @@ def _fgmres_cycle(
     H = jnp.zeros((m + 1, m), dtype)  # Hessenberg (Arnoldi relation)
     R = jnp.zeros((m, m), dtype)  # Givens-rotated triangular factor
     B = jnp.zeros((k, m), dtype)
-    real_dtype = jnp.real(r0).dtype
     Q = jnp.eye(m + 1, dtype=dtype)
     g = jnp.zeros((m + 1,), dtype).at[0].set(beta)
 
