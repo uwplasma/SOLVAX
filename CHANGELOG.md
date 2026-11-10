@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+## 0.35.3 - 2026-11-09
+
+- `block_thomas_factor` and `block_thomas_factor_fn` form the Schur coupling with a left-side solve again, the same
+  form as every other block-Thomas route. The right-side form of 0.35.2 changed the rounding of these two
+  functions only, and on ill-conditioned bands the factored and unfactored routes then disagreed by up to 1.6e-3.
+- `block_thomas` differentiates implicitly through `jax.lax.custom_linear_solve`: tangents and adjoints
+  reuse the one factorization (transposed solves) instead of taping the elimination. Reverse mode with
+  respect to the bands and right-hand side is 3.3-5x faster (31 x 150: 46 to 14 ms; 100 x 64: 29 to 7 ms;
+  200 x 16: 6.6 to 1.3 ms), takes 2.6-3.5x less temporary memory and compiles about 2x faster; the
+  forward solve and the gradient values are unchanged (relative difference 1e-15).
+- `mixed_precision_block_thomas` differentiates the solve implicitly by default, through
+  `jax.lax.custom_linear_solve`: tangent and adjoint systems are solved by the same refinement on the
+  float32 factors (transposed for the adjoint), with no taping of the refinement loop. Reverse mode of a
+  gradient with respect to the bands and right-hand side is 3-9x faster (31 x 150: 52 to 18 ms; 64 x 32:
+  12.7 to 1.7 ms; 100 x 64: 88 to 10 ms), takes 3.5-5x less temporary memory and compiles about 3x faster, with
+  the same accuracy (relative error 2e-15 against the float64 solve). Forward mode, `jacfwd` and
+  forward-over-reverse now work, which the former opt-in custom VJP did not support. `implicit_adjoint` is
+  accepted and ignored.
+
+## 0.35.2 - 2026-11-08
+
+- `block_thomas_factor` and `block_thomas_factor_fn` form `U Delta^{-1} L` with right-side triangular solves on the transposed coupling: 10-25% faster per Schur step on one CPU thread for dense blocks of 64 to 800, equal to rounding.
+
 ## 0.35.0 - 2026-11-02
 
 - `available_cpus()` returns the smallest CPU limit on this process: affinity, cgroup quota, Slurm, PBS,

@@ -722,6 +722,34 @@ def test_gradient_through_solve():
     assert np.isclose(float(g[2, 1, 1]), float(fd), rtol=1e-5)
 
 
+def test_block_thomas_derivatives_are_implicit_and_match_the_dense_solve():
+    # Forward, reverse and second-order derivatives in every band and the right-hand side.
+    (lower, diag, upper, rhs), _ = make_system(6, 3, 2, seed=4)
+    args = (lower, diag, upper, rhs)
+
+    def dense_solve(lower, diag, upper, rhs):
+        n, m = diag.shape[:2]
+        a = jnp.zeros((n * m, n * m))
+        for k in range(n):
+            a = a.at[k * m:(k + 1) * m, k * m:(k + 1) * m].set(diag[k])
+            if k:
+                a = a.at[k * m:(k + 1) * m, (k - 1) * m:k * m].set(lower[k])
+            if k < n - 1:
+                a = a.at[k * m:(k + 1) * m, (k + 1) * m:(k + 2) * m].set(upper[k])
+        return jnp.linalg.solve(a, rhs.reshape(n * m, -1)).reshape(rhs.shape)
+
+    tangents = tuple(jnp.sin(jnp.arange(a.size, dtype=a.dtype).reshape(a.shape)) for a in args)
+    jvps = (jax.jvp(block_thomas, args, tangents), jax.jvp(dense_solve, args, tangents))
+    for got, ref in zip(*jvps, strict=True):
+        assert np.allclose(got, ref, atol=1e-10)
+    loss = lambda f: lambda *a: jnp.sum(f(*a) ** 2)  # noqa: E731
+    for got, ref in zip(jax.grad(loss(block_thomas), argnums=(0, 1, 2, 3))(*args),
+                        jax.grad(loss(dense_solve), argnums=(0, 1, 2, 3))(*args), strict=True):
+        assert np.allclose(got, ref, atol=1e-9)
+    hess = jax.hessian(loss(block_thomas), argnums=3)(*args)
+    assert np.allclose(hess, jax.hessian(loss(dense_solve), argnums=3)(*args), atol=1e-9)
+
+
 @pytest.mark.parametrize("n_rhs", [None, 2])
 def test_transpose_solve_matches_dense(n_rhs):
     (lower, diag, upper, rhs), dense = make_system(10, 4, n_rhs, seed=5)
