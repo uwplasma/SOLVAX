@@ -149,6 +149,37 @@ def test_gmres_accepts_custom_inner_product():
     assert np.asarray(solution.x) == pytest.approx(reference, rel=1e-9, abs=1e-9)
 
 
+@pytest.mark.parametrize("fixed_work", [False, True])
+@pytest.mark.parametrize("case", ["real", "complex", "float32", "identity", "two_eigenvalues", "zero_rhs"])
+@pytest.mark.parametrize("restart", [1, 2, 6, 12])
+def test_flat_rotation_matrix_matches_pytree_rotation_loop(restart, case, fixed_work):
+    """The flat path (accumulated Givens matrix) takes the iterates of the pytree path (rotation loop): same
+    iteration count and solution, for restart 1, 2 and m, breakdown at the first and the second Arnoldi step, b = 0."""
+    n = 12
+    matrix, rhs = random_complex_system(n, seed=5) if case == "complex" else random_system(n, seed=5, spread=0.4)
+    if case == "float32":
+        matrix, rhs = matrix.astype(jnp.float32), rhs.astype(jnp.float32)
+    if case == "identity":
+        matrix = jnp.eye(n)
+    if case == "two_eigenvalues":
+        matrix = jnp.diag(jnp.where(jnp.arange(n) < 5, 1.0, 3.0))
+    if case == "zero_rhs":
+        rhs = 0.0 * rhs
+    tolerance = 1.0e-5 if case == "float32" else 1.0e-12
+    kwargs = dict(restart=restart, max_restarts=3, rtol=tolerance, fixed_work=fixed_work)
+    flat = gmres(lambda v: matrix @ v, rhs, **kwargs)
+    loop = gmres(lambda v: matrix @ v, rhs, inner_product=lambda u, v: jnp.vdot(u, v), **kwargs)
+    assert int(flat.iterations) == int(loop.iterations)
+    assert bool(flat.converged) == bool(loop.converged)
+    assert np.all(np.isfinite(np.asarray(flat.x)))
+    scale = float(jnp.linalg.norm(loop.x)) + 1.0e-30
+    assert float(jnp.linalg.norm(flat.x - loop.x)) <= (1.0e-5 if case == "float32" else 1.0e-11) * scale
+    if case in ("identity", "zero_rhs"):
+        assert int(flat.iterations) <= 1
+    if case == "two_eigenvalues":
+        assert int(flat.iterations) <= (2 if restart >= 2 else 6)
+
+
 def test_pytree_gmres_validates_tree_structure_and_dtype():
     rhs = (jnp.ones(2), jnp.ones(1))
     with pytest.raises(ValueError, match="identical pytree structure"):
