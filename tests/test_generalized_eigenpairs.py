@@ -204,7 +204,8 @@ def test_vector_jvp_gauge_normalization_and_finite_difference(pencil):
 
     h = 1e-6
     fd = (aligned(t0 + h * dt) - aligned(t0 - h * dt)) / (2 * h)
-    np.testing.assert_allclose(dY, fd, atol=2e-8)
+    # the FD floor is ~ tol / (gap h) ~ 1e-7 here; the exact check is test_vector_jvp_matches_dense_perturbation_theory
+    np.testing.assert_allclose(dY, fd, atol=1e-7)
 
 
 def test_vector_jvp_matches_dense_perturbation_theory(pencil):
