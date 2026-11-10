@@ -4,6 +4,11 @@
 
 - On CUDA, `tridiagonal_solve_checked` with the default Thomas method runs one fused Pallas kernel (solve and pivots, bitwise equal to the scan) when at most 4096 systems are batched, replacing about 100 tiny launches per solve; tangents use the scan. Warm VMEX iterations on an RTX A4000 are 1.5-1.7x faster, and a 51-row solve of 256 systems takes 0.19 ms instead of 0.68 ms. CPU is unchanged.
 
+## 0.35.3 - 2026-11-09
+
+- `block_thomas_factor` and `block_thomas_factor_fn` form the Schur coupling with a left-side solve again, the same
+  form as every other block-Thomas route. The right-side form of 0.35.2 changed the rounding of these two
+  functions only, and on ill-conditioned bands the factored and unfactored routes then disagreed by up to 1.6e-3.
 - `block_thomas` differentiates implicitly through `jax.lax.custom_linear_solve`: tangents and adjoints
   reuse the one factorization (transposed solves) instead of taping the elimination. Reverse mode with
   respect to the bands and right-hand side is 3.3-5x faster (31 x 150: 46 to 14 ms; 100 x 64: 29 to 7 ms;
