@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.36.2 - 2026-11-11
 
 - `generalized_eigenpairs` uses six shift-invert applications per sweep instead of three. On the FAX Könies TAE pencil (H = 12, 3 modes, `tol` 1e-10, 8 CPU threads) sweeps drop from 11, 34, 121 to 3, 8, 28 at N = 800, 1600, 3200 and the warm solve from 0.40, 2.3, 22 s to 0.31, 1.8, 12 s; peak memory grows 1.4x. One sweep now converges more small problems, so tests that starve `max_iter` to force non-convergence should use an unreachable `tol` instead.
 
