@@ -361,7 +361,7 @@ def _cluster_tol(values, nF, nG):
     return jnp.sqrt(jnp.finfo(values.dtype).eps) * _scale(values, nF, nG)
 
 
-_KRYLOV_BLOCKS = 3  # shift-invert applications per Rayleigh-Ritz step
+_KRYLOV_BLOCKS = 6  # shift-invert applications per Rayleigh-Ritz step
 
 
 def _subspace_iteration(F, G, target, count, tol, max_iter, dense_limit):

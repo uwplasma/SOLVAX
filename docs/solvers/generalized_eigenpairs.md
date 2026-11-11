@@ -30,7 +30,7 @@ needs only the forward solve.
 Shift-invert subspace iteration. With $S=F-\sigma G$ factored once by
 {func}`~solvax.direct.block_thomas_factor`, a block of
 $p=\min(2\,\text{count}+8,\ N m)$ vectors $Y$ spans, per sweep, the block Krylov space
-$[Y,\ TY,\ T^2Y]$ of $T=S^{-1}G$ (orthogonalized twice; fewer blocks if it would exceed $N m$).
+$[Y,\ TY,\ \dots,\ T^5Y]$ of $T=S^{-1}G$ (orthogonalized twice; fewer blocks if it would exceed $N m$).
 Rayleigh--Ritz for $T$ on that space, through a Cholesky reduction, gives real values $\mu$; the
 $p$ largest $|\mu|$ are kept, with $\lambda=\sigma+1/\mu$. Ranking by $|\mu|$ keeps a Ritz ghost,
 a mixture of eigenvectors on both sides of `target` with $\mu\approx0$, out of the selection;
