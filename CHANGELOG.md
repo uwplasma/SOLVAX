@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.36.1 - 2026-11-10
+
+- `fgmres` (flat path) applies the accumulated Givens rotations to each new Hessenberg column as one `(m+1) x (m+1)` matrix-vector product instead of a sequential `m`-trip masked loop. Iterates are equivalent to the former rotation loop (restart 1, 2 and m, breakdown, complex, float32, fixed work).
+
 ## 0.36.0 - 2026-11-10
 
 - `generalized_eigenpairs` extracts pairs by Rayleigh-Ritz for the shift-invert operator, ranked by
