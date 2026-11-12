@@ -25,6 +25,8 @@ KINDS = [
     ("neumann", "periodic"),
     ("periodic", "dirichlet"),
     ("neumann", "neumann"),
+    (("neumann", "dirichlet"), "periodic"),  # an inflow-outflow axis: no flux in, held out
+    ("neumann", ("dirichlet", "neumann")),
 ]
 
 
@@ -47,14 +49,15 @@ def dense_flux_form(widths, kinds, k, s, c):
         for axis, kind in enumerate(kinds):
             w, size = widths[axis], shape[axis]
             area = volumes[idx] / w[idx[axis]]
-            for step in (-1, 1):
+            ends = (kind, kind) if isinstance(kind, str) else kind
+            for step, end in zip((-1, 1), ends, strict=True):
                 j = idx[axis] + step
                 if 0 <= j < size or kind == "periodic":
                     nb = idx[:axis] + (j % size,) + idx[axis + 1 :]
                     g = 1.0 / (w[idx[axis]] / 2 / k[idx] + w[j % size] / 2 / k[nb])
                     matrix[row, row] += c * area * g
                     matrix[row, np.ravel_multi_index(nb, shape)] -= c * area * g
-                elif kind == "dirichlet":
+                elif end == "dirichlet":
                     matrix[row, row] += c * area * k[idx] / (w[idx[axis]] / 2)
     assert matrix.shape == (n, n)
     return matrix
@@ -146,6 +149,24 @@ def test_neumann_gradient_lift_reproduces_a_linear_profile():
     data = [(3.0, 3.0), (2.0 + 3.0 * a, 2.0 + 3.0 * a + 5.0 * length)]
     x, info = op.solve(op.lift(data))
     assert bool(info.converged) and np.allclose(x, exact, rtol=1e-10)
+
+
+@pytest.mark.parametrize("ends", [("neumann", "dirichlet"), ["dirichlet", "neumann"]])
+def test_a_mixed_axis_lifts_each_end_by_its_own_kind(ends):
+    # x = 2 + 3 a: the gradient 3 at the Neumann end, the value at the Dirichlet face at the other.
+    widths = _widths((7,), seed=3)
+    faces = (0.0, widths[0].sum())
+    op = sx.flux_form_operator(widths, (ends,), 1.0, 0.0, 1.0)
+    assert op.kinds == (tuple(ends),) and not op.preconditioner.singular
+    data = [
+        tuple(
+            3.0 if end == "neumann" else 2.0 + 3.0 * face
+            for end, face in zip(ends, faces, strict=True)
+        )
+    ]
+    x, info = op.solve(op.lift(data))
+    centres = np.cumsum(widths[0]) - widths[0] / 2
+    assert bool(info.converged) and np.allclose(x, 2.0 + 3.0 * centres, rtol=1e-11)
 
 
 def test_lift_refuses_a_periodic_axis():
@@ -320,6 +341,25 @@ def test_fast_diagonal_matches_dense_and_its_transpose(kinds):
     assert abs(left - right) < 1e-12 * abs(left) and not np.allclose(dense, dense.T)
 
 
+@pytest.mark.parametrize("ends", [("neumann", "dirichlet"), ("dirichlet", "neumann")])
+def test_a_mixed_axis_is_the_dense_laplacian_with_one_dirichlet_face(ends):
+    # Stretched cells, no shift: one Dirichlet end makes the axis nonsingular, so the solve is the
+    # plain inverse, forward and transposed, and its smallest eigenvalue is no longer zeroed.
+    widths = _widths((9,), seed=4)
+    fd = sx.fast_diagonal(widths, (ends,))
+    dense = _one_dimensional(widths[0], ends)
+    assert not fd.singular and not np.allclose(dense, dense.T)
+    assert np.allclose(
+        np.sort(fd.eigenvalues[0]), np.sort(np.linalg.eigvals(dense).real), rtol=1e-11
+    )
+    for pure in ("neumann", "dirichlet"):
+        assert not np.allclose(dense, _one_dimensional(widths[0], pure))
+    x = np.random.default_rng(14).standard_normal(9)
+    assert np.allclose(fd.matvec(x), dense @ x, rtol=1e-12)
+    assert np.allclose(fd.solve(x), np.linalg.solve(dense, x), rtol=1e-11)
+    assert np.allclose(fd.solve(x, transpose=True), np.linalg.solve(dense.T, x), rtol=1e-11)
+
+
 def test_fast_diagonal_poisson_converges_at_second_order_to_a_manufactured_solution():
     # -lap u = f with u = sin(pi x) cos(pi y) cos(2 pi z): Dirichlet, Neumann, periodic on (0, 1)^3.
     def error(n):
@@ -371,6 +411,9 @@ def test_fast_diagonal_derivatives_in_shift_and_coefficient_follow_taylor():
 def test_fast_diagonal_rejects_bad_input():
     with pytest.raises(ValueError, match="kind"):
         sx.fast_diagonal([np.ones(3)], ("robin",))
+    for ends in (("neumann", "periodic"), ("dirichlet",), ("robin", "neumann")):
+        with pytest.raises(ValueError, match="pair"):
+            sx.fast_diagonal([np.ones(3)], (ends,))
     with pytest.raises(ValueError, match="positive"):
         sx.fast_diagonal([np.array([1.0, -1.0])], ("neumann",))
     with pytest.raises(ValueError, match="one entry per axis"):
@@ -668,6 +711,59 @@ def test_schur_multiplier_is_exact_where_the_viscous_operator_commutes():
     ]
     assert all(np.allclose(v.ravel(), uc, atol=1e-9) for v, uc in zip(velocity, u, strict=True))
     assert np.max(np.abs(divergence(velocity))) < 1e-9
+
+
+def _faces(w, kind):
+    """Dense staggered ``G`` and ``D`` of one axis: interior faces, a wrap if periodic, and a
+    boundary face where the pressure is held at zero half a cell out (a Dirichlet end)."""
+    n = len(w)
+    ends = (kind, kind) if isinstance(kind, str) else kind
+    pairs = [(f - 1, f) for f in range(1, n)]
+    if kind == "periodic":
+        pairs.append((n - 1, 0))
+    else:
+        pairs += [(None, 0)] if ends[0] == "dirichlet" else []
+        pairs += [(n - 1, None)] if ends[1] == "dirichlet" else []
+    g, d = np.zeros((len(pairs), n)), np.zeros((n, len(pairs)))
+    for a, (lo, hi) in enumerate(pairs):
+        dist = sum(w[c] / 2 for c in (lo, hi) if c is not None)  # half a cell to a held face
+        for c, sign in ((hi, 1.0), (lo, -1.0)):
+            if c is not None:
+                g[a, c] += sign / dist
+                d[c, a] -= sign / w[c]
+    return g, d
+
+
+def test_the_schur_multiplier_takes_a_mixed_axis():
+    # A periodic axis and an inflow-outflow one: with nu = 0 the multiplier is exact on any cells,
+    # the stage is not singular, and solve_exact matches the dense staggered complement.
+    widths = [np.full(6, 0.3), _widths((5,), seed=9)[0]]
+    kinds, shifts = ("periodic", ("neumann", "dirichlet")), np.array([1.4, 2.5])
+    fd = sx.fast_diagonal_schur(widths, kinds, shifts, 0.0)
+    assert not fd.singular
+    staggered = [_faces(w, k) for w, k in zip(widths, kinds, strict=True)]
+    eye = [np.eye(len(w)) for w in widths]
+    for (g, d), w, k in zip(staggered, widths, kinds, strict=True):
+        assert np.allclose(-d @ g, _one_dimensional(w, k), rtol=1e-12, atol=1e-12)
+    expand = (lambda m: np.kron(m, eye[1]), lambda m: np.kron(eye[0], m))
+    pieces = [
+        (expand[c](g), expand[c](d), shifts[c] * np.eye(len(g) * len(widths[1 - c])))
+        for c, (g, d) in enumerate(staggered)
+    ]
+    schur = -sum(d @ np.linalg.solve(h, g) for g, d, h in pieces)
+    r = np.random.default_rng(31).standard_normal((6, 5))
+    assert np.allclose(fd.solve(r).ravel(), np.linalg.solve(schur, r.ravel()), rtol=1e-10)
+
+    def gradient(p):
+        return [g @ p.ravel() for g, _, _ in pieces]
+
+    def divergence(fields):
+        return sum(d @ f for (_, d, _), f in zip(pieces, fields, strict=True)).reshape(6, 5)
+
+    helmholtz = [lambda f, s=s: f / s for s in shifts]
+    q, info = fd.solve_exact(jnp.asarray(r), gradient, divergence, helmholtz)
+    assert bool(info.converged) and int(info.iterations) <= 2 and float(info.defect) == 0.0
+    assert np.allclose(q.ravel(), np.linalg.solve(schur, r.ravel()), rtol=1e-9)
 
 
 def test_schur_exact_stage_with_no_slip_walls_needs_the_inner_iteration():

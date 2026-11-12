@@ -3,7 +3,9 @@
 On a rectilinear cell-centred grid with cell widths $w_a$ per axis, the finite-volume
 Laplacian is a Kronecker sum of one-dimensional operators $M_a=W_a^{-1}K_a$, each
 homogeneous Dirichlet (the face lies half a cell from the centre), Neumann or periodic.
-`fast_diagonal` diagonalizes every $K_a v=\lambda W_a v$ once on the host
+An axis may also take a `(lower, upper)` pair of Dirichlet and Neumann ends, as an
+inflow-outflow duct's pressure does: `("neumann", "dirichlet")`, no flux at the inlet and
+held at the outlet face. `fast_diagonal` diagonalizes every $K_a v=\lambda W_a v$ once on the host
 {cite}`lynch1964`, so $(s-c\nabla^2)x=r$ is three contractions and a divide:
 
 ```python
@@ -13,7 +15,7 @@ xt = fd.solve(r, transpose=True)     # the plain transpose, which differs: M = W
 ```
 
 `shift` and `coefficient` are differentiable leaves; the widths are geometry. With
-`shift == 0` and no Dirichlet axis the constants are the null space: `solve` is the
+`shift == 0` and no Dirichlet end the constants are the null space: `solve` is the
 pseudo-inverse, drops the volume-mean part of `r` and returns zero volume mean.
 
 ## Axis weights
@@ -72,7 +74,7 @@ the separable inverse at the volume-mean $k$ and $s$ fixed when the operator is 
 - **Status**: `info` is a `SpdSolveInfo` (`converged`, `iterations`, `residual`,
   `status`, `defect`), all traced. An unconverged solve, a nonpositive coefficient or a
   nonfinite value returns NaN, and NaN derivatives in every input.
-- **Singular variant** (`shift=0`, no Dirichlet axis): the rank-one term
+- **Singular variant** (`shift=0`, no Dirichlet end): the rank-one term
   $\alpha V (V\!\cdot\!x)/\sum V$ makes $A$ positive definite, the preconditioner gains the
   matching inverse on the constants, and the volume mean is removed after the solve. The
   compatibility defect $\sum r/\sum V$ is reported in `info.defect`; a right-hand side
