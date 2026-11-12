@@ -771,6 +771,33 @@ def test_transpose_solve_matches_linear_transpose():
     assert np.allclose(np.asarray(via_lt), np.asarray(via_flag), atol=1e-11)
 
 
+@pytest.mark.parametrize("normalized", [False, True])
+def test_solve_sweeps_are_scans_whose_program_does_not_grow_with_blocks(normalized):
+    """The substitution compiles to the same program for 8 or 64 block rows, and
+    its primal, transpose, linear_transpose and tangent agree with a dense solve."""
+
+    def n_equations(n_blocks):
+        (lower, diag, upper, rhs), _ = make_system(n_blocks, 3, 2, seed=n_blocks)
+        factors = block_thomas_factor(lower, diag, upper, normalized=normalized)
+        jaxpr = jax.make_jaxpr(lambda f, b: block_thomas_solve(f, b))(factors, rhs)
+        return len(jaxpr.jaxpr.eqns)
+
+    assert n_equations(8) == n_equations(64)
+
+    (lower, diag, upper, rhs), dense = make_system(12, 3, 2, seed=3)
+    factors = block_thomas_factor(lower, diag, upper, normalized=normalized)
+    flat = np.asarray(rhs).reshape(dense.shape[0], -1)
+    for transpose, matrix in ((False, dense), (True, dense.T)):
+        x = block_thomas_solve(factors, rhs, transpose=transpose)
+        expected = np.linalg.solve(matrix, flat)
+        assert np.allclose(np.asarray(x).reshape(flat.shape), expected, atol=1e-11)
+    (via_lt,) = jax.linear_transpose(lambda v: block_thomas_solve(factors, v), rhs)(rhs)
+    assert np.allclose(via_lt, block_thomas_solve(factors, rhs, transpose=True), atol=1e-11)
+    tangent = jnp.cos(rhs)
+    _, jvp = jax.jvp(lambda v: block_thomas_solve(factors, v), (rhs,), (tangent,))
+    assert np.allclose(jvp, block_thomas_solve(factors, tangent), atol=1e-11)
+
+
 def test_transpose_solve_gradient():
     (lower, diag, upper, rhs), _ = make_system(5, 3, seed=7)
 

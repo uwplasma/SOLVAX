@@ -107,6 +107,7 @@ select = ["E", "F", "I", "UP", "B"]
 addopts = "-ra"
 markers = [
   "slow_examples: spawns a subprocess per example; what it checks is that the code runs, which is not platform-specific, so CI runs it on one OS only",
+  "gpu: fast solver checks run by the `gpu` CI job on a CUDA runner; they also pass on CPU",
 ]
 testpaths = ["tests"]
 pythonpath = ["src"]
@@ -115,6 +116,10 @@ pythonpath = ["src"]
 source = ["src/solvax"]
 branch = true
 omit = ["src/solvax/_mumps_worker.py"]  # runs in a subprocess; tests/test_native.py drives it
+
+[tool.coverage.paths]
+# Shards run on different machines; map their checkouts onto one source tree.
+source = ["src/solvax", "*/src/solvax"]
 
 [tool.coverage.report]
 fail_under = 95
