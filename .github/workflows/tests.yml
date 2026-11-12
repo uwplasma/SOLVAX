@@ -10,22 +10,22 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# The eigenpairs-jax and test jobs read their runner from the repository
-# variable CI_RUNS_ON (a JSON runner label or label list) when it is set, for
-# same-repository runs only; otherwise a long lane runs on the Linux
-# self-hosted runner or on ubuntu-latest, as below. Jobs that need apt, MUMPS
-# or a GPU keep their runner.
+# All jobs except mumps (apt, OpenMPI, MUMPS) and gpu (CUDA) read their runner
+# from the repository variable CI_RUNS_ON (a JSON runner label or label list)
+# when it is set, for same-repository runs only; otherwise the long lanes run
+# on the Linux self-hosted runner or on ubuntu-latest, as below.
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.CI_RUNS_ON || '"ubuntu-latest"') || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
-          cache: pip
-      - run: pip install ruff==0.15.10
+          enable-cache: false
+          activate-environment: true
+      - run: uv pip install ruff==0.15.10
       - run: ruff check src tests examples
 
   # The package advertises `Typing :: Typed` and ships `py.typed`, so a
@@ -34,16 +34,23 @@ jobs:
   # not keeping. Modules that do not pass yet are listed in `[tool.mypy]`, so
   # this gate holds the line rather than blocking on pre-existing debt.
   types:
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.CI_RUNS_ON || '"ubuntu-latest"') || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
-          cache: pip
-      - run: pip install mypy==1.20.0 jax numpy
+          enable-cache: false
+          activate-environment: true
+      - run: uv pip install mypy==1.20.0 jax numpy
       - run: mypy
+      - name: Remove the virtual environment
+        if: always()
+        run: rm -rf .venv
+      - name: Remove the virtual environment
+        if: always()
+        run: rm -rf .venv
 
   mumps:
     name: MUMPS backend (Ubuntu)
@@ -247,15 +254,16 @@ jobs:
   coverage:
     name: Combined branch coverage
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.CI_RUNS_ON || '"ubuntu-latest"') || 'ubuntu-latest' }}
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
-          cache: pip
-      - run: pip install coverage
+          enable-cache: false
+          activate-environment: true
+      - run: uv pip install coverage
       - uses: actions/cache/restore@v6
         with:
           path: artifacts/coverage/.coverage.current-1
@@ -297,5 +305,8 @@ jobs:
         timeout-minutes: 1
         run: pytest -m gpu -q -x -p no:cacheprovider
       - name: Clean workspace
+        if: always()
+        run: rm -rf .venv
+      - name: Remove the virtual environment
         if: always()
         run: rm -rf .venv
