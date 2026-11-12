@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `block_thomas_solve` runs both substitution sweeps as scans (stored-band and `normalized=True` factors) instead of Python loops over the block rows, so its program no longer grows with the number of blocks. Cold compile of a 31 x 150 solve falls from about 9 s to about 1 s (primal and transposed); warm solve time is unchanged within noise. Primal, transpose, `jax.linear_transpose`, tangents and cotangents are unchanged.
 - `generalized_eigenpairs` uses six shift-invert applications per sweep instead of three. On the FAX Könies TAE pencil (H = 12, 3 modes, `tol` 1e-10, 8 CPU threads) sweeps drop from 11, 34, 121 to 3, 8, 28 at N = 800, 1600, 3200 and the warm solve from 0.40, 2.3, 22 s to 0.31, 1.8, 12 s; peak memory grows 1.4x. One sweep now converges more small problems, so tests that starve `max_iter` to force non-convergence should use an unreachable `tol` instead.
 
 ## 0.36.1 - 2026-11-10
