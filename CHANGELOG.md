@@ -7,14 +7,13 @@
 ## 0.36.1 - 2026-11-10
 
 - `fgmres` (flat path) applies the accumulated Givens rotations to each new Hessenberg column as one `(m+1) x (m+1)` matrix-vector product instead of a sequential `m`-trip masked loop. Iterates are equivalent to the former rotation loop (restart 1, 2 and m, breakdown, complex, float32, fixed work).
+- On CUDA, `tridiagonal_solve_checked` with the default Thomas method runs one fused Pallas kernel (solve and pivots, bitwise equal to the scan) when at most 4096 systems are batched, replacing about 100 tiny launches per solve; tangents use the scan. Warm VMEX iterations on an RTX A4000 are 1.5-1.7x faster, and a 51-row solve of 256 systems takes 0.19 ms instead of 0.68 ms. CPU is unchanged.
 
 ## 0.36.0 - 2026-11-10
 
 - `generalized_eigenpairs` extracts pairs by Rayleigh-Ritz for the shift-invert operator, ranked by
   `|mu|`, over a block Krylov space of three applications per sweep. A target between an isolated and an
   accumulating eigenvalue no longer stalls on Ritz ghosts. `iterations` and `max_iter` now count sweeps.
-
-- On CUDA, `tridiagonal_solve_checked` with the default Thomas method runs one fused Pallas kernel (solve and pivots, bitwise equal to the scan) when at most 4096 systems are batched, replacing about 100 tiny launches per solve; tangents use the scan. Warm VMEX iterations on an RTX A4000 are 1.5-1.7x faster, and a 51-row solve of 256 systems takes 0.19 ms instead of 0.68 ms. CPU is unchanged.
 
 ## 0.35.3 - 2026-11-09
 
