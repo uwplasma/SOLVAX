@@ -10,6 +10,6 @@ _SPEC.loader.exec_module(_MODULE)
 
 
 def test_checkpointed_block_benchmark_records_memory_and_accuracy():
-    result = _MODULE.run_checkpointed_block_benchmark(n_blocks=8, block_size=4, repeats=1)
+    result = _MODULE.run_checkpointed_block_benchmark(n_blocks=32, block_size=4, repeats=1)
     assert result["relative_error"] < 1e-12
     assert result["checkpointed"]["temp_bytes"] < result["full"]["temp_bytes"]

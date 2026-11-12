@@ -983,7 +983,7 @@ def block_thomas_solve(
     read_bands = GeneratedBlockTridiagFactors(
         delta_lu,
         delta_piv,
-        lambda k: (lower[k], None, upper[k]),
+        lambda k: (lower[k], jnp.zeros((), lower.dtype), upper[k]),
         rhs.shape[0],
         jnp.result_type(lower),
     )
