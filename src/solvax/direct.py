@@ -701,34 +701,61 @@ def _block_thomas_solve_normalized(
     Primal: ``U_hat y = b`` upward, ``y_k = Delta_k^{-1}(b_k - U_k y_{k+1})``,
     then ``x_k = y_k - C_k x_{k-1}`` downward. Transposed, ``A^T = L_hat^T
     U_hat^T``: ``y_k = b_k - C_{k+1}^T y_{k+1}`` upward, then
-    ``x_k = Delta_k^{-T}(y_k - U_{k-1}^T x_{k-1})`` downward. Unrolled like the
-    stored-band solve below, for the same transpose reasons.
+    ``x_k = Delta_k^{-T}(y_k - U_{k-1}^T x_{k-1})`` downward. Both sweeps are
+    scans that thread one ``(n_blocks, m, ...)`` buffer through the carry, for
+    the transpose reasons given in :func:`_block_thomas_solve_regenerated`, so
+    compile time does not grow with the number of blocks.
     """
     delta_lu, delta_piv, coupling, upper = factors
+    coupling, upper = jnp.asarray(coupling), jnp.asarray(upper)
     fdt = delta_lu.dtype
     work = jnp.result_type(rhs, coupling)
     n = rhs.shape[0]
-    mT = lambda a: jnp.swapaxes(a, -1, -2)  # noqa: E731
+    trans = 1 if transpose else 0
+    swap = lambda a: jnp.swapaxes(a, -1, -2)  # noqa: E731
+    read = lambda values, index: jax.lax.dynamic_index_in_dim(  # noqa: E731
+        values, index, axis=0, keepdims=False
+    )
+    write = lambda values, block, index: jax.lax.dynamic_update_index_in_dim(  # noqa: E731
+        values, block, index, axis=0
+    )
 
-    def tsolve(k, v, trans):
-        return lu_solve((delta_lu[k], delta_piv[k]), v.astype(fdt), trans=trans).astype(work)
+    def tsolve(lu, piv, v):
+        return lu_solve((lu, piv), v.astype(fdt), trans=trans).astype(work)
 
-    y: list[jax.Array] = [None] * n  # type: ignore[list-item]
-    if transpose:
-        y[-1] = rhs[-1]
-        for k in range(n - 2, -1, -1):
-            y[k] = rhs[k] - mT(coupling[k + 1]) @ y[k + 1]
-        solution = [tsolve(0, y[0], 1)]
-        for k in range(1, n):
-            solution.append(tsolve(k, y[k] - mT(upper[k - 1]) @ solution[-1], 1))
-        return jnp.stack(solution)
-    y[-1] = tsolve(n - 1, rhs[-1], 0)
-    for k in range(n - 2, -1, -1):
-        y[k] = tsolve(k, rhs[k] - upper[k] @ y[k + 1], 0)
-    solution = [y[0]]
-    for k in range(1, n):
-        solution.append(y[k] - coupling[k] @ solution[-1])
-    return jnp.stack(solution)
+    def up_step(carry, inputs):
+        y_next, values = carry
+        index, lu, piv = inputs
+        b_k = read(values, index)
+        if transpose:
+            y_k = jnp.where(
+                index == n - 1, b_k,
+                b_k - swap(read(coupling, jnp.minimum(index + 1, n - 1))) @ y_next,
+            )
+        else:
+            y_k = tsolve(lu, piv, jnp.where(
+                index == n - 1, b_k, b_k - read(upper, index) @ y_next))
+        return (y_k, write(values, y_k, index)), None
+
+    def down_step(carry, inputs):
+        x_previous, values = carry
+        index, lu, piv = inputs
+        y_k = read(values, index)
+        if transpose:
+            x_k = tsolve(lu, piv, jnp.where(
+                index == 0, y_k,
+                y_k - swap(read(upper, jnp.maximum(index - 1, 0))) @ x_previous))
+        else:
+            x_k = jnp.where(index == 0, y_k, y_k - read(coupling, index) @ x_previous)
+        return (x_k, write(values, x_k, index)), None
+
+    indices = jnp.arange(n, dtype=jnp.int32)
+    zero = jnp.zeros(rhs.shape[1:], work)
+    (_, y), _ = jax.lax.scan(
+        up_step, (zero, rhs.astype(work)), (indices, delta_lu, delta_piv), reverse=True
+    )
+    (_, solution), _ = jax.lax.scan(down_step, (zero, y), (indices, delta_lu, delta_piv))
+    return solution
 
 
 class CyclicReductionLevel(NamedTuple):
@@ -950,59 +977,17 @@ def block_thomas_solve(
     if isinstance(factors, CyclicReductionFactors):
         return _cyclic_reduction_solve(factors, rhs, transpose)
     delta_lu, delta_piv, lower, upper = factors
-    # Indexing the stored bands directly, not through ``upper[:-1]`` / ``lower[1:]``:
-    # inside ``jit`` the slice of a parameter materializes a copy of the band.
-    if transpose:
-        down_block = lambda k: jnp.swapaxes(lower[k + 1], -1, -2)  # noqa: E731
-        up_block = lambda k: jnp.swapaxes(upper[k - 1], -1, -2)  # noqa: E731
-        trans = 1
-    else:
-        down_block = lambda k: upper[k]  # noqa: E731
-        up_block = lambda k: lower[k]  # noqa: E731
-        trans = 0
-
-    # When the factors were built with a low ``factor_dtype`` (delta_lu below
-    # the working precision), run each triangular solve in that low precision
-    # and cast the result back up, so the band products keep working precision.
-    # For all-working-precision factors both casts are no-ops.
-    fdt = delta_lu.dtype
-    work = jnp.result_type(rhs, lower)
-
-    def tsolve(lu, piv, v):
-        return lu_solve((lu, piv), v.astype(fdt), trans=trans).astype(work)
-
-    # Static Python loops deliberately expose the linear recurrence to JAX.
-    # In JAX 0.9, reverse-transposing a scan that emits every intermediate can
-    # leak an internal ValAccum into the scan inputs. Unrolling restores the
-    # advertised linear_transpose/VJP contract and is also faster after
-    # compilation for representative 8--64-block systems; compilation grows
-    # with the static block count, as expected for an unrolled recurrence.
-    #
-    # That is one face of a more general obstruction, and the reason this
-    # unrolled path cannot simply be replaced by a scan: on every JAX release
-    # before 0.10.0, a scan carrying a value linear in the differentiated input
-    # through its *inputs* cannot be transposed at all. See
-    # ``_block_thomas_solve_regenerated``, which is a scan and must therefore
-    # thread the right-hand side through the carry instead. Unrolling is only
-    # affordable here because the bands are already materialized; the generated
-    # path serves block counts where it is not.
-    sigma: list[jax.Array] = [None] * rhs.shape[0]  # type: ignore[list-item]
-    sigma[-1] = rhs[-1]
-    for k in range(rhs.shape[0] - 2, -1, -1):
-        sigma[k] = rhs[k] - down_block(k) @ tsolve(
-            delta_lu[k + 1], delta_piv[k + 1], sigma[k + 1]
-        )
-
-    solution = [tsolve(delta_lu[0], delta_piv[0], sigma[0])]
-    for k in range(1, rhs.shape[0]):
-        solution.append(
-            tsolve(
-                delta_lu[k],
-                delta_piv[k],
-                sigma[k] - up_block(k) @ solution[-1],
-            )
-        )
-    return jnp.stack(solution)
+    lower, upper = jnp.asarray(lower), jnp.asarray(upper)
+    # The stored bands are read by index inside the same scans that serve the
+    # generated factors; ``upper[-1]`` and ``lower[0]`` are masked out there.
+    read_bands = GeneratedBlockTridiagFactors(
+        delta_lu,
+        delta_piv,
+        lambda k: (lower[k], jnp.zeros((), lower.dtype), upper[k]),
+        rhs.shape[0],
+        jnp.result_type(lower),
+    )
+    return _block_thomas_solve_regenerated(read_bands, rhs, transpose)
 
 
 _STORES = ("lu", "inverse")
