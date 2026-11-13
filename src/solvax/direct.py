@@ -74,6 +74,9 @@ from jax.scipy.linalg import lu_factor, lu_solve
 
 from solvax.refine import _same_kind, iterative_refinement
 
+# Older supported JAX versions lack AD through optimization_barrier.
+_schur_barrier = jax.lax.optimization_barrier if jax.__version_info__ >= (0, 6) else lambda x: x
+
 
 class BlockTridiagFactors(NamedTuple):
     """Reusable elimination state from :func:`block_thomas_factor`.
@@ -1295,14 +1298,8 @@ def block_tridiag_relative_residual(
 
 
 def _solve_matrix_and_rhs(delta, matrix_rhs, rhs):
-    """Apply one LU solve to a matrix block and one or more RHS columns."""
-    vector_rhs = rhs.ndim == 1
-    rhs_columns = rhs[:, None] if vector_rhs else rhs
-    width = matrix_rhs.shape[1]
-    solved = lu_solve(delta, jnp.concatenate([matrix_rhs, rhs_columns], axis=1))
-    solved_matrix = solved[:, :width]
-    solved_rhs = solved[:, width:]
-    return solved_matrix, solved_rhs[:, 0] if vector_rhs else solved_rhs
+    """Keep matrix-side arithmetic independent of the source column count."""
+    return lu_solve(delta, matrix_rhs), lu_solve(delta, rhs)
 
 
 def mixed_precision_block_thomas(
@@ -1447,7 +1444,8 @@ def _block_thomas_truncated_impl(
             (delta_next_lu, delta_next_piv), l_next, sigma_next
         )
         sigma_j = b_j - u_j @ solved_sigma
-        lu_j, piv_j = lu_factor(d_j - u_j @ x)
+        # Prevent merging the Schur and source GEMMs.
+        lu_j, piv_j = lu_factor(d_j - _schur_barrier(u_j) @ x)
         return (lu_j, piv_j, sigma_j), (lu_j, piv_j, sigma_j)
 
     upper_head = upper[:k]
@@ -1768,7 +1766,7 @@ def _block_thomas_selected_fn_state(
         l_j, d_j, u_j = block_fn(j)
         x, solved_sigma = _solve_matrix_and_rhs(delta_next, l_next, sigma_next)
         sigma_j = b_j - u_j @ solved_sigma
-        delta_j = lu_factor(d_j - u_j @ x)
+        delta_j = lu_factor(d_j - _schur_barrier(u_j) @ x)
         return (delta_j, l_j, sigma_j), (delta_j[0], delta_j[1], sigma_j, l_j)
 
     _, (lus, pivs, sigmas, ls) = jax.lax.scan(
