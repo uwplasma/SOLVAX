@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `fast_diagonal`, `flux_form_operator` and `fast_diagonal_schur` take a `(lower, upper)` pair of `"dirichlet"` and `"neumann"` ends for an axis, such as `("neumann", "dirichlet")` for an inflow-outflow duct's pressure (#172). The axis is factored as before, with the half-cell Dirichlet face at one end only; one Dirichlet end makes the operator nonsingular, and `lift` takes each end's data by its own kind. Checked against the dense face-by-face assembly on stretched cells, forward and transposed, and the Schur multiplier on a periodic and a mixed axis against the dense staggered complement.
 - `generalized_eigenpairs` uses six shift-invert applications per sweep instead of three. On the FAX Könies TAE pencil (H = 12, 3 modes, `tol` 1e-10, 8 CPU threads) sweeps drop from 11, 34, 121 to 3, 8, 28 at N = 800, 1600, 3200 and the warm solve from 0.40, 2.3, 22 s to 0.31, 1.8, 12 s; peak memory grows 1.4x. One sweep now converges more small problems, so tests that starve `max_iter` to force non-convergence should use an unreachable `tol` instead.
 
 ## 0.36.1 - 2026-11-10
