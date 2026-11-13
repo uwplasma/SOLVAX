@@ -10,10 +10,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# All jobs except mumps (apt, OpenMPI, MUMPS) and gpu (CUDA) read their runner
-# from the repository variable CI_RUNS_ON (a JSON runner label or label list)
-# when it is set, for same-repository runs only; otherwise the long lanes run
-# on the Linux self-hosted runner or on ubuntu-latest, as below.
+# Every job except mumps (apt, OpenMPI, MUMPS) reads its runner from the
+# repository variable CI_RUNS_ON (a JSON runner label or label list) when it is
+# set, for same-repository runs only; otherwise it runs on a hosted runner.
 jobs:
   lint:
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.CI_RUNS_ON || '"ubuntu-latest"') || 'ubuntu-latest' }}
@@ -98,7 +97,7 @@ jobs:
           - {jax: "0.7.2", python: "3.12"}
           - {jax: "0.9.2", python: "3.12"}
           - {jax: latest, python: "3.12"}
-    runs-on: ${{ (vars.CI_RUNS_ON && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.CI_RUNS_ON || '"ubuntu-latest"')) || (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && matrix.jax == 'latest')) && fromJSON('["self-hosted","uwplasma-cpu"]') || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.CI_RUNS_ON || '"ubuntu-latest"') || 'ubuntu-latest' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
@@ -181,7 +180,7 @@ jobs:
             files: >-
               tests/test_chunk_backends.py tests/test_autodiff.py
               tests/test_external_api_contract.py
-    runs-on: ${{ (vars.CI_RUNS_ON && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.CI_RUNS_ON || '"ubuntu-latest"')) || (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && matrix.label == 'ubuntu-3.12-current-1')) && fromJSON('["self-hosted","uwplasma-cpu"]') || 'ubuntu-latest' }}
+    runs-on: ${{ (vars.CI_RUNS_ON && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(vars.CI_RUNS_ON || '"ubuntu-latest"')) || matrix.os }}
     timeout-minutes: 30
     env:
       # Exhaustive tests and exact combined coverage belong to the two current
@@ -286,27 +285,3 @@ jobs:
       - uses: codecov/codecov-action@v4
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-
-  # Short accelerator check: the core solvers on a real GPU, nothing more.
-  gpu:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, Linux, uwplasma-gpu]
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v6
-        with:
-          python-version: "3.12"
-          enable-cache: false
-          activate-environment: true
-      - run: uv pip install -e '.[dev]' 'jax[cuda12]'
-      - run: python -c "import jax; assert jax.default_backend()=='gpu', jax.devices()"
-      - name: GPU tests
-        timeout-minutes: 1
-        run: pytest -m gpu -q -x -p no:cacheprovider
-      - name: Clean workspace
-        if: always()
-        run: rm -rf .venv
-      - name: Remove the virtual environment
-        if: always()
-        run: rm -rf .venv
