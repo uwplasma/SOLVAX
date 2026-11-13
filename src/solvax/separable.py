@@ -5,7 +5,8 @@ one-dimensional operators ``M_a = W_a^{-1} K_a``: ``K_a`` is the symmetric condu
 ``W_a`` the cell widths. ``K_a v = lambda W_a v`` is solved once on the host, so ``shift -
 coefficient * laplacian`` is inverted by three contractions and a divide (:class:`FastDiagonal`).
 Each axis is homogeneous Dirichlet (the face lies half a cell from the centre), Neumann or
-periodic.
+periodic, or a ``(lower, upper)`` pair of Dirichlet and Neumann ends, as an inflow-outflow duct's
+pressure is.
 
 :class:`FluxFormOperator` is ``A x = V (s x - c div(G grad x))`` for cell arrays ``k`` and ``s``
 and a scalar ``c``, with ``V`` the cell volumes. The flux per unit area through a face is ``(x2 -
@@ -49,6 +50,31 @@ __all__ = [
 ]
 
 _KINDS = ("dirichlet", "neumann", "periodic")
+_ENDS = ("dirichlet", "neumann")
+
+
+def _ends(kind) -> tuple[str, str]:
+    """An axis kind as its ``(lower, upper)`` ends: one of ``_KINDS`` or a pair from ``_ENDS``."""
+    if isinstance(kind, str) and kind in _KINDS:
+        return kind, kind
+    ends = tuple(kind) if isinstance(kind, (tuple, list)) else ()
+    if len(ends) != 2 or not all(isinstance(end, str) and end in _ENDS for end in ends):
+        raise ValueError(
+            f"axis kind must be one of {_KINDS} or a (lower, upper) pair of {_ENDS}, got {kind!r}"
+        )
+    return ends
+
+
+def _kinds(kinds) -> tuple[Any, ...]:
+    """``kinds`` validated, each pair of ends a tuple (hashable, for a static field)."""
+    for kind in kinds:
+        _ends(kind)  # raises on an unknown kind
+    return tuple(kind if isinstance(kind, str) else tuple(kind) for kind in kinds)
+
+
+def _has_dirichlet_end(kinds) -> bool:
+    """A Dirichlet end on any axis removes the constants from the null space."""
+    return any("dirichlet" in _ends(kind) for kind in kinds)
 
 
 class SpdSolveInfo(NamedTuple):
@@ -71,11 +97,10 @@ class SpdSolveInfo(NamedTuple):
     defect: jax.Array
 
 
-def _axis_modes(widths, kind: str):
+def _axis_modes(widths, kind):
     """``(Q, Q^{-1}, lambda)`` with ``W^{-1} K = Q diag(lambda) Q^{-1}`` for one axis."""
     w = np.asarray(widths, dtype=np.float64)
-    if kind not in _KINDS:
-        raise ValueError(f"axis kind must be one of {_KINDS}, got {kind!r}")
+    lower, upper = _ends(kind)
     if w.ndim != 1 or w.size == 0 or not np.all(np.isfinite(w) & (w > 0.0)):
         raise ValueError("widths must be one 1-D array of positive finite cell widths per axis")
     n, i = w.size, np.arange(w.size - 1)
@@ -85,10 +110,11 @@ def _axis_modes(widths, kind: str):
     k[i + 1, i + 1] += c
     k[i, i + 1] -= c
     k[i + 1, i] -= c
-    if kind == "dirichlet":
+    if lower == "dirichlet":
         k[0, 0] += 2.0 / w[0]
+    if upper == "dirichlet":
         k[-1, -1] += 2.0 / w[-1]
-    elif kind == "periodic":
+    if lower == "periodic":
         wrap = 2.0 / (w[0] + w[-1])
         k[0, 0] += wrap
         k[-1, -1] += wrap
@@ -97,7 +123,7 @@ def _axis_modes(widths, kind: str):
     root = np.sqrt(w)
     lam, vec = np.linalg.eigh(k / np.outer(root, root))
     lam = np.maximum(lam, 0.0)
-    if kind != "dirichlet":
+    if "dirichlet" not in (lower, upper):
         lam[0] = 0.0  # the constants: exactly zero, not rounding
     return vec / root[:, None], vec.T * root[None, :], lam
 
@@ -130,7 +156,7 @@ class FastDiagonal(eqx.Module):
     Cell-space convention: ``solve(r)`` returns ``x`` with ``(shift - coefficient * laplacian) x =
     r``, ``laplacian`` the finite-volume one (per unit volume), so the operator is symmetric only
     in the volume-weighted inner product and ``transpose=True`` solves the plain transpose. With
-    ``shift == 0`` and no Dirichlet axis the constants are its null space (``singular``): the
+    ``shift == 0`` and no Dirichlet end the constants are its null space (``singular``): the
     solve is the pseudo-inverse, which drops the volume-mean part of ``r`` and returns zero volume
     mean. ``shift``, ``coefficient`` and ``weights`` are leaves and differentiable (the solve is a
     direct formula in them); the widths are geometry and are not differentiated. Build with
@@ -198,9 +224,10 @@ def fast_diagonal(widths, kinds, *, shift=0.0, coefficient=1.0, weights=None) ->
     """Factor ``shift - coefficient * sum_a weights[a] * laplacian_a`` on cells of ``widths``.
 
     ``widths`` is one 1-D array of cell widths per axis. ``kinds`` gives each axis
-    ``"dirichlet"``, ``"neumann"`` or ``"periodic"``, all homogeneous (boundary data belong in the
+    ``"dirichlet"``, ``"neumann"`` or ``"periodic"``, or a ``(lower, upper)`` pair of
+    ``"dirichlet"`` and ``"neumann"`` ends, all homogeneous (boundary data belong in the
     right-hand side). ``weights`` is one scalar per axis (default one). The widths must be
-    concrete. ``shift == 0``, concretely, on a grid with no Dirichlet axis is the singular case
+    concrete. ``shift == 0``, concretely, on a grid with no Dirichlet end is the singular case
     of :class:`FastDiagonal`.
     """
     real = jnp.result_type(float)
@@ -212,7 +239,7 @@ def fast_diagonal(widths, kinds, *, shift=0.0, coefficient=1.0, weights=None) ->
         shift=jnp.asarray(shift, real),
         coefficient=jnp.asarray(coefficient, real),
         weights=weights,
-        singular=_is_zero(shift) and "dirichlet" not in kinds,
+        singular=_is_zero(shift) and not _has_dirichlet_end(kinds),
     )
 
 
@@ -270,12 +297,15 @@ def _slab(x, axis, start, stop):
 
 
 def _pad(x, axis, kind, odd=False):
-    """Ghost cells on both sides of ``axis``: wrapped, or the edge cell (negated if ``odd``)."""
+    """Ghost cells on both sides of ``axis``: wrapped, or the edge cell (negated at a Dirichlet
+    end if ``odd``)."""
     n = x.shape[axis]
     first, last = _slab(x, axis, 0, 1), _slab(x, axis, n - 1, n)
-    low, high = (last, first) if kind == "periodic" else (first, last)
+    lower, upper = _ends(kind)
+    low, high = (last, first) if lower == "periodic" else (first, last)
     if odd:
-        low, high = -low, -high
+        low = -low if lower == "dirichlet" else low
+        high = -high if upper == "dirichlet" else high
     return jnp.concatenate([low, x, high], axis=axis)
 
 
@@ -290,7 +320,7 @@ class FluxFormOperator(eqx.Module):
     The preconditioner stays at the volume means given at construction and carries no derivative:
     it only steers the iteration.
 
-    ``shift == 0`` (concretely) with no Dirichlet axis is the singular variant, the constants its
+    ``shift == 0`` (concretely) with no Dirichlet end is the singular variant, the constants its
     null space: :meth:`solve` solves the compatible part, returns zero volume mean and reports the
     removed defect ``sum(rhs) / sum(V)`` in its info.
     """
@@ -343,7 +373,7 @@ class FluxFormOperator(eqx.Module):
         out = 0.0 if self.preconditioner.singular else volumes * self.shift * x
         for axis, kind in enumerate(self.kinds):
             n = x.shape[axis]
-            xp = _pad(x, axis, kind, odd=kind == "dirichlet")
+            xp = _pad(x, axis, kind, odd=True)
             flux = conductances[axis] * (_slab(xp, axis, 1, n + 2) - _slab(xp, axis, 0, n + 1))
             out = out - self.coefficient * volumes / self._along(axis) * (
                 _slab(flux, axis, 1, n + 1) - _slab(flux, axis, 0, n)
@@ -359,7 +389,8 @@ class FluxFormOperator(eqx.Module):
 
         ``data[axis] = (lower, upper)`` or ``None``, each broadcastable to the boundary slab: the
         value of ``x`` on a Dirichlet face, or the gradient ``dx/d(axis)`` on a Neumann face (the
-        flux is that gradient times the boundary cell's ``k``). A periodic axis takes none.
+        flux is that gradient times the boundary cell's ``k``), each end by its own kind. A periodic
+        axis takes none.
         """
         out = jnp.zeros_like(self.conductivity)
         for axis, (kind, pair, c) in enumerate(
@@ -370,10 +401,15 @@ class FluxFormOperator(eqx.Module):
             if kind == "periodic":
                 raise ValueError("a periodic axis has no boundary data")
             n, k, (lo, hi) = self.conductivity.shape[axis], self.conductivity, pair
-            if kind == "dirichlet":
-                low, high = -2.0 * _slab(c, axis, 0, 1) * lo, 2.0 * _slab(c, axis, n, n + 1) * hi
+            lower, upper = _ends(kind)
+            if lower == "dirichlet":
+                low = -2.0 * _slab(c, axis, 0, 1) * lo
             else:
-                low, high = _slab(k, axis, 0, 1) * lo, _slab(k, axis, n - 1, n) * hi
+                low = _slab(k, axis, 0, 1) * lo
+            if upper == "dirichlet":
+                high = 2.0 * _slab(c, axis, n, n + 1) * hi
+            else:
+                high = _slab(k, axis, n - 1, n) * hi
             extra = jnp.concatenate(
                 [low, jnp.zeros_like(_slab(c, axis, 0, n - 1)), high], axis=axis
             )
@@ -422,8 +458,9 @@ def flux_form_operator(widths, kinds, conductivity, shift, coefficient) -> FluxF
     """Build :class:`FluxFormOperator` on cells of ``widths`` (concrete, one 1-D array per axis).
 
     ``conductivity`` and ``shift`` are cell arrays or scalars, ``coefficient`` a scalar. The
-    preconditioner is the separable inverse at their volume means. ``shift == 0`` selects the
-    singular variant on a grid with no Dirichlet axis.
+    preconditioner is the separable inverse at their volume means. ``kinds`` are those of
+    :func:`fast_diagonal`. ``shift == 0`` selects the singular variant on a grid with no Dirichlet
+    end.
     """
     real = jnp.result_type(float)
     shape = tuple(len(w) for w in widths)
@@ -439,7 +476,7 @@ def flux_form_operator(widths, kinds, conductivity, shift, coefficient) -> FluxF
         widths, kinds, shift=0.0 if _is_zero(s) else mean(s), coefficient=c * mean(k)
     )
     widths = tuple(jnp.asarray(w, real) for w in widths)
-    return FluxFormOperator(widths, k, s, c, lax.stop_gradient(pre), tuple(kinds))
+    return FluxFormOperator(widths, k, s, c, lax.stop_gradient(pre), _kinds(kinds))
 
 
 class FastDiagonalSchur(FastDiagonal):
@@ -526,7 +563,9 @@ def fast_diagonal_schur(
     """Build :class:`FastDiagonalSchur` for pressure cells of ``widths`` and pressure ``kinds``.
 
     ``component_shifts`` holds ``s_c`` for each axis' velocity component, ``viscous_coefficient``
-    the scalar ``nu``. ``kinds`` are the pressure's (no-flux walls are ``"neumann"``).
+    the scalar ``nu``. ``kinds`` are the pressure's, as in :func:`fast_diagonal` (no-flux walls
+    are ``"neumann"``; an inflow-outflow axis, Neumann at the inlet and ``p = 0`` at the outlet,
+    is ``("neumann", "dirichlet")``).
     """
     real = jnp.result_type(float)
     shifts = jnp.asarray(component_shifts, real)
@@ -537,7 +576,7 @@ def fast_diagonal_schur(
         shift=jnp.zeros((), real),
         coefficient=jnp.ones((), real),
         weights=jnp.ones(len(widths), real),
-        singular="dirichlet" not in kinds,
+        singular=not _has_dirichlet_end(kinds),
         component_shifts=shifts,
         viscous_coefficient=jnp.asarray(viscous_coefficient, real),
     )
