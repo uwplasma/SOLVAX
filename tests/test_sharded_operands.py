@@ -177,6 +177,26 @@ x_sharded, residual = shard_map(
 gap = float(jnp.max(jnp.abs(x_sharded - reference.x)))
 scale = float(jnp.max(jnp.abs(reference.x)))
 assert gap < 1.0e-10 * max(scale, 1.0), gap
+
+import numpy as np
+
+# A field sharded over two axes, with volume weights that mask some cells.
+mesh2 = Mesh(np.array(jax.devices()).reshape(2, 2), axis_names=("x", "y"))
+u = jax.random.normal(key_r, (8, 6)) + 1j * jax.random.normal(key_t, (8, 6))
+v = jax.random.normal(key_a, (8, 6))
+w = jnp.where(jnp.arange(8)[:, None] < 6, 1.0 + jax.random.uniform(key_t, (8, 6)), 0.0)
+
+
+def weighted(u_local, v_local, w_local):
+    return solvax.axis_inner_product(("x", "y"), weights=w_local)(u_local, v_local)
+
+
+spec = PartitionSpec("x", "y")
+got = shard_map(
+    weighted, mesh=mesh2, in_specs=(spec, spec, spec), out_specs=PartitionSpec(), **check_off
+)(u, v, w)
+expected = jnp.sum(jnp.conj(u) * w * v)
+assert abs(complex(got) - complex(expected)) < 1e-12 * abs(complex(expected)), (got, expected)
 print("INNER-OK")
 """
 
