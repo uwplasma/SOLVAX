@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `block_thomas` factors with `normalized=True`, so each solve applies every Schur LU once instead of twice. A gradient through it (one primal and one transposed solve) is 1.2-2.5x faster: 1000 x 4 blocks from 4.3 to 1.7 ms, 200 x 16 from 1.75 to 0.91 ms, 31 x 150 from about 19 to 16 ms (one thread, loaded machine). Values and the derivative rule are unchanged.
+
 ## 0.36.2 - 2026-11-12
 
 - `fast_diagonal`, `flux_form_operator` and `fast_diagonal_schur` take a `(lower, upper)` pair of `"dirichlet"` and `"neumann"` ends for an axis, such as `("neumann", "dirichlet")` for an inflow-outflow duct's pressure (#172). The axis is factored as before, with the half-cell Dirichlet face at one end only; one Dirichlet end makes the operator nonsingular, and `lift` takes each end's data by its own kind. Checked against the dense face-by-face assembly on stretched cells, forward and transposed, and the Schur multiplier on a periodic and a mixed axis against the dense staggered complement.
