@@ -272,7 +272,9 @@ class IMEXTableau(NamedTuple):
     b_hat: tuple[float, ...] | None = None
 
 
-def _imex(a_exp: Any, a_imp: Any, b_exp: Any, b_imp: Any, order: int, b_hat: Any = None):
+def _imex(
+    a_exp: Any, a_imp: Any, b_exp: Any, b_imp: Any, order: int, b_hat: Any = None
+) -> IMEXTableau:
     a_exp = tuple(tuple(float(v) for v in r) for r in a_exp)
     a_imp = tuple(tuple(float(v) for v in r) for r in a_imp)
     return IMEXTableau(
@@ -427,7 +429,15 @@ def imex_step(
 # --------------------------------------------------------------------------
 # Lawson (integrating-factor) Runge-Kutta
 # --------------------------------------------------------------------------
-def _lawson_combine(propagate, y, h, ci, weights, ks, c):
+def _lawson_combine(
+    propagate: Callable[[Any, Any], Any],
+    y: Any,
+    h: Any,
+    ci: float,
+    weights: tuple[float, ...],
+    ks: list[Any],
+    c: tuple[float, ...],
+) -> Any:
     """``exp(ci h L) y + h sum_j w_j exp((ci - c_j) h L) k_j``, one propagation per distinct c_j."""
 
     groups: dict[float, tuple[list[float], list[Any]]] = {}
