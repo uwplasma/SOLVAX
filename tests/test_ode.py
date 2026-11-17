@@ -346,3 +346,46 @@ def test_integrate_jits_vmaps_and_records(capfd):
         jnp.stack([Y0, 2 * Y0])
     )
     np.testing.assert_allclose(batch[1], 2 * batch[0], rtol=1e-13)
+
+
+def test_integrate_diagnose_accumulates_accepted_steps_per_chunk():
+    def diagnose(acc, t, y_old, y_new, h):
+        return {"time": acc["time"] + h, "peak": jnp.maximum(acc["peak"], jnp.abs(y_new[0]))}
+
+    zero = {"time": 0.0, "peak": 0.0}
+    out = integrate(controlled(rk4_map), Y0, 0.0, 0.05, 23, chunk=5, diagnose=diagnose, diag0=zero)
+    np.testing.assert_allclose(out.diagnostics["time"], [0.25] * 4 + [0.15], rtol=1e-12)
+    ref, peaks = Y0, []
+    for i in range(23):
+        ref = rk4_map(i * 0.05, ref, 0.05)
+        peaks.append(abs(float(ref[0])))
+    np.testing.assert_allclose(out.diagnostics["peak"][-1], max(peaks[20:]), rtol=1e-13)
+    # Rejected attempts do not reach the accumulator.
+    step = controlled(
+        lambda t, y, h: erk_step(oscillator, t, y, h, DOPRI5_4)[:2],
+        embedded_order=4, rtol=1e-9, atol=1e-12,
+    )
+    out = integrate(step, Y0, 0.0, 1.0, 500, t1=10.0, chunk=50,
+                    diagnose=lambda a, t, yo, yn, h: a + h)
+    assert int(out.rejected) > 0
+    assert float(out.diagnostics.sum()) == pytest.approx(10.0, rel=1e-12)
+
+
+def test_integrate_retune_refactors_an_implicit_step_per_chunk():
+    lam = 3.0
+
+    def step(t, y, h, inverse):  # backward Euler with a stored factor
+        return inverse * y, h, True, inverse
+
+    def retune(t, y, dt, inverse):
+        dt = 0.1 / (1.0 + t)
+        return dt, 1.0 / (1.0 + dt * lam)
+
+    out = integrate(step, jnp.array([1.0]), 0.0, 0.1, 12, chunk=4, aux0=1.0, retune=retune)
+    ref, t = 1.0, 0.0
+    for _ in range(3):
+        dt = 0.1 / (1.0 + t)
+        for _ in range(4):
+            ref, t = ref / (1.0 + dt * lam), t + dt
+    np.testing.assert_allclose(out.y, [ref], rtol=1e-13)
+    assert float(out.t) == pytest.approx(t, rel=1e-13)

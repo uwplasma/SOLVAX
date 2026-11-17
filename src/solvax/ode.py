@@ -611,6 +611,7 @@ class Trajectory(NamedTuple):
     rejected: jax.Array  # rejected attempts, by the controller or for a non-finite state
     ok: jax.Array  # False when more than max_retries consecutive attempts were rejected
     saved: Any  # observe(t, y) after each chunk, stacked; None without observe
+    diagnostics: Any = None  # the diagnose accumulator at the end of each chunk, stacked
 
 
 def _report(chunk: Any, t: Any, dt: Any, steps: Any, rejected: Any, ok: Any) -> None:
@@ -636,6 +637,9 @@ def integrate(
     checkpoint: bool = True,
     progress: bool | Callable[..., None] = False,
     observe: Callable[[Any, Any], Any] | None = None,
+    diagnose: Callable[[Any, Any, Any, Any, Any], Any] | None = None,
+    diag0: Any = 0.0,
+    retune: Callable[[Any, Any, Any, Any], tuple[Any, Any]] | None = None,
 ) -> Trajectory:
     """Advance ``y0`` by at most ``n_steps`` attempts of ``step``, in chunks of ``lax.scan``.
 
@@ -653,6 +657,15 @@ def integrate(
     ``chunk, t, dt, steps, rejected, ok``). The function is pure and traceable,
     so it differentiates, jits and vmaps; under ``vmap`` the step is evaluated
     for every lane until all lanes stop.
+
+    Two hooks replace the bookkeeping of a hand-written loop.
+    ``diagnose(acc, t, y_old, y_new, h) -> acc`` runs inside the scan after
+    every accepted step (``t`` is the new time); ``acc`` starts each chunk at
+    ``diag0`` and its value at the end of each chunk is stacked in
+    ``diagnostics``, so a sum, a maximum or a time average over each window
+    costs no stored states. ``retune(t, y, dt, aux) -> (dt, aux)`` runs before
+    every chunk: recompute a CFL step from the current state, or refactor an
+    implicit operator kept in ``aux`` for a new step size.
     """
 
     leaves = jax.tree.leaves(y0)
@@ -662,7 +675,7 @@ def integrate(
     report = _report if progress is True else progress
 
     def attempt(c: tuple[Any, ...]) -> tuple[Any, ...]:
-        t, y, dt, aux, steps, rejected, retries, ok = c
+        t, y, dt, aux, steps, rejected, retries, ok, acc = c
         h = jnp.minimum(dt, t_end - t)
         y_new, dt_next, accept, aux_new = step(t, y, h, aux)
         finite = jnp.all(jnp.asarray([jnp.all(jnp.isfinite(x)) for x in jax.tree.leaves(y_new)]))
@@ -672,6 +685,8 @@ def integrate(
             return jax.tree.map(lambda u, v: jnp.where(cond, u, v), a, b)
 
         retries = jnp.where(good, 0, retries + 1)
+        if diagnose is not None:
+            acc = pick(good, diagnose(acc, t + h, y, y_new, h), acc)
         return (
             jnp.where(good, t + h, t),
             pick(good, y_new, y),
@@ -681,6 +696,7 @@ def integrate(
             rejected + (~good),
             retries,
             ok & (retries <= max_retries),
+            acc,
         )
 
     def run_chunk(c: tuple[Any, ...], index: Any) -> tuple[Any, ...]:
@@ -694,21 +710,27 @@ def integrate(
 
     def outer(c: tuple[Any, ...], index: Any) -> tuple[Any, Any]:
         live = c[7] & (c[0] < t_end)
-        c = chunk_fn(c, index)
+        if retune is not None:
+            dt, aux = retune(c[0], c[1], c[2], c[3])
+            c = (c[0], c[1], jnp.where(live, jnp.asarray(dt, real), c[2]),
+                 jax.tree.map(lambda u, v: jnp.where(live, u, v), aux, c[3]), *c[4:])
+        c = chunk_fn((*c[:8], acc0), index)
         if report:
             jax.lax.cond(
                 live,
                 lambda: jax.debug.callback(report, index, c[0], c[2], c[4], c[5], c[7]),
                 lambda: None,
             )
-        return c, None if observe is None else observe(c[0], c[1])
+        saved = None if observe is None else observe(c[0], c[1])
+        return c, (saved, None if diagnose is None else c[8])
 
     zero = jnp.int32(0)
     aux0 = jax.tree.map(jnp.asarray, aux0)
     t_0, dt_0 = jnp.asarray(t0, real), jnp.asarray(dt0, real)
-    init = (t_0, y0, dt_0, aux0, zero, zero, zero, jnp.bool_(True))
-    c, saved = jax.lax.scan(outer, init, jnp.arange(n_chunks))
-    return Trajectory(c[1], c[0], c[2], c[4], c[5], c[7], saved)
+    acc0 = jax.tree.map(jnp.asarray, diag0)
+    init = (t_0, y0, dt_0, aux0, zero, zero, zero, jnp.bool_(True), acc0)
+    c, (saved, diagnostics) = jax.lax.scan(outer, init, jnp.arange(n_chunks))
+    return Trajectory(c[1], c[0], c[2], c[4], c[5], c[7], saved, diagnostics)
 
 
 __all__ = [
