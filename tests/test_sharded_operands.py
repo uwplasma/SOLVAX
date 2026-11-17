@@ -177,6 +177,26 @@ x_sharded, residual = shard_map(
 gap = float(jnp.max(jnp.abs(x_sharded - reference.x)))
 scale = float(jnp.max(jnp.abs(reference.x)))
 assert gap < 1.0e-10 * max(scale, 1.0), gap
+
+import numpy as np
+
+# A field sharded over two axes, with volume weights that mask some cells.
+mesh2 = Mesh(np.array(jax.devices()).reshape(2, 2), axis_names=("x", "y"))
+u = jax.random.normal(key_r, (8, 6)) + 1j * jax.random.normal(key_t, (8, 6))
+v = jax.random.normal(key_a, (8, 6))
+w = jnp.where(jnp.arange(8)[:, None] < 6, 1.0 + jax.random.uniform(key_t, (8, 6)), 0.0)
+
+
+def weighted(u_local, v_local, w_local):
+    return solvax.axis_inner_product(("x", "y"), weights=w_local)(u_local, v_local)
+
+
+spec = PartitionSpec("x", "y")
+got = shard_map(
+    weighted, mesh=mesh2, in_specs=(spec, spec, spec), out_specs=PartitionSpec(), **check_off
+)(u, v, w)
+expected = jnp.sum(jnp.conj(u) * w * v)
+assert abs(complex(got) - complex(expected)) < 1e-12 * abs(complex(expected)), (got, expected)
 print("INNER-OK")
 """
 
@@ -195,3 +215,21 @@ def test_gmres_inside_shard_map_with_axis_inner_product() -> None:
     )
     assert result.returncode == 0, result.stderr[-3000:]
     assert "INNER-OK" in result.stdout
+
+
+def test_axis_inner_product_weights_in_process() -> None:
+    # vmap binds the axis name in this process, so coverage sees the weighted path.
+    import jax
+    import jax.numpy as jnp
+
+    import solvax
+
+    u = jnp.arange(6.0).reshape(2, 3) + 1j
+    v = jnp.ones((2, 3))
+    w = jnp.array([[1.0, 0.0, 2.0], [0.5, 1.0, 0.0]])
+    inner = solvax.axis_inner_product("m", weights=w[0])
+    got = jax.vmap(lambda a, b: inner(a, b), axis_name="m")(u, v)
+    expected = jnp.sum(jnp.conj(u) * w[0] * v)
+    assert jnp.allclose(got, expected)
+    plain = jax.vmap(solvax.axis_inner_product("m"), axis_name="m")(u, v)
+    assert jnp.allclose(plain, jnp.vdot(u, v))
