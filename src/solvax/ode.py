@@ -674,9 +674,10 @@ def integrate(
     n_chunks = -(-n_steps // chunk)
     report = _report if progress is True else progress
 
-    def attempt(c: tuple[Any, ...]) -> tuple[Any, ...]:
+    def attempt(c: tuple[Any, ...], live: Any) -> tuple[Any, ...]:
         t, y, dt, aux, steps, rejected, retries, ok, acc = c
-        h = jnp.minimum(dt, t_end - t)
+        # A finished lane still takes a regular-size step, whose result is discarded.
+        h = jnp.where(live, jnp.minimum(dt, t_end - t), dt)
         y_new, dt_next, accept, aux_new = step(t, y, h, aux)
         finite = jnp.all(jnp.asarray([jnp.all(jnp.isfinite(x)) for x in jax.tree.leaves(y_new)]))
         good = finite & accept
@@ -702,9 +703,14 @@ def integrate(
     def run_chunk(c: tuple[Any, ...], index: Any) -> tuple[Any, ...]:
         def body(cc: tuple[Any, ...], j: Any) -> tuple[Any, None]:
             live = cc[7] & (cc[0] < t_end) & (index * chunk + j < n_steps)
-            return jax.lax.cond(live, attempt, lambda x: x, cc), None
+            new = attempt(cc, live)
+            return jax.tree.map(lambda u, v: jnp.where(live, u, v), new, cc), None
 
-        return jax.lax.scan(body, c, jnp.arange(chunk))[0]
+        # Masking inside the chunk and skipping whole chunks keeps reverse mode
+        # free of a conditional per step, which cost up to a quarter of a gradient.
+        return jax.lax.cond(
+            c[7] & (c[0] < t_end), lambda: jax.lax.scan(body, c, jnp.arange(chunk))[0], lambda: c
+        )
 
     chunk_fn = jax.checkpoint(run_chunk) if checkpoint else run_chunk
 
