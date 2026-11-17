@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- `integrate` takes `diagnose`, an accumulator updated after every accepted step and returned per chunk, and `retune`, which resets the step size and `aux` before each chunk. Finished steps inside a chunk are now masked rather than skipped with a conditional, which took up to a third off a gradient.
+- `integrate` takes `diagnose`, an accumulator updated after every accepted step and returned per chunk, and `retune`, which resets the step size and `aux` before each chunk.
 - `solvax.ode` gains IMEX, Lawson and low-storage SSP Runge-Kutta steps, a CFL step, and a chunked driver. `imex_step` takes the stiff part's solve as a callback `solve(t, r, gamma_h)` and ships `IMEX_EULER`, `IMEX_SSP2`, `ARS_343`, `ARK3_KC` and `SMR_RK3_CN`. `lawson_step` runs any `ERKPair` with an integrating factor given `propagate(x, tau) = exp(tau L) x`. `ssp_step` ships `SSPRK3`, `SSPRK43` and `SSPRK104`. `controlled` wraps a step for fixed, CFL or PI control, and `integrate` runs it as a scan over `jax.checkpoint` chunks, with a flushed progress line per chunk, rejection and halving of non-finite steps, and an `ok` flag. Each scheme is tested for its convergence order; the driver for gradients with and without checkpointing, `jit`, `vmap`, stopping at `t1` and non-finite recovery.
 
 ## 0.36.2 - 2026-11-12
