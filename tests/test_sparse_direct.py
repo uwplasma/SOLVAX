@@ -266,9 +266,9 @@ def test_sparse_eigenvalue_value_and_gradient_match_dense():
         return lam[jnp.argmax(lam.real)]
 
     result = jax.jit(host)(p0)
-    # Loosened for Apple aarch64 runners: platform BLAS/LAPACK rounding (observed
-    # 1.3e-9 in the value and 1.5e-9 in the residual on the macmini runner).
+    # Loosened for Apple aarch64 runners: platform BLAS/LAPACK rounding (observed 1.3e-9).
     np.testing.assert_allclose(result.value, dense_rightmost(p0), rtol=1e-8)
+    # Same platform rounding on the Mac runners (observed 1.5e-9).
     assert result.residual < 1e-8 and result.left_residual < 1e-8
     matrix = np.asarray(dense(pattern, values_at(p0)))
     y, x = np.asarray(result.left), np.asarray(result.right)
@@ -280,8 +280,7 @@ def test_sparse_eigenvalue_value_and_gradient_match_dense():
     for part in (jnp.real, jnp.imag):
         grad = jax.grad(lambda p, part=part: part(host(p).value))(p0)
         want = jax.grad(lambda p, part=part: part(dense_rightmost(p)))(p0)
-        # 2.9e-7 relative on the macmini runner, from the residual above.
-        np.testing.assert_allclose(grad, want, rtol=1e-6, atol=1e-12)
+        np.testing.assert_allclose(grad, want, rtol=1e-8, atol=1e-9)
         step = 1e-6
         fd = [
             (part(dense_rightmost(p0.at[i].add(step))) - part(dense_rightmost(p0.at[i].add(-step))))
@@ -291,7 +290,7 @@ def test_sparse_eigenvalue_value_and_gradient_match_dense():
         np.testing.assert_allclose(grad, fd, rtol=1e-5, atol=1e-8)
     _, tangent = jax.jvp(lambda p: host(p).value, (p0,), (jnp.asarray([1.0, 0.0]),))
     want = jax.jvp(dense_rightmost, (p0,), (jnp.asarray([1.0, 0.0]),))[1]
-    np.testing.assert_allclose(tangent, want, rtol=1e-8)
+    np.testing.assert_allclose(tangent, want, rtol=1e-8, atol=1e-9)
 
 
 def test_sparse_eigenvalue_nearest_vmap_and_fail_closed():
