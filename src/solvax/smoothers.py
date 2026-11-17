@@ -26,6 +26,11 @@ particular ``M``:
 - :func:`jacobi_smoother` — ``M = diag(A)``. Cheap and perfectly
   parallel; the classical choice for isotropic operators, where
   ``omega = 2/3`` minimizes the smoothing factor of the model Laplacian.
+- :func:`chebyshev_smoother` — polynomial smoothing of ``M^{-1} A`` over
+  ``[lambda_max/ratio, lambda_max]``: ``degree`` matvecs per application,
+  no sequential coupling between points, stronger than the same number of
+  damped sweeps (Adams et al. 2003); :func:`lambda_max_estimate` supplies
+  the upper bound.
 - :func:`block_jacobi_smoother` — dense blocks along one axis (velocity,
   species, moments), LU-factored once and applied batched: the remedy
   when the *within-cell* physics is stiff.
@@ -73,6 +78,8 @@ References
   high-Reynolds recirculating flows", SIAM J. Sci. Comput. 14, 607 (1993)
   — downstream (upwind) relaxation ordering for convection-dominated
   operators.
+- M. F. Adams, M. Brezina, J. J. Hu & R. S. Tuminaro, "Parallel multigrid
+  smoothing: polynomial versus Gauss-Seidel", J. Comput. Phys. 188 (2003).
 - Y. Saad, *Iterative Methods for Sparse Linear Systems*, 2nd ed., SIAM
   (2003), ch. 4 — Jacobi, Gauss-Seidel and block relaxation as splittings.
 """
@@ -175,6 +182,104 @@ def jacobi_smoother(
     """
     inverse = 1.0 / jnp.asarray(diagonal)
     return relaxation(lambda residual: inverse * residual, omega=omega, sweeps=sweeps)
+
+
+def _inverse_action(inverse: jax.Array | MatVec | None) -> MatVec:
+    """``r -> M^{-1} r`` from ``diag(A)``, a callable, or ``None`` (identity)."""
+    if inverse is None:
+        return lambda r: r
+    if callable(inverse):
+        return inverse
+    diagonal = jnp.asarray(inverse)
+    return lambda r: r / diagonal
+
+
+def lambda_max_estimate(
+    matvec: MatVec,
+    x0: jax.Array,
+    *,
+    inverse: jax.Array | MatVec | None = None,
+    iterations: int = 10,
+) -> jax.Array:
+    """Power-iteration estimate of the largest eigenvalue of ``M^{-1} A``.
+
+    ``inverse`` is ``diag(A)`` or a callable ``r -> M^{-1} r`` (identity if
+    omitted). The estimate approaches the eigenvalue from below, so pad it
+    (for example by 1.1) before passing it to :func:`chebyshev_smoother`.
+    Deterministic for a given start vector ``x0``.
+    """
+    if iterations < 1:
+        raise ValueError("iterations must be >= 1")
+    apply_inverse = _inverse_action(inverse)
+
+    def body(_, state):
+        v, _ = state
+        w = apply_inverse(matvec(v))
+        norm = jnp.linalg.norm(w)
+        return w / jnp.where(norm > 0, norm, 1.0), norm
+
+    v0 = x0 / jnp.linalg.norm(x0)
+    _, estimate = lax.fori_loop(0, int(iterations), body, (v0, jnp.zeros((), v0.dtype)))
+    return estimate
+
+
+def chebyshev_smoother(
+    inverse: jax.Array | MatVec,
+    lambda_max: float | jax.Array,
+    *,
+    ratio: float = 10.0,
+    degree: int = 3,
+) -> Smoother:
+    """Chebyshev polynomial smoother for ``M^{-1} A``.
+
+    Runs ``degree`` steps of preconditioned Chebyshev iteration (Saad,
+    algorithm 12.1) tuned to the interval ``[lambda_max/ratio, lambda_max]``
+    of the eigenvalues of ``M^{-1} A``: the error polynomial is the one of
+    least size on that interval, which damps the upper part of the spectrum
+    harder than ``degree`` damped sweeps do (Adams et al. 2003). The
+    residual recurrence costs ``degree`` matvecs per application including
+    the initial residual. With ``degree = 1`` it is damped relaxation with
+    ``omega = 2 / (lambda_max (1 + 1/ratio))``.
+
+    Args:
+        inverse: ``diag(A)`` (so ``M^{-1} r = r / diag``) or a callable
+            ``r -> M^{-1} r``.
+        lambda_max: upper bound of the spectrum of ``M^{-1} A``; see
+            :func:`lambda_max_estimate`.
+        ratio: ``lambda_max`` over the lower end of the targeted interval
+            (> 1). Multigrid smoothing needs the upper part of the spectrum
+            only. 10 is PETSc's default and gave the best 2-D Poisson
+            smoothing factor among 4, 10 and 30 (30 smooths poorly).
+        degree: polynomial degree (static int, >= 1).
+
+    Returns:
+        A callable ``smooth(matvec, x, b) -> x``.
+    """
+    if degree < 1:
+        raise ValueError("degree must be >= 1")
+    if ratio <= 1:
+        raise ValueError("ratio must be > 1")
+    apply_inverse = _inverse_action(inverse)
+
+    def smooth(matvec: MatVec, x: jax.Array, b: jax.Array) -> jax.Array:
+        upper = lambda_max
+        theta = 0.5 * (upper + upper / ratio)
+        delta = 0.5 * (upper - upper / ratio)
+        sigma = theta / delta
+        rho = 1.0 / sigma
+        r = b - matvec(x)
+        d = apply_inverse(r) / theta
+        for step in range(degree):
+            x = x + d
+            if step == degree - 1:
+                break
+            r = r - matvec(d)
+            rho_new = 1.0 / (2.0 * sigma - rho)
+            d = rho_new * rho * d + (2.0 * rho_new / delta) * apply_inverse(r)
+            rho = rho_new
+        return x
+
+    return smooth
 
 
 def block_jacobi_smoother(

@@ -14,8 +14,10 @@ import pytest
 from solvax import (
     alternating_smoother,
     block_jacobi_smoother,
+    chebyshev_smoother,
     high_frequency_mask,
     jacobi_smoother,
+    lambda_max_estimate,
     plane_smoother,
     relaxation,
     smoothing_factor,
@@ -443,3 +445,78 @@ def test_smoother_validation():
         high_frequency_mask((4, 4), (False, False))
     with pytest.raises(ValueError, match="steps must be"):
         smoothing_factor(lambda m, x, b: x, lambda u: u, (4,), key=KEY, steps=0)
+
+
+def laplacian_2d(n):
+    """Periodic five-point Laplacian (grid spacing 1) with ``D^{-1} A`` in [0, 2]."""
+    return lambda u: 4.0 * u - sum(jnp.roll(u, k, a) for a in (0, 1) for k in (1, -1))
+
+
+def test_chebyshev_degree_one_is_damped_jacobi_with_theta_weight():
+    matvec = laplacian_2d(8)
+    diagonal = jnp.full((8, 8), 4.0)
+    ratio, lam = 10.0, 2.0
+    theta = 0.5 * (lam + lam / ratio)
+    x = jax.random.normal(KEY, (8, 8))
+    b = jax.random.normal(jax.random.PRNGKey(1), (8, 8))
+    cheb = chebyshev_smoother(diagonal, lam, ratio=ratio, degree=1)(matvec, x, b)
+    jac = jacobi_smoother(diagonal, omega=1.0 / theta)(matvec, x, b)
+    np.testing.assert_allclose(cheb, jac, rtol=1e-14, atol=1e-14)
+
+
+def test_chebyshev_callable_inverse_matches_diagonal_inverse():
+    matvec = laplacian_2d(8)
+    diagonal = jnp.full((8, 8), 4.0)
+    x = jax.random.normal(KEY, (8, 8))
+    b = jax.random.normal(jax.random.PRNGKey(1), (8, 8))
+    by_array = chebyshev_smoother(diagonal, 2.0, degree=4)(matvec, x, b)
+    by_call = chebyshev_smoother(lambda r: r / 4.0, 2.0, degree=4)(matvec, x, b)
+    np.testing.assert_allclose(by_call, by_array, rtol=1e-14, atol=1e-14)
+
+
+def test_chebyshev_damps_high_frequencies_better_than_three_jacobi_sweeps():
+    n = 32
+    matvec = laplacian_2d(n)
+    diagonal = jnp.full((n, n), 4.0)
+    cheb = chebyshev_smoother(diagonal, 2.2, degree=3)
+    jac = jacobi_smoother(diagonal, omega=2.0 / 3.0, sweeps=3)
+    mu_cheb = smoothing_factor(cheb, matvec, (n, n), key=KEY, steps=STEPS)
+    mu_jac = smoothing_factor(jac, matvec, (n, n), key=KEY, steps=STEPS)
+    assert float(mu_cheb) < float(mu_jac)
+
+
+def test_lambda_max_estimate_bounds_the_spectrum_from_below():
+    n = 16
+    matvec = laplacian_2d(n)
+    x0 = jax.random.normal(KEY, (n, n))
+    plain = lambda_max_estimate(matvec, x0, iterations=60)
+    scaled = lambda_max_estimate(matvec, x0, inverse=jnp.full((n, n), 4.0), iterations=60)
+    assert 7.5 < float(plain) <= 8.0 + 1e-12
+    assert 1.9 < float(scaled) <= 2.0 + 1e-12
+    called = lambda_max_estimate(matvec, x0, inverse=lambda r: r / 4.0, iterations=60)
+    np.testing.assert_allclose(called, scaled, rtol=1e-14)
+
+
+def test_chebyshev_is_jit_and_differentiable():
+    matvec = laplacian_2d(8)
+    smooth = chebyshev_smoother(jnp.full((8, 8), 4.0), 2.2, degree=3)
+    x = jax.random.normal(KEY, (8, 8))
+    b = jax.random.normal(jax.random.PRNGKey(1), (8, 8))
+    direction = jax.random.normal(jax.random.PRNGKey(2), (8, 8))
+
+    def loss(rhs):
+        return jnp.sum(smooth(matvec, x, rhs) ** 2)
+
+    grad = jax.jit(jax.grad(loss))(b)
+    eps = 1e-6
+    fd = (loss(b + eps * direction) - loss(b - eps * direction)) / (2 * eps)
+    np.testing.assert_allclose(jnp.vdot(grad, direction), fd, rtol=1e-6)
+
+
+def test_chebyshev_and_estimate_reject_bad_parameters():
+    with pytest.raises(ValueError, match="degree"):
+        chebyshev_smoother(jnp.ones(3), 2.0, degree=0)
+    with pytest.raises(ValueError, match="ratio"):
+        chebyshev_smoother(jnp.ones(3), 2.0, ratio=1.0)
+    with pytest.raises(ValueError, match="iterations"):
+        lambda_max_estimate(lambda v: v, jnp.ones(3), iterations=0)
