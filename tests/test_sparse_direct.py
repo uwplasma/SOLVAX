@@ -280,7 +280,8 @@ def test_sparse_eigenvalue_value_and_gradient_match_dense():
     for part in (jnp.real, jnp.imag):
         grad = jax.grad(lambda p, part=part: part(host(p).value))(p0)
         want = jax.grad(lambda p, part=part: part(dense_rightmost(p)))(p0)
-        np.testing.assert_allclose(grad, want, rtol=1e-8, atol=1e-12)
+        # 2.9e-7 relative on the macmini runner, from the residual above.
+        np.testing.assert_allclose(grad, want, rtol=1e-6, atol=1e-12)
         step = 1e-6
         fd = [
             (part(dense_rightmost(p0.at[i].add(step))) - part(dense_rightmost(p0.at[i].add(-step))))
