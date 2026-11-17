@@ -37,6 +37,13 @@ at half the step, stops after `max_retries` consecutive rejections with
 progress line per chunk from inside the compiled program. It differentiates in
 reverse mode with memory of one carry per chunk plus one chunk.
 
+Two hooks take over the bookkeeping of a hand-written loop.
+`diagnose(acc, t, y_old, y_new, h)` runs inside the scan after each accepted
+step and accumulates over a chunk (energy sums, maxima, time averages); the
+value at the end of each chunk is returned in `diagnostics`. `retune(t, y, dt,
+aux)` runs before each chunk and returns a new step and `aux`: a CFL step from
+the current state, or an implicit factor rebuilt for a new step size.
+
 These steppers are not built on diffrax. diffrax's IMEX solvers solve each
 implicit stage with its own Newton and lineax solve and take no user solve for
 `I - gamma h L`, which is how the plasma codes use fast-diagonal, multigrid and
