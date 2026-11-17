@@ -215,3 +215,19 @@ def test_gmres_inside_shard_map_with_axis_inner_product() -> None:
     )
     assert result.returncode == 0, result.stderr[-3000:]
     assert "INNER-OK" in result.stdout
+
+
+def test_axis_inner_product_weights_in_process() -> None:
+    # vmap binds the axis name in this process, so coverage sees the weighted path.
+    import jax
+    import jax.numpy as jnp
+
+    import solvax
+
+    u = jnp.arange(6.0).reshape(2, 3) + 1j
+    v = jnp.ones((2, 3))
+    w = jnp.array([[1.0, 0.0, 2.0], [0.5, 1.0, 0.0]])
+    inner = solvax.axis_inner_product("m", weights=w[0])
+    got = jax.vmap(lambda a, b: inner(a, b), axis_name="m")(u, v)
+    expected = jnp.sum(jnp.conj(u) * w[0] * v)
+    assert jnp.allclose(got, expected)
