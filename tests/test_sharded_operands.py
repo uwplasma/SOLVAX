@@ -231,3 +231,5 @@ def test_axis_inner_product_weights_in_process() -> None:
     got = jax.vmap(lambda a, b: inner(a, b), axis_name="m")(u, v)
     expected = jnp.sum(jnp.conj(u) * w[0] * v)
     assert jnp.allclose(got, expected)
+    plain = jax.vmap(solvax.axis_inner_product("m"), axis_name="m")(u, v)
+    assert jnp.allclose(plain, jnp.vdot(u, v))
