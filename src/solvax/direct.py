@@ -1237,9 +1237,11 @@ def block_thomas(
 ) -> jax.Array:
     """Solve a block-tridiagonal system by Schur-complement elimination.
 
-    Convenience wrapper: :func:`block_thomas_factor` then
-    :func:`block_thomas_solve`. For repeated solves with the same matrix,
-    call the two stages directly and reuse the factors.
+    Convenience wrapper: :func:`block_thomas_factor` (``normalized=True``)
+    then :func:`block_thomas_solve`. For repeated solves with the same matrix,
+    call the two stages directly and reuse the factors. The normalized factors
+    apply each Schur LU once per sweep, which matters most here: a gradient
+    runs one primal and one transposed solve on the same factors.
 
     Args:
         lower: ``L_k`` blocks, ``(n_blocks, m, m)``; ``lower[0]`` ignored.
@@ -1250,7 +1252,7 @@ def block_thomas(
     Returns:
         ``x`` with the same shape as ``rhs``.
     """
-    factors = block_thomas_factor(lower, diag, upper)
+    factors = block_thomas_factor(lower, diag, upper, normalized=True)
     return jax.lax.custom_linear_solve(
         lambda x: block_tridiag_matvec(lower, diag, upper, x),
         rhs.astype(jnp.result_type(lower, diag, upper, rhs)),
