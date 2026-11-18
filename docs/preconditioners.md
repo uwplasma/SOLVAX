@@ -240,6 +240,7 @@ approximate inverse into one:
 | builder | inverts | use when |
 |---|---|---|
 | `jacobi_smoother` | $\operatorname{diag}(A)$ | isotropic coupling |
+| `chebyshev_smoother` | $\operatorname{diag}(A)$ or any $M^{-1}$, polynomial in $M^{-1}A$ | isotropic coupling, more damping per matvec than damped Jacobi |
 | `block_jacobi_smoother` | dense blocks along one axis | stiff within-cell physics |
 | `tridiagonal_smoother` | lines along one axis | one strongly coupled direction |
 | `plane_smoother` | whole 2-D planes | two strongly coupled directions |
