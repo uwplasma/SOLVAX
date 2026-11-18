@@ -830,6 +830,38 @@ def test_truncated_fn_matches_materialized(n_blocks, keep):
     assert np.allclose(np.asarray(x_fn), np.asarray(x_ref[:keep]), atol=1e-12)
 
 
+@pytest.mark.skipif(
+    jax.default_backend() != "gpu" or jax.__version_info__ < (0, 6),
+    reason="GPU Schur GEMM fusion regression",
+)
+def test_generated_schur_factors_ignore_zero_rhs_padding():
+    """RHS padding must not change the matrix LU used by its adjoint."""
+    from solvax.direct import _block_thomas_truncated_fn_state
+
+    size = 775
+    rng = np.random.default_rng(20261113)
+    lower, upper, diagonal = jnp.asarray(
+        rng.normal(size=(3, 3, size, size)) / size**0.5
+    )
+    diagonal += 4 * jnp.eye(size)
+    rhs = jnp.asarray(rng.normal(size=(3, size, 1)))
+
+    @jax.jit
+    def solve(lower, diagonal, upper, rhs):
+        solution, lu, piv, _, _ = _block_thomas_truncated_fn_state(
+            _fn_from_arrays(lower, diagonal, upper), 3, rhs, 3
+        )
+        return solution, lu, piv
+
+    original, lu, piv = solve(lower, diagonal, upper, rhs)
+    padded = jnp.concatenate((rhs, jnp.zeros((3, size, 129))), axis=-1)
+    expanded, expanded_lu, expanded_piv = solve(lower, diagonal, upper, padded)
+    np.testing.assert_array_equal(lu, expanded_lu)
+    np.testing.assert_array_equal(piv, expanded_piv)
+    np.testing.assert_allclose(original, expanded[..., :1], rtol=1e-12, atol=1e-12)
+    np.testing.assert_array_equal(expanded[..., 1:], 0.0)
+
+
 def test_truncated_materialized_keep_equals_n():
     n_blocks, keep = 8, 8
     (lower, diag, upper, rhs), _ = make_system(n_blocks, 3, seed=9)
