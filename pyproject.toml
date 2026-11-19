@@ -123,3 +123,6 @@ source = ["src/solvax", "*/src/solvax"]
 
 [tool.coverage.report]
 show_missing = true
+
+[tool.repo_check]
+skip = { X2 = ["tests/test_ci_inventory.py"] }  # infrastructure test: checks the CI selection, not a result
