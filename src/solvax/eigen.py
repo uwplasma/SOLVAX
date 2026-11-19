@@ -243,9 +243,10 @@ class EigenpairResult(NamedTuple):
             ``||F y - lam G y|| / ((||F|| + |lam| ||G||) ||y||)``, with ``||.||`` the
             infinity norm (largest absolute row sum) of a band.
         orthogonality: ``max |Y^H G Y - I|``.
-        iterations: sweeps performed after the first, each applying the shift-invert operator three
+        iterations: sweeps performed after the first, each applying the shift-invert operator six
             times (fewer if ``n_blocks m`` is small).
-        converged: ``max(residuals) <= tol``; False if anything is not finite.
+        converged: ``max(residuals) <= tol`` and ``excluded_residual <= tol``; False if anything
+            is not finite.
         gap: ``|lam - target|`` of the nearest excluded Ritz value minus that of the
             farthest selected one. The iteration also converges that excluded pair to ``tol``,
             so the gap is a converged eigenvalue distance, but it only sees the subspace: an
@@ -253,6 +254,8 @@ class EigenpairResult(NamedTuple):
             may split a degenerate or tied set; ``inf`` if every Ritz value was selected.
         fallback: True if block Thomas failed its probe solve and the dense pivoted
             path ran.
+        excluded_residual: relative residual of the Ritz pair that sets ``gap`` (the nearest
+            excluded one); zero if every Ritz value was selected.
     """
 
     values: jax.Array
@@ -263,6 +266,7 @@ class EigenpairResult(NamedTuple):
     converged: jax.Array
     gap: jax.Array
     fallback: jax.Array
+    excluded_residual: jax.Array
 
 
 def _hermitian(band):
@@ -419,6 +423,7 @@ def _subspace_iteration(F, G, target, count, tol, max_iter, dense_limit):
         lambda s: (s[0] + 1, *sweep(s[1])),
         (jnp.zeros((), jnp.int32), *sweep(start)),
     )
+    converged, excluded = res.max() <= tol, res[count] if keep > count else jnp.zeros((), real)
     perm = jnp.argsort(theta[order[:count]])  # ascending values among the selected
     sel, res = order[:count][perm], res[:count][perm]
     vectors, values = X[:, :count][:, perm].reshape(n, m, count), theta[sel]
@@ -430,7 +435,7 @@ def _subspace_iteration(F, G, target, count, tol, max_iter, dense_limit):
     others = jnp.where(others > _cluster_tol(values, nF, nG)[:, None], others, jnp.inf)
     result = EigenpairResult(
         values, vectors, res, jnp.abs(gram - jnp.eye(count)).max(), iterations,
-        res.max() <= tol, gap, fallback,
+        converged, gap, fallback, excluded,
     )  # fmt: skip
     return result, others.min(axis=1)
 
@@ -497,7 +502,7 @@ def generalized_eigenpairs(
 
     The method is shift-invert subspace iteration over ``min(2 count + 8, n_blocks m)`` vectors,
     factoring ``F - sigma G`` with :func:`block_thomas_factor`. Each sweep applies the
-    shift-invert operator ``S = (F - sigma G)^-1 G`` three times (a block Krylov space; fewer if
+    shift-invert operator ``S = (F - sigma G)^-1 G`` six times (a block Krylov space; fewer if
     it would exceed ``n_blocks m``) and extracts the pairs by Rayleigh-Ritz for ``S``, ranked by
     ``|mu|``, so that Ritz ghosts between eigenvalues on either side of ``target`` cannot be
     selected. ``sigma`` is ``target`` moved by ``16 eps ||F|| / ||G||``, so that a target equal to
