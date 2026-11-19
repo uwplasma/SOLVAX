@@ -138,6 +138,7 @@ def test_invertible_indefinite_two_by_two_pencil():
     result = sx.generalized_eigenpairs(F, G, 0.0, 2)
     np.testing.assert_allclose(result.values, [-1.0, 1.0], atol=1e-14)
     assert bool(result.fallback) and bool(result.converged)
+    assert float(result.excluded_residual) == 0.0 and float(result.gap) == np.inf  # all selected
 
 
 def test_lower_is_ignored_and_diag_is_hermitized():
