@@ -158,6 +158,8 @@ jobs:
               tests/test_precond_alfven.py tests/test_native_eigen.py
               tests/test_refine.py tests/test_pcg_benchmark.py tests/test_packaging.py
               tests/test_least_squares.py tests/test_compression.py tests/test_equilibration.py
+              tests/test_gpu.py tests/test_hygiene.py tests/test_krylov_compile_reuse.py
+              tests/test_ci_inventory.py
           - os: ubuntu-latest
             python: "3.12"
             stack: current
