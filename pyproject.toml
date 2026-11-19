@@ -122,5 +122,4 @@ omit = ["src/solvax/_mumps_worker.py"]  # runs in a subprocess; tests/test_nativ
 source = ["src/solvax", "*/src/solvax"]
 
 [tool.coverage.report]
-fail_under = 95
 show_missing = true

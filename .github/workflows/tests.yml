@@ -301,10 +301,26 @@ jobs:
           path: artifacts/coverage/.coverage.adv
           key: solvax-coverage-${{ github.run_id }}-${{ github.run_attempt }}-adv
           fail-on-cache-miss: true
+      # Statements and branches are gated separately: the combined figure hid a
+      # branch coverage below 95%. Each gate is the measured value rounded down;
+      # raise it as tests land, up to 95.
       - run: |
           coverage combine artifacts/coverage
-          coverage report --fail-under=95
+          coverage report --fail-under=0
           coverage xml
+          coverage json -q -o coverage.json
+          python - <<'PY'
+          import json
+          t = json.load(open("coverage.json"))["totals"]
+          fail_under = {"statements": 98, "branches": 94}
+          got = {
+              "statements": 100 * t["covered_lines"] / t["num_statements"],
+              "branches": 100 * t["covered_branches"] / t["num_branches"],
+          }
+          for kind, value in got.items():
+              print(f"{kind}: {value:.2f}% (gate {fail_under[kind]}%)")
+          assert all(got[k] >= fail_under[k] for k in got), "coverage below its gate"
+          PY
       - uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
