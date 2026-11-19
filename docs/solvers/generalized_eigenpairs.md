@@ -142,8 +142,8 @@ listed above are untested.
 
 ## Cost
 
-One block-Thomas factorization of $F-\sigma G$ ($O(Nm^3)$), then per sweep three
-solves with $p$ right-hand sides ($O(Nm^2p)$), two band products, and a
+One block-Thomas factorization of $F-\sigma G$ ($O(Nm^3)$), then per sweep six
+solves with $p$ right-hand sides ($O(Nm^2p)$), eight band products, and a
 $p\times p$ Ritz problem. The eigenvector tangent factors one shifted band per
 returned eigenpair.
 
