@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `generalized_eigenpairs` returns `excluded_residual`, the relative residual of the nearest excluded Ritz pair (the one that sets `gap`), as a new last field of `EigenpairResult`, and `converged` now requires it to pass `tol` as well as the selected residuals. Before, the flag was formed after that pair was cut away: on a diagonal pencil with a cluster behind the target, `max_iter` from 0 to 3 gave `converged=True` with excluded residuals from 2.9e-4 to 5.5e-6 at `tol=1e-10`. The iteration itself is unchanged (it already ran until the excluded pair converged), so with the default `max_iter` results, sweep counts and run time are the same. Code that unpacks all eight fields of the result by position must take the ninth; access by name and by index is unchanged. Docstrings now say six shift-invert applications per sweep, as the code does since 0.36.2.
+
 ## 0.36.2 - 2026-11-12
 
 - `fast_diagonal`, `flux_form_operator` and `fast_diagonal_schur` take a `(lower, upper)` pair of `"dirichlet"` and `"neumann"` ends for an axis, such as `("neumann", "dirichlet")` for an inflow-outflow duct's pressure (#172). The axis is factored as before, with the half-cell Dirichlet face at one end only; one Dirichlet end makes the operator nonsingular, and `lift` takes each end's data by its own kind. Checked against the dense face-by-face assembly on stretched cells, forward and transposed, and the Schur multiplier on a periodic and a mixed axis against the dense staggered complement.
