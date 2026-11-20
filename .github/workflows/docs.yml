@@ -28,8 +28,6 @@ jobs:
           python-version: "3.12"
           enable-cache: false
           activate-environment: true
+          venv-path: ${{ runner.temp }}/venv
       - run: uv pip install -e '.[docs]'
       - run: python -m sphinx -W -b html docs docs/_build
-      - name: Remove the virtual environment
-        if: always()
-        run: rm -rf .venv
