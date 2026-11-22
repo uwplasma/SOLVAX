@@ -56,6 +56,11 @@ JAX pytrees; no external operator abstraction is required.
 pip install solvax
 ```
 
+SOLVAX supports Python 3.10 and later with JAX 0.4.38 and later. JAX 0.5 and
+0.6 (the newest JAX on Python 3.10) constant-fold a batched product of arrays
+captured by `jax.jit` to wrong values on XLA:CPU (seen on macOS arm64): pass
+such arrays to the jitted function as arguments instead of closing over them.
+
 ## Quickstart
 
 ```python
