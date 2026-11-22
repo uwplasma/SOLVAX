@@ -260,10 +260,11 @@ class EigenpairResult(NamedTuple):
             excluded one); zero if every Ritz value was selected.
         probe_residual: relative residual of the block-Thomas probe solve at the shift; above
             ``eps**0.75`` (or not finite) it sets ``fallback``.
-        hermitian_defect: the larger of ``||D - (D + D^H) / 2|| / ||A_h||`` over ``F`` and
-            ``G``, with ``D`` the ``diag`` band and ``A_h`` the Hermitian pencil the solver uses
-            (``lower`` is not read, so it adds nothing). Above ``tol`` ``converged`` is False:
-            the pairs are those of the Hermitian part, not of the input.
+        hermitian_defect: the larger over ``F`` and ``G`` of ``||A - A_h|| / ||A_h||``, with
+            ``A_h`` the Hermitian band the solver uses (``diag`` made Hermitian, ``lower[k]`` set
+            to ``upper[k-1]^H``); ``A - A_h`` counts ``diag`` and ``lower[1:]``, and only ``diag``
+            when ``lower`` is None. Above ``tol`` ``converged`` is False: the pairs are those of
+            the Hermitian part, not of the input.
     """
 
     values: jax.Array
@@ -288,9 +289,11 @@ def _hermitian(band):
 
 
 def _defect(band):
-    """``||diag - diag_h|| / ||band_h||``: what making ``diag`` Hermitian changed."""
+    """``||band - _hermitian(band)|| / ||_hermitian(band)||`` over ``diag`` and ``lower[1:]``
+    (``lower=None``: ``diag`` only)."""
     h = _hermitian(band)
-    return _norm((band[1] - h[1],)) / _norm(h)
+    off = () if band[0] is None else (band[0].at[0].set(0) - h[0],)
+    return _norm((band[1] - h[1], *off)) / _norm(h)
 
 
 def _shift(F, G, sigma):
@@ -514,16 +517,22 @@ def _attach_jvp(dense_limit, primals, tangents):
 
 @partial(jax.jit, static_argnames=("count", "max_iter", "dense_limit"))
 def generalized_eigenpairs(
-    F, G, target, count: int = 8, tol: float = 1e-10, max_iter: int = 100, dense_limit: int = 0
+    F,
+    G,
+    target,
+    count: int = 8,
+    tol: float | None = None,
+    max_iter: int = 100,
+    dense_limit: int = 0,
 ) -> EigenpairResult:
     """The ``count`` eigenpairs of ``F y = lam G y`` nearest ``target`` (block-tridiagonal pencil).
 
     ``F`` and ``G`` are SOLVAX band triples ``(lower, diag, upper)`` of shape
     ``(n_blocks, m, m)``: real symmetric or complex Hermitian, with ``G`` positive definite.
-    Both may depend on the parameters being differentiated. Only ``diag`` and ``upper[:-1]``
-    are read. The pencil is made Hermitian by construction: ``lower`` is rebuilt as
-    ``lower[k] = upper[k-1]^H`` (the conjugate transpose, not the transpose) and ``diag`` is
-    replaced by its Hermitian part.
+    Both may depend on the parameters being differentiated. ``lower`` may be None (not
+    provided). The solver uses the Hermitian band: ``lower[k] = upper[k-1]^H`` (the conjugate
+    transpose, not the transpose) and ``diag`` replaced by its Hermitian part. What that changes
+    in the input is returned as ``hermitian_defect``, and ``converged`` is False above ``tol``.
 
     The method is shift-invert subspace iteration over ``min(2 count + 8, n_blocks m)`` vectors,
     factoring ``F - sigma G`` with :func:`block_thomas_factor`. Each sweep applies the shift-invert
@@ -571,12 +580,15 @@ def generalized_eigenpairs(
         G: mass band triple, positive definite.
         target: real number to search near.
         count: number of eigenpairs, at most ``n_blocks * m``.
-        tol: relative residual to stop at.
+        tol: relative residual to stop at; None (the default) means ``max(1e-10, 100 eps)``
+            of the pencil's dtype (1e-10 in float64, 1.2e-5 in float32).
         max_iter: maximum sweeps (see ``iterations``).
         dense_limit: largest ``n_blocks * m`` for which the dense fallback is compiled; 0 (the
             default) compiles none.
     """
     defect = jax.lax.stop_gradient(jnp.maximum(_defect(F), _defect(G)))
+    if tol is None:
+        tol = max(1e-10, 100 * float(jnp.finfo(jnp.result_type(F[1], G[1])).eps))
     F, G = _hermitian(F), _hermitian(G)
     if not 1 <= count <= F[1].shape[0] * F[1].shape[1]:
         raise ValueError("count must lie in [1, n_blocks * m]")
