@@ -67,7 +67,7 @@ $e$ is computed with one solve by the block-Thomas factor of $G$ per sweep. The 
 resolved when $e$ of the excluded pair plus the largest $e$ of the selected ones is at most
 `gap / 2`: the intervals around the selected and the excluded Ritz values are then
 disjoint, and the true gap is at least half the reported one. On a diagonal pencil with a
-cluster 0.1 behind the target this stops after one sweep instead of 13, with the excluded
+cluster 0.1 behind the target this stops after one sweep instead of 12, with the excluded
 residual at $2.9\times10^{-4}$. In a near tie (gap below the excluded pair's error) the
 iteration goes on until the excluded pair reaches `tol`, as before.
 

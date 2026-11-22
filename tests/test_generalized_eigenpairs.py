@@ -445,7 +445,7 @@ def test_excluded_pair_in_a_cluster_stops_once_it_resolves_the_gap():
     in the cluster and converges at a ratio near one, so the selected pairs pass ``tol`` after any
     number of sweeps while the excluded one needs about 12 (SOLVAX 0.36.2 reported ``converged``
     at sweep 1 with an excluded residual of 2.9e-4). S8: that pair resolves the gap of 0.1 after
-    the first sweep, so it stops there (it ran 13 sweeps to ``tol`` before) and is certified."""
+    the first sweep, so it stops there (it ran 12 sweeps to ``tol`` before) and is certified."""
     F, G = _diagonal(np.concatenate([[0.4999, 0.5, 0.5001], np.linspace(0.6, 0.61, 397)]))
     r = sx.generalized_eigenpairs(F, G, 0.50003, 3, 1e-10, 100, 0)
     assert float(r.residuals.max()) <= 1e-10 < float(r.excluded_residual)
