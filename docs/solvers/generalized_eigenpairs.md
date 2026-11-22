@@ -31,7 +31,7 @@ Shift-invert subspace iteration. With $S=F-\sigma G$ factored once by
 {func}`~solvax.direct.block_thomas_factor`, a block of
 $p=\min(2\,\text{count}+8,\ N m)$ vectors $Y$ spans, per sweep, the block Krylov space
 $[Y,\ TY,\ \dots,\ T^5Y]$ of $T=S^{-1}G$ (orthogonalized twice; fewer blocks if it would exceed $N m$).
-Rayleigh--Ritz for $T$ on that space, through a Cholesky reduction, gives real values $\mu$; the
+Rayleigh--Ritz for $T$ on that space, through an `eigh` of the Gram matrix $V^H G V$, gives real values $\mu$; the
 $p$ largest $|\mu|$ are kept, with $\lambda=\sigma+1/\mu$. Ranking by $|\mu|$ keeps a Ritz ghost,
 a mixture of eigenvectors on both sides of `target` with $\mu\approx0$, out of the selection;
 Rayleigh--Ritz on $F$ itself cannot. The `count` Rayleigh quotients
@@ -47,10 +47,14 @@ The shift is $\sigma=\texttt{target}$ moved by
 $\sqrt{\epsilon}\,(\lVert F\rVert+\lvert\texttt{target}\rvert\lVert G\rVert)/\lVert G\rVert$.
 A shift a distance $\delta$ from an eigenvalue leaves a solve error of about
 $\epsilon/\delta$ in the other directions, so with the former $16\,\epsilon$ a target
-equal to an eigenvalue stalled near $10^{-4}$. The Krylov blocks still lose rank
-along that eigenvector, so the Rayleigh-Ritz step factors the Gram matrix
-$V^H G V$ by `eigh` and cuts the directions below $p\,\epsilon$ of its largest
-eigenvalue, where a Cholesky factor would be NaN.
+equal to an eigenvalue stalled near $10^{-4}$: the error sits in the shift-invert
+images, and the dense pivoted LU stalls the same way. On `tridiag(1, 0, 1)` with
+401 unknowns and target 0, the Gram matrix of the first sweep lost 3 of 84
+directions at the $16\,\epsilon$ offset (where its Cholesky factor was NaN) and
+none at $\sqrt{\epsilon}$. As a safeguard the Ritz step cuts directions whose Gram
+eigenvalue is below $\sqrt{\epsilon}$ of the largest; a cut direction returns as a
+zero vector ranked last, and if one were ever selected its residual is NaN and
+`converged` is False.
 
 ### Bad pivots
 
@@ -59,8 +63,12 @@ therefore fails on an invertible matrix whose Schur complement is singular, for
 example $\begin{pmatrix}0&1\\1&0\end{pmatrix}$ with one scalar block per row, or
 on an indefinite pencil whose shift lands on a diagonal block. A probe solve
 with a fixed vector is checked against the band operator after every
-factorization; its relative residual is `result.probe_residual`. If it is not
-below $\sqrt{\epsilon}$ or is not finite, `result.fallback` is True, at any size.
+factorization; its relative residual is `result.probe_residual`. If it is above
+$\epsilon^{3/4}$ or is not finite, `result.fallback` is True, at any size. Near an
+eigenvalue (within about $10^{-4}$ relative) the probe exceeds this although block
+Thomas is fine, so with `dense_limit > 0` the solve, and the derivative solves,
+then use the dense LU; a shift on a singular Schur pivot, $\sqrt{\epsilon}$ away,
+gives a probe of about $2.5\times10^{-9}$ and reaches it too.
 A dense pivoted LU of the assembled band then takes over only if
 `n_blocks * m <= dense_limit`, and the default is 0: there is no dense path
 unless it is asked for, and a breakdown shows as large or non-finite residuals
