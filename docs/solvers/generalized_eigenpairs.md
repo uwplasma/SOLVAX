@@ -60,6 +60,8 @@ A dense pivoted LU of the assembled band then takes over only if
 unless it is asked for, and a breakdown shows as large or non-finite residuals
 and `converged=False`. Under `vmap` a `cond` runs both branches, so a nonzero
 `dense_limit` pays for the dense factorization on every batched call.
+The dense path ran exactly when `fallback` is True and
+`n_blocks * m <= dense_limit`.
 
 ## Result fields
 

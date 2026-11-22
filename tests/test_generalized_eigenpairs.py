@@ -462,7 +462,7 @@ def test_excluded_residual_under_jit_vmap_and_derivatives(pencil):
     r = run(0.0)
     # positions 0-7 keep their meaning: compare with a separate eager call, read by name
     eager = sx.generalized_eigenpairs(F0, G0, TARGET, COUNT)
-    assert len(r) == 9
+    assert len(r) == 10  # probe_residual is the tenth
     for i, name in enumerate(sx.EigenpairResult._fields[:8]):
         np.testing.assert_allclose(r[i], getattr(eager, name), rtol=1e-9, atol=1e-12, err_msg=name)
     total = lambda t: run(t).values.sum()  # noqa: E731
