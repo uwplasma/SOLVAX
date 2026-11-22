@@ -460,7 +460,11 @@ def test_excluded_residual_under_jit_vmap_and_derivatives(pencil):
     assert batched.excluded_residual.shape == (2,)
     assert bool((batched.excluded_residual <= 1e-10).all()) and bool(batched.converged.all())
     r = run(0.0)
-    assert r[:8] == tuple(getattr(r, f) for f in sx.EigenpairResult._fields[:8])
+    # positions 0-7 keep their meaning: compare with a separate eager call, read by name
+    eager = sx.generalized_eigenpairs(F0, G0, TARGET, COUNT)
+    assert len(r) == 9
+    for i, name in enumerate(sx.EigenpairResult._fields[:8]):
+        np.testing.assert_allclose(r[i], getattr(eager, name), rtol=1e-9, atol=1e-12, err_msg=name)
     total = lambda t: run(t).values.sum()  # noqa: E731
     h = 1e-6
     fd = (total(h) - total(-h)) / (2 * h)
