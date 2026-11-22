@@ -466,7 +466,7 @@ def test_excluded_residual_under_jit_vmap_and_derivatives(pencil):
     r = run(0.0)
     # positions 0-7 keep their meaning: compare with a separate eager call, read by name
     eager = sx.generalized_eigenpairs(F0, G0, TARGET, COUNT)
-    assert len(r) == 10  # probe_residual is the tenth
+    assert len(r) == 11  # hermitian_defect is the eleventh
     for i, name in enumerate(sx.EigenpairResult._fields[:8]):
         np.testing.assert_allclose(r[i], getattr(eager, name), rtol=1e-9, atol=1e-12, err_msg=name)
     total = lambda t: run(t).values.sum()  # noqa: E731
@@ -552,3 +552,43 @@ def test_ritz_cuts_a_rank_deficient_basis():
     np.testing.assert_allclose(
         np.sort(np.asarray(theta)[~cut]), np.linalg.eigvalsh(Q.T @ np.asarray(A) @ Q), atol=1e-12
     )
+
+
+def _skew(F, eps):
+    """``F`` with ``eps`` times a fixed anti-Hermitian matrix added to ``diag``: its Hermitian part
+    is ``F``. ``lower`` is not read, so only ``diag`` can be non-Hermitian."""
+    k = jnp.triu(jnp.ones(F[1].shape[-2:]), 1)
+    return F[0], F[1] + eps * (k - k.T).astype(F[1].dtype), F[2]
+
+
+def test_non_hermitian_input_is_refused(pencil):
+    """S6: a non-Hermitian ``diag`` is not silently replaced by its Hermitian part. The defect is
+    returned and ``converged`` is False above ``tol``; the junk ``lower`` of the fixture (not read)
+    adds nothing."""
+    F0, _, G0, _ = pencil
+    clean = sx.generalized_eigenpairs(F0, G0, TARGET, COUNT)
+    assert float(clean.hermitian_defect) <= 1e-15 and bool(clean.converged)
+    bent = _skew(F0, 1e-3)
+    r = sx.generalized_eigenpairs(bent, G0, TARGET, COUNT)
+    assert float(r.hermitian_defect) > 1e-5
+    assert not bool(r.converged)
+    rg = sx.generalized_eigenpairs(F0, _skew(G0, 1e-3), TARGET, COUNT)
+    assert float(rg.hermitian_defect) > 1e-5 and not bool(rg.converged)
+    # a defect below tol passes
+    small = sx.generalized_eigenpairs(_skew(F0, 1e-13), G0, TARGET, COUNT)
+    assert float(small.hermitian_defect) <= 1e-10 and bool(small.converged)
+
+
+def test_hermitian_defect_under_jit_vmap_and_grad(pencil):
+    """The new last field rides through ``jit`` and ``vmap`` and has zero, finite derivative."""
+    F0, F1, G0, _ = pencil
+    run = jax.jit(lambda e: sx.generalized_eigenpairs(_skew(F0, e), G0, TARGET, COUNT))
+    batched = jax.vmap(run)(jnp.array([0.0, 1e-3]))
+    assert sx.EigenpairResult._fields[-1] == "hermitian_defect"
+    assert batched.hermitian_defect.shape == (2,)
+    assert [bool(c) for c in batched.converged] == [True, False]
+    g = jax.grad(lambda t: run(1e-3 * t).hermitian_defect)(1.0)
+    assert np.isfinite(float(g)) and float(g) == 0.0
+    g = jax.grad(lambda t: sx.generalized_eigenpairs(_along(F0, F1, t), G0, TARGET, COUNT)
+                 .hermitian_defect)(0.0)  # fmt: skip
+    assert float(g) == 0.0

@@ -245,7 +245,8 @@ class EigenpairResult(NamedTuple):
         orthogonality: ``max |Y^H G Y - I|``.
         iterations: sweeps performed after the first, each applying the shift-invert operator six
             times (fewer if ``n_blocks m`` is small).
-        converged: ``max(residuals) <= tol`` and ``excluded_residual <= tol``; False if anything
+        converged: ``max(residuals) <= tol``, ``excluded_residual <= tol`` and
+            ``hermitian_defect <= tol``; False if anything
             is not finite.
         gap: ``|lam - target|`` of the nearest excluded Ritz value minus that of the
             farthest selected one. The iteration also converges that excluded pair to ``tol``,
@@ -259,6 +260,10 @@ class EigenpairResult(NamedTuple):
             excluded one); zero if every Ritz value was selected.
         probe_residual: relative residual of the block-Thomas probe solve at the shift; above
             ``eps**0.75`` (or not finite) it sets ``fallback``.
+        hermitian_defect: the larger of ``||D - (D + D^H) / 2|| / ||A_h||`` over ``F`` and
+            ``G``, with ``D`` the ``diag`` band and ``A_h`` the Hermitian pencil the solver uses
+            (``lower`` is not read, so it adds nothing). Above ``tol`` ``converged`` is False:
+            the pairs are those of the Hermitian part, not of the input.
     """
 
     values: jax.Array
@@ -271,6 +276,7 @@ class EigenpairResult(NamedTuple):
     fallback: jax.Array
     excluded_residual: jax.Array
     probe_residual: jax.Array
+    hermitian_defect: jax.Array
 
 
 def _hermitian(band):
@@ -279,6 +285,12 @@ def _hermitian(band):
     upper = upper.at[-1].set(0)
     adjoint = lambda a: jnp.conj(jnp.swapaxes(a, -1, -2))  # noqa: E731
     return jnp.roll(adjoint(upper), 1, axis=0), (diag + adjoint(diag)) / 2, upper
+
+
+def _defect(band):
+    """``||diag - diag_h|| / ||band_h||``: what making ``diag`` Hermitian changed."""
+    h = _hermitian(band)
+    return _norm((band[1] - h[1],)) / _norm(h)
 
 
 def _shift(F, G, sigma):
@@ -448,7 +460,7 @@ def _subspace_iteration(F, G, target, count, tol, max_iter, dense_limit):
     others = jnp.where(others > _cluster_tol(values, nF, nG)[:, None], others, jnp.inf)
     result = EigenpairResult(
         values, vectors, res, jnp.abs(gram - jnp.eye(count)).max(), iterations,
-        converged, gap, fallback, excluded, probe,
+        converged, gap, fallback, excluded, probe, jnp.zeros((), res.dtype),
     )  # fmt: skip
     return result, others.min(axis=1)
 
@@ -564,6 +576,7 @@ def generalized_eigenpairs(
         dense_limit: largest ``n_blocks * m`` for which the dense fallback is compiled; 0 (the
             default) compiles none.
     """
+    defect = jax.lax.stop_gradient(jnp.maximum(_defect(F), _defect(G)))
     F, G = _hermitian(F), _hermitian(G)
     if not 1 <= count <= F[1].shape[0] * F[1].shape[1]:
         raise ValueError("count must lie in [1, n_blocks * m]")
@@ -571,7 +584,11 @@ def generalized_eigenpairs(
     solved = _subspace_iteration(stop(F), stop(G), target, count, tol, max_iter, dense_limit)
     result, sep = stop(solved)
     values, vectors = _attach(F, G, result.values, result.vectors, sep, dense_limit)
-    return result._replace(values=values, vectors=vectors)
+    defect = defect.astype(result.residuals.dtype)
+    return result._replace(
+        values=values, vectors=vectors, hermitian_defect=defect,
+        converged=result.converged & (defect <= tol),
+    )  # fmt: skip
 
 
 class InverseIterationInfo(NamedTuple):

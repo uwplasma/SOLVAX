@@ -1503,3 +1503,25 @@ def test_cyclic_reduction_derivatives_and_transforms():
     )
     with pytest.raises(ValueError, match="cutoff"):
         block_cyclic_reduction_factor(lower, diag, upper, cutoff=0)
+
+
+def test_complex_shift_on_real_bands_keeps_its_imaginary_part():
+    """S6: ``shift`` promotes the factor dtype; a complex shift on real bands factors
+    ``A - shift I`` itself, not ``A - Re(shift) I``."""
+    rng = np.random.default_rng(6)
+    n, m = 5, 3
+    lower, diag, upper = (jnp.asarray(rng.normal(size=(n, m, m))) for _ in range(3))
+    diag = diag + 4 * jnp.eye(m)
+    rhs = jnp.asarray(rng.normal(size=(n, m)))
+    dense = np.zeros((n * m, n * m))
+    for k in range(n):
+        dense[k * m:(k + 1) * m, k * m:(k + 1) * m] = diag[k]
+        if k:
+            dense[k * m:(k + 1) * m, (k - 1) * m:k * m] = lower[k]
+        if k < n - 1:
+            dense[k * m:(k + 1) * m, (k + 1) * m:(k + 2) * m] = upper[k]
+    shift = 0.5 + 1.0j
+    exact = np.linalg.solve(dense - shift * np.eye(n * m), np.asarray(rhs).ravel())
+    x = block_thomas_solve(block_thomas_factor(lower, diag, upper, shift=shift), rhs)
+    assert jnp.iscomplexobj(x)
+    np.testing.assert_allclose(np.asarray(x).ravel(), exact, rtol=1e-12, atol=1e-12)

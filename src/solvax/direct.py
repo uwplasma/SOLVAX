@@ -203,8 +203,9 @@ def block_thomas_factor(
             precision, so bfloat16/float16 fail at tracing or execution. For
             complex bands a real ``factor_dtype`` selects the complex dtype of
             that width (``float32`` gives ``complex64``).
-        shift: if given, factor ``A - shift I`` (subtracted from ``diag``, in
-            its dtype), the operator of a shift-invert eigensolve. The solves
+        shift: if given, factor ``A - shift I`` (subtracted from ``diag``,
+            promoting the dtype, so a complex shift on real bands factors in
+            complex), the operator of a shift-invert eigensolve. The solves
             then apply ``(A - shift I)^{-1}`` and, with ``transpose=True``,
             its transpose.
         normalized: return :class:`NormalizedBlockTridiagFactors`, which keep
@@ -218,8 +219,9 @@ def block_thomas_factor(
         Factors for :func:`block_thomas_solve`.
     """
     if shift is not None:
-        diag = diag - jnp.asarray(shift, diag.dtype) * jnp.eye(diag.shape[-1], dtype=diag.dtype)
+        diag = diag - shift * jnp.eye(diag.shape[-1], dtype=diag.dtype)
     work = jnp.result_type(diag)
+    lower, upper = lower.astype(work), upper.astype(work)
     fdt = work if factor_dtype is None else _same_kind(factor_dtype, work)
     first_row = jnp.arange(diag.shape[0]) == 0
     last_row = jnp.arange(diag.shape[0]) == diag.shape[0] - 1
