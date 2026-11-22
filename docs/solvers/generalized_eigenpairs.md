@@ -43,8 +43,14 @@ $$
 $$
 
 with $\lVert\cdot\rVert$ the infinity norm (largest absolute row sum) of a band.
-The shift is $\sigma=\texttt{target}$ moved by $16\,\epsilon\,\lVert F\rVert/\lVert G\rVert$ so that a
-target equal to an eigenvalue does not produce a singular factor.
+The shift is $\sigma=\texttt{target}$ moved by
+$\sqrt{\epsilon}\,(\lVert F\rVert+\lvert\texttt{target}\rvert\lVert G\rVert)/\lVert G\rVert$.
+A shift a distance $\delta$ from an eigenvalue leaves a solve error of about
+$\epsilon/\delta$ in the other directions, so with the former $16\,\epsilon$ a target
+equal to an eigenvalue stalled near $10^{-4}$. The Krylov blocks still lose rank
+along that eigenvector, so the Rayleigh-Ritz step factors the Gram matrix
+$V^H G V$ by `eigh` and cuts the directions below $p\,\epsilon$ of its largest
+eigenvalue, where a Cholesky factor would be NaN.
 
 ### Bad pivots
 
