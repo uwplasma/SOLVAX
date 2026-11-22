@@ -694,3 +694,53 @@ def test_newton_krylov_eisenstat_walker_reduces_inner_work_quadratically():
 def test_newton_krylov_rejects_invalid_forcing_parameters(kwargs, message):
     with pytest.raises(ValueError, match=message):
         newton_krylov(lambda x: x - 1.0, jnp.array(0.0), **kwargs)
+
+
+def test_newton_krylov_eisenstat_walker_does_not_oversolve(monkeypatch):
+    # Cubic problem of the test above at rtol 1e-13: every inner solve must ask
+    # for an absolute residual of at least 0.5*tol (Kelley's floor); pure
+    # choice 2 asks for far less on the last step.
+    import solvax.implicit as implicit
+
+    n = 32
+    h = 1.0 / (n + 1)
+    source = jnp.full(n, 10.0)
+    off_diagonal = jnp.full(n, -1.0 / h**2)
+    diagonal = jnp.full(n, 2.0 / h**2)
+
+    def residual(u):
+        laplacian = (-2.0 * u).at[:-1].add(u[1:]).at[1:].add(u[:-1]) / h**2
+        return -laplacian + u**3 - source
+
+    def preconditioner(value):
+        return tridiagonal_solve(
+            off_diagonal, diagonal, off_diagonal, value, method="thomas"
+        )
+
+    requested = []
+
+    def recording_gmres(matvec, b, *, rtol, **kwargs):
+        jax.debug.callback(
+            lambda r, nb: requested.append(float(r) * float(nb)),
+            rtol,
+            jnp.linalg.norm(b),
+        )
+        return gmres(matvec, b, rtol=rtol, **kwargs)
+
+    monkeypatch.setattr(implicit, "gmres", recording_gmres)
+    rtol = 1.0e-13
+    solution = newton_krylov(
+        residual,
+        jnp.zeros(n),
+        precond=preconditioner,
+        rtol=rtol,
+        max_steps=10,
+        linear_restart=30,
+        linear_rtol=0.5,
+        linear_max_restarts=10,
+        forcing="eisenstat_walker",
+    )
+    assert bool(solution.converged and solution.linear_converged)
+    tolerance = rtol * float(jnp.linalg.norm(residual(jnp.zeros(n))))
+    assert len(requested) == int(solution.newton_iterations)
+    assert min(requested) >= 0.5 * tolerance * (1.0 - 1.0e-12)

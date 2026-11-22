@@ -229,6 +229,55 @@ def test_inexact_forcing_saves_krylov_work_against_fixed_tight_tolerance():
     assert int(fixed.residual_evaluations) == 9
 
 
+def test_forcing_floor_is_tied_to_the_outer_tolerance():
+    # Choice 2 alone gives 0.9*(1e-8/1e-4)**2 = 9e-9; Kelley's floor
+    # 0.5*tol/||F_k|| = 0.5*1e-10/1e-8 = 5e-3 keeps the inner solve from asking
+    # for more than the outer stop needs.
+    eta = eisenstat_walker_forcing(1.0e-8, 1.0e-4, 1.0e-3, tolerance=1.0e-10)
+    assert float(eta) == pytest.approx(5.0e-3, rel=1.0e-12)
+    assert float(eisenstat_walker_forcing(1.0e-8, 1.0e-4, 1.0e-3)) == pytest.approx(9.0e-9)
+    assert PseudoTransientConfig().eta_min == 0.0
+
+
+@pytest.mark.parametrize(
+    "jacobi,rtol,newton_steps",
+    [(False, 1.0e-13, 6), (True, 1.0e-10, 4)],
+)
+def test_tolerance_floor_keeps_the_superlinear_tail(jacobi, rtol, newton_steps):
+    # The graded diagonal of the inexact-forcing test. A fixed floor eta >= 1e-4
+    # makes the tail linear (contraction about 1e-4 per step) and costs one more
+    # Newton step than choice 2 with the tolerance floor. Regression counts with
+    # JAX 0.12.1: 7 and 5 steps with the former floor 1e-4, 6 and 4 without it.
+    size = 32
+    diagonal = jnp.logspace(0.0, 5.0, size)
+    matrix = jnp.diag(diagonal) + 0.2 * jnp.diag(diagonal[:-1], 1)
+    residual = lambda x: matrix @ x + 0.2 * x**3 - 1.0  # noqa: E731
+
+    def precond(x, rhs, dt):
+        return rhs / (diagonal + 0.6 * x**2 + 1.0 / dt)
+
+    config = PseudoTransientConfig(
+        rtol=rtol,
+        max_steps=20,
+        initial_dt=1.0e8,
+        max_dt=1.0e8,
+        linear_restart=20,
+        linear_max_restarts=40,
+        max_backtracks=4,
+    )
+    solution = pseudo_transient_continuation(
+        residual, jnp.zeros(size), precond=precond if jacobi else None, config=config
+    )
+    assert bool(solution.converged)
+    steps = int(solution.steps)
+    norms = np.asarray(solution.history.residual_norm[: steps + 1])
+    eta = np.asarray(solution.history.eta[:steps])
+    tolerance = rtol * norms[0]
+    # Every inner solve asks for an absolute residual of at least 0.5 tol.
+    assert np.all(eta * norms[:steps] >= 0.5 * tolerance * (1.0 - 1.0e-12))
+    assert steps == newton_steps
+
+
 def test_adaptive_continuation_records_rejection_then_reaches_target():
     callback_count = [0]
 

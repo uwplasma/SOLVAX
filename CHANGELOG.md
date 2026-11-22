@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Eisenstat--Walker forcing keeps eta above `0.5*tol/||F_k||` (Kelley's rule), with `tol` the outer residual tolerance; `eisenstat_walker_forcing` takes `tolerance=`, and both `pseudo_transient_continuation` and `newton_krylov(forcing="eisenstat_walker")` pass it. `PseudoTransientConfig.eta_min` and the `eta_min` default of `eisenstat_walker_forcing` change from 1e-4 to 0. The fixed floor made the tail linear and cost one more Newton step at tight tolerance (graded diagonal, 32 unknowns: 7 to 6 steps at rtol 1e-13; 5 to 4 with a Jacobi preconditioner at 1e-10). Pure choice 2 in `newton_krylov` oversolved the last step (cubic test problem at rtol 1e-13: requested 8e-24 against tol 5.7e-12). The default `forcing="constant"` of `newton_krylov` is unchanged.
+
 ## 0.36.2 - 2026-11-12
 
 - `fast_diagonal`, `flux_form_operator` and `fast_diagonal_schur` take a `(lower, upper)` pair of `"dirichlet"` and `"neumann"` ends for an axis, such as `("neumann", "dirichlet")` for an inflow-outflow duct's pressure (#172). The axis is factored as before, with the half-cell Dirichlet face at one end only; one Dirichlet end makes the operator nonsingular, and `lift` takes each end's data by its own kind. Checked against the dense face-by-face assembly on stretched cells, forward and transposed, and the Schur multiplier on a periodic and a mixed axis against the dense staggered complement.

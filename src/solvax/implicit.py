@@ -202,6 +202,7 @@ def newton_krylov(
                     power=forcing_alpha,
                     eta_min=0.0,
                     eta_max=forcing_max,
+                    tolerance=tolerance,
                 )
                 current_forcing = jnp.where(
                     newton_iterations == 0,
