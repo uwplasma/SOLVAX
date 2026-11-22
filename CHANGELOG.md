@@ -3,7 +3,7 @@
 ## Unreleased
 
 - `exponential_eigenpairs` with `restarts > 1` restarts from the sum of the `candidates` Ritz vectors instead of the leading one alone. From a single Ritz vector the outer Arnoldi space kept the other wanted modes only as rounding error, so the second mode of the 12-mode stiff test came back as `0` and unconverged on JAX 0.6.2 (macOS arm64) whenever the operator was a `jax.jit` closure. Operator applications are unchanged; on JAX 0.12.1 both eigenvalues are exact to 0 and 6e-17 before and after, residuals 4.5e-15 and 1.2e-15 (were 1.5e-16 and 5.1e-14).
-- README: JAX 0.5 and 0.6 constant-fold a batched product of arrays captured by `jax.jit` to wrong values on XLA:CPU; the `csr_data_from_products` test passes its seeds as a jit argument, and the single-reduction PCG fusion test now expects fusion from JAX 0.7 (measured: 0.4.38, 0.5.3, 0.6.2 do not fuse; 0.7.2, 0.8.3, 0.12.1 do).
+- README and a `RuntimeWarning` at import: JAX 0.5.0 to 0.8.1 constant-fold, on CPU, a gather along a non-leading axis of an array captured by `jax.jit` to wrong values (jax-ml/jax#33479, fixed in 0.8.2; measured wrong on 0.5.3, 0.6.2, 0.7.2, 0.8.0, 0.8.1, right on 0.4.38, 0.8.2, 0.12.1); the `csr_data_from_products` test passes its seeds as a jit argument, and the single-reduction PCG fusion test now expects fusion from JAX 0.7 (measured: 0.4.38, 0.5.3, 0.6.2 do not fuse; 0.7.2, 0.8.3, 0.12.1 do). A new test restarts from a start that the leading Ritz vector alone reduces to one mode: before, mode 2 came back `0` and unconverged on every stack.
 
 ## 0.36.2 - 2026-11-12
 

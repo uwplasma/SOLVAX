@@ -96,8 +96,8 @@ def test_csr_data_from_products_recovers_values_and_is_differentiable():
     for g, cols in enumerate(groups):
         seeds[g, cols] = 1.0
 
-    # The seeds are a jit argument, not a captured constant: XLA 0.5-0.6 folds
-    # a batched product of captured constants to wrong values (README, Install).
+    # The seeds are a jit argument, not a captured constant: JAX 0.5.0-0.8.1 folds
+    # a non-leading-axis gather of captured constants to wrong values (README, Install).
     def assemble(scale, seeds):
         products = jax.vmap(lambda s: scale * sd.csr_matvec(pattern, values, s))(seeds)
         return sd.csr_data_from_products(pattern, groups, products)
