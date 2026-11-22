@@ -203,14 +203,17 @@ _TIGHT_FIXED_FORCING = dict(eta_initial=1.0e-6, eta_min=1.0e-6, eta_max=1.0e-6)
 
 def _choice_2_forcing(norms, config):
     """Eisenstat--Walker (1996) choice 2, eq. (2.6), with the safeguard of their
-    section 2.1 and the cap eta_max of their section 3.1, written out in NumPy."""
+    section 2.1, the cap eta_max of their section 3.1 and Kelley's floor
+    0.5*tol/||F_k|| tied to the outer tolerance, written out in NumPy."""
 
+    tolerance = max(config.atol, config.rtol * norms[0])
     eta = [config.eta_initial]
     for previous, current in zip(norms[:-1], norms[1:], strict=True):
         candidate = config.eta_gamma * (current / previous) ** config.eta_power
         safeguard = config.eta_gamma * eta[-1] ** config.eta_power
         if safeguard > 0.1:
             candidate = max(candidate, safeguard)
+        candidate = max(candidate, 0.5 * tolerance / current)
         eta.append(min(config.eta_max, max(config.eta_min, candidate)))
     return np.asarray(eta)
 
