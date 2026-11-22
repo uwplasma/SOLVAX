@@ -48,7 +48,7 @@ Rayleigh--Ritz for $T$ on that space, through an `eigh` of the Gram matrix $V^H 
 $p$ largest $|\mu|$ are kept, with $\lambda=\sigma+1/\mu$. Ranking by $|\mu|$ keeps a Ritz ghost,
 a mixture of eigenvectors on both sides of `target` with $\mu\approx0$, out of the selection;
 Rayleigh--Ritz on $F$ itself cannot. The `count` Rayleigh quotients
-nearest `target`, and the nearest excluded one, must reach the relative residual
+nearest `target` must reach the relative residual
 
 $$
 \frac{\lVert F y-\lambda G y\rVert}{(\lVert F\rVert+|\lambda|\lVert G\rVert)\,\lVert y\rVert}
@@ -56,6 +56,27 @@ $$
 $$
 
 with $\lVert\cdot\rVert$ the infinity norm (largest absolute row sum) of a band.
+The nearest excluded one, which sets `gap`, must reach `tol` too or resolve the gap.
+For a Ritz pair $(\theta, x)$ with $x^H G x=1$ and $r=Fx-\theta Gx$ some eigenvalue
+$\lambda$ of the pencil has $\lvert\lambda-\theta\rvert\le e=\lVert r\rVert_{G^{-1}}
+=(r^H G^{-1} r)^{1/2}$ (Bai, Demmel, Dongarra, Ruhe and van der Vorst, *Templates for the
+solution of algebraic eigenvalue problems*, SIAM 2000, chapter 5, generalized Hermitian
+problem, error bounds for computed eigenvalues, eq. (5.31), which also gives the weaker
+$\lVert G^{-1}\rVert_2\lVert r\rVert_2$).
+$e$ is computed with one solve by the block-Thomas factor of $G$ per sweep. The gap is
+resolved when $e$ of the excluded pair plus the largest $e$ of the selected ones is at most
+`gap / 2`: the intervals around the selected and the excluded Ritz values are then
+disjoint, and the true gap is at least half the reported one. On a diagonal pencil with a
+cluster 0.1 behind the target this stops after one sweep instead of 13, with the excluded
+residual at $2.9\times10^{-4}$. In a near tie (gap below the excluded pair's error) the
+iteration goes on until the excluded pair reaches `tol`, as before.
+
+`start`, of shape `(n_blocks, m, k)` with `k <= p`, replaces the first `k` columns of
+the random starting block, for example by the vectors of a nearby pencil in a scan or an
+optimization loop; `start=None` is the cold start, bit for bit. On a 400-point
+Laplacian with target -0.2 and three pairs, the vectors at `t = 0` start the pencil
+`t = 0.01` in 4 sweeps instead of 7. `max_iter` is traced: changing it does not compile
+again (it took 1.1 to 2.6 s per value on CPU).
 The shift is $\sigma=\texttt{target}$ moved by
 $\sqrt{\epsilon}\,(\lVert F\rVert+\lvert\texttt{target}\rvert\lVert G\rVert)/\lVert G\rVert$.
 A shift a distance $\delta$ from an eigenvalue leaves a solve error of about
@@ -99,10 +120,10 @@ The dense path ran exactly when `fallback` is True and
 | `residuals` | the relative residual above, per pair |
 | `orthogonality` | $\max\lvert Y^H G Y-I\rvert$ |
 | `iterations` | sweeps after the first, each applying $T$ six times |
-| `converged` | `max(residuals)`, `excluded_residual` and `hermitian_defect` at most `tol`, False if non-finite |
+| `converged` | `max(residuals)` and `hermitian_defect` at most `tol`, and `excluded_residual` at most `tol` or the gap resolved (see the algorithm), False if non-finite |
 | `gap` | $\lvert\lambda-\text{target}\rvert$ of the nearest excluded Ritz value minus that of the farthest selected one |
 | `fallback` | the probe solve failed; the dense pivoted path ran if `n_blocks * m <= dense_limit` |
-| `excluded_residual` | the relative residual of the nearest excluded Ritz pair, the one that sets `gap`; zero if every Ritz value was selected |
+| `excluded_residual` | the relative residual of the nearest excluded Ritz pair, the one that sets `gap`; zero if every Ritz value was selected; may exceed `tol` when `converged` if that pair resolved the gap |
 | `probe_residual` | relative residual of the block-Thomas probe solve at the shift |
 | `hermitian_defect` | relative size of the non-Hermitian part of `diag` that was dropped (see the input convention) |
 
