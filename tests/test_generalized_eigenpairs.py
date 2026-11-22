@@ -14,7 +14,7 @@ import pytest
 import scipy.linalg as sla
 
 import solvax as sx
-from solvax.eigen import _dense, _hermitian, _ritz
+from solvax.eigen import _dense, _gap_resolved, _hermitian, _ritz
 
 jax.config.update("jax_enable_x64", True)
 
@@ -474,7 +474,21 @@ def test_excluded_residual_under_jit_vmap_and_derivatives(pencil):
     run = jax.jit(lambda t: sx.generalized_eigenpairs(_along(F0, F1, t), G0, TARGET, COUNT))
     batched = jax.vmap(run)(jnp.array([0.0, 0.1]))
     assert batched.excluded_residual.shape == (2,)
-    assert bool((batched.excluded_residual < 1e-6).all()) and bool(batched.converged.all())
+    assert bool(batched.converged.all())
+    # The rule itself, from an independent bound: |theta - lam| <= ||r||_{G^-1} <= ||r||_2 /
+    # sqrt(s_min) <= sqrt(N) ||r||_inf / sqrt(s_min), ||x||_inf <= ||x||_2 <= 1 / sqrt(s_min),
+    # s_min the smallest eigenvalue of the dense G; ||r||_inf = res (||F|| + |theta| ||G||) ||x||.
+    Gd = _dense_pencil(F0, G0)[1]
+    s_min, N = np.linalg.eigvalsh(Gd)[0], Gd.shape[0]
+    nG = np.abs(Gd).sum(1).max()
+    for i, t in enumerate([0.0, 0.1]):
+        Fd = _dense_pencil(_along(F0, F1, t), G0)[0]
+        nF, far = np.abs(Fd).sum(1).max(), np.abs(np.asarray(batched.values[i]) - TARGET).max()
+        theta = abs(TARGET) + far + float(batched.gap[i])  # |theta| bound of the excluded pair
+        e = lambda res, th, nF=nF: res * (nF + th * nG) * np.sqrt(N) / s_min  # noqa: E731
+        bound = e(float(batched.excluded_residual[i]), theta)
+        bound += e(float(batched.residuals[i].max()), abs(TARGET) + far)
+        assert float(batched.excluded_residual[i]) <= 1e-10 or bound <= float(batched.gap[i]) / 2
     r = run(0.0)
     # positions 0-7 keep their meaning: compare with a separate eager call, read by name
     eager = sx.generalized_eigenpairs(F0, G0, TARGET, COUNT)
@@ -687,3 +701,33 @@ def test_max_iter_is_traced_and_does_not_recompile():
     sx.generalized_eigenpairs(F, G, -0.2, 2, 1e-10, 7)
     sx.generalized_eigenpairs(F, G, -0.2, 2, 1e-10, 9)
     assert sx.generalized_eigenpairs._cache_size() - before <= 1
+
+
+def test_gap_rule_margin_and_selected_term():
+    """S8 rule ``e_excluded + max e_selected <= gap / 2``: distances 0.1 and 0.2 (gap 0.1). With
+    radii 0.02 and 0.04 the sum 0.06 exceeds 0.05: not resolved, although 0.06 <= gap and the
+    excluded radius alone (0.04) is below gap / 2. Radii 0.01 and 0.03 resolve it."""
+    distance = jnp.array([0.1, 0.2, 0.5])
+    assert not bool(_gap_resolved(distance, jnp.array([0.02, 0.04, 9.0]), 1))
+    assert bool(_gap_resolved(distance, jnp.array([0.01, 0.03, 9.0]), 1))
+
+
+@pytest.mark.parametrize("cplx", [False, True], ids=["real", "complex"])
+def test_gap_rule_uses_the_g_inverse_norm(cplx):
+    """``(s F, s G)`` has the eigenpairs of ``(F, G)``; with ``x^H G x = 1`` the residual scales by
+    ``sqrt(s)`` and ``||r||_{G^-1}`` not at all, so the cluster pencil (gap 0.1, excluded residual
+    2.9e-4 after one sweep) stops after one sweep for any ``s``. A 2-norm bound would be
+    ``sqrt(s) = 1e4`` times larger at ``s = 1e8`` and would not resolve the gap. ``G`` is a
+    non-identity diagonal (entries 1 to 4); ``cplx`` runs the same pencil in complex128."""
+    lam = np.concatenate([[0.4999, 0.5, 0.5001], np.linspace(0.6, 0.61, 397)])
+    g = 1.0 + 3.0 * np.random.default_rng(0).random(lam.size)
+    z = np.zeros((lam.size, 1, 1))
+    for s in (1.0, 1e8):
+        F = (z, jnp.asarray(s * lam * g).reshape(-1, 1, 1), z)
+        G = (z, jnp.asarray(s * g).reshape(-1, 1, 1), z)
+        if cplx:
+            F, G = [tuple(a.astype(complex) for a in b) for b in (F, G)]
+        r = sx.generalized_eigenpairs(F, G, 0.50003, 3, 1e-10, 100, 0)
+        assert float(r.residuals.max()) <= 1e-10 < float(r.excluded_residual)
+        assert bool(r.converged) and int(r.iterations) == 0
+        np.testing.assert_allclose(np.asarray(r.values), [0.4999, 0.5, 0.5001], rtol=1e-12)

@@ -397,6 +397,12 @@ def _cluster_tol(values, nF, nG):
 _KRYLOV_BLOCKS = 6  # shift-invert applications per Rayleigh-Ritz step
 
 
+def _gap_resolved(distance, error, count):
+    """Error intervals of the excluded pair (``error[count]``) and the selected ones are disjoint
+    with margin: their radii sum to at most half the gap of the sorted ``distance``."""
+    return error[count] + error[:count].max() <= (distance[count] - distance[count - 1]) / 2
+
+
 def _subspace_iteration(F, G, target, count, tol, max_iter, dense_limit, start=None):
     """Shift-invert subspace iteration; returns the result and each value's Ritz separation."""
     n, m = F[1].shape[:2]
@@ -455,8 +461,7 @@ def _subspace_iteration(F, G, target, count, tol, max_iter, dense_limit, start=N
         """Selected pairs at ``tol``; the excluded one at ``tol`` or resolving the gap."""
         if keep == count:
             return res.max() <= tol
-        distance = jnp.sort(jnp.abs(theta - target))
-        resolved = error[count] + error[:count].max() <= (distance[count] - distance[count - 1]) / 2
+        resolved = _gap_resolved(jnp.sort(jnp.abs(theta - target)), error, count)
         return (res[:count].max() <= tol) & ((res[count] <= tol) | resolved)
 
     Y = jax.random.normal(jax.random.PRNGKey(0), (size, width), dtype)
@@ -603,12 +608,13 @@ def generalized_eigenpairs(
         count: number of eigenpairs, at most ``n_blocks * m``.
         tol: relative residual to stop at; None (the default) means ``max(1e-10, 100 eps)``
             of the pencil's dtype (1e-10 in float64, 1.2e-5 in float32).
-        max_iter: maximum sweeps (see ``iterations``).
+        max_iter: maximum sweeps (see ``iterations``); a non-integer value is truncated.
         dense_limit: largest ``n_blocks * m`` for which the dense fallback is compiled; 0 (the
             default) compiles none.
         start: optional ``(n_blocks, m, k)`` warm start, ``k <= min(2 count + 8, n_blocks m)``,
             for example the ``vectors`` of a nearby pencil; it replaces the first ``k`` columns of
-            the random starting block. None (the default) is the cold start.
+            the random starting block. None (the default) is the cold start. A non-finite
+            entry makes every value NaN and ``converged`` False.
     """
     defect = jax.lax.stop_gradient(jnp.maximum(_defect(F), _defect(G)))
     if tol is None:
