@@ -272,9 +272,7 @@ def sparse_backward_error(
     safe = jnp.where(scale > 0, scale, 1)
     componentwise = jnp.max(jnp.where(scale > 0, residual / safe, 0), axis=0)
     row_sums = jax.ops.segment_sum(
-        jnp.abs(values),
-        jnp.asarray(pattern.rows),
-        num_segments=pattern.shape[0],
+        jnp.abs(values), jnp.asarray(pattern.rows), num_segments=pattern.shape[0],
         indices_are_sorted=True,
     )
     denominator = jnp.max(row_sums) * jnp.max(jnp.abs(x), axis=0) + jnp.max(jnp.abs(b), axis=0)

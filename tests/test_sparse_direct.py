@@ -502,10 +502,8 @@ def test_refinement_leaves_gradients_consistent():
         return jnp.sum(sd.sparse_solve(pattern, v, b, options=opts) ** 2)
 
     np.testing.assert_allclose(
-        jax.grad(loss)(values, options),
-        jax.grad(loss)(values, sd.HostFactorOptions()),
-        rtol=1e-8,
-        atol=1e-12,
+        jax.grad(loss)(values, options), jax.grad(loss)(values, sd.HostFactorOptions()),
+        rtol=1e-8, atol=1e-12,
     )
     with pytest.raises(ValueError, match="refine_steps"):
         sd.HostFactorOptions(refine_steps=-1)
