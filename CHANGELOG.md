@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `sparse_solve` and `sparse_eigenvalue` raise a `RuntimeError` at trace time when `JAX_PLATFORMS` does not list `cpu` (for example `JAX_PLATFORMS=cuda` on a GPU host), naming the function and the remedy `JAX_PLATFORMS=cuda,cpu`. Before, the call failed inside `jax.pure_callback` with "failed to find a local CPU device". The docstrings and the sparse-direct documentation state the requirement.
+
 ## 0.36.2 - 2026-11-12
 
 - `fast_diagonal`, `flux_form_operator` and `fast_diagonal_schur` take a `(lower, upper)` pair of `"dirichlet"` and `"neumann"` ends for an axis, such as `("neumann", "dirichlet")` for an inflow-outflow duct's pressure (#172). The axis is factored as before, with the half-cell Dirichlet face at one end only; one Dirichlet end makes the operator nonsingular, and `lift` takes each end's data by its own kind. Checked against the dense face-by-face assembly on stretched cells, forward and transposed, and the Schur multiplier on a periodic and a mixed axis against the dense staggered complement.
