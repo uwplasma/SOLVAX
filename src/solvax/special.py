@@ -2,7 +2,7 @@
 
 Every function is written in plain ``jax.numpy``, composes with ``jit``, ``vmap``
 and ``grad``, and keeps the input precision. Accuracy is stated in float64; in
-float32 expect about 1e-6 relative. The coefficients are Python scalars applied
+float32 expect a few 1e-6 relative. The coefficients are Python scalars applied
 by Horner's rule, never a captured table indexed inside the program.
 
 Convention for the complete elliptic integrals: the argument is the parameter
@@ -80,6 +80,8 @@ def carlson_rd(x, y, z):
 def _kd(m):
     """``K(m)``, ``E(m)`` and ``R_D(0, 1 - m, 1)``."""
     m = _inexact(m)
+    if jnp.iscomplexobj(m):
+        raise TypeError("ellipk and ellipe take a real parameter m")
     zero, one = jnp.zeros_like(m), jnp.ones_like(m)
     k = jnp.where(m == 1, jnp.inf, carlson_rf(zero, 1 - m, one))  # R_F(0, 0, 1) diverges
     rd = carlson_rd(zero, 1 - m, one)
@@ -92,7 +94,8 @@ def ellipk(m):
 
     Parameter ``m = k**2 <= 1``, as in ``scipy.special.ellipk``; ``K ~ log(4 / sqrt(1 - m))`` as
     ``m -> 1``. ``dK/dm = (E - (1 - m) K) / (2 m (1 - m))`` is evaluated as
-    ``(K - R_D / 3) / (2 (1 - m))``, without the 0/0 at ``m = 0``.
+    ``(K - R_D / 3) / (2 (1 - m))``, without the 0/0 at ``m = 0``. ``m > 1`` gives NaN; complex
+    ``m`` raises ``TypeError``.
     """
     return _kd(m)[0]
 
@@ -102,7 +105,8 @@ def ellipe(m):
     """Complete elliptic integral of the second kind ``E(m) = K(m) - m R_D(0, 1 - m, 1) / 3``.
 
     The argument is the parameter ``m = k**2 <= 1``, as in ``scipy.special.ellipe``. The derivative
-    ``(E - K) / (2 m)`` is evaluated as ``-R_D(0, 1 - m, 1) / 6``.
+    ``(E - K) / (2 m)`` is evaluated as ``-R_D(0, 1 - m, 1) / 6``; at ``m = 1``, where it is
+    ``-inf``, the returned value is finite and not meaningful.
     """
     return _kd(m)[1]
 
@@ -121,83 +125,109 @@ def _ellipe_jvp(primals, tangents):
     return e, -rd / 6 * dm
 
 
-def _bessel01(x):
-    """``J0(x)``, ``J1(x)``: series below 2, Miller recurrence below 25, Hankel expansion above."""
+# Rational approximations of Cephes j0.c and j1.c (S. L. Moshier, Cephes Math Library 2.8, 2000;
+# BSD-3 as distributed in SciPy's xsf), highest power first; RQ and QQ have an implied leading 1.
+def _table(text):
+    return {
+        k.strip(): tuple(float(v) for v in vals.split())
+        for k, vals in (row.split(":") for row in text.strip().split(";"))
+    }
+
+
+_J0 = _table("""
+RP: -4.79443220978201773821E9 1.95617491946556577543E12 -2.49248344360967716204E14
+    9.70862251047306323952E15;
+RQ: 4.99563147152651017219E2 1.73785401676374683123E5 4.84409658339962045305E7
+    1.11855537045356834862E10 2.11277520115489217587E12 3.10518229857422583814E14
+    3.18121955943204943306E16 1.71086294081043136091E18;
+PP: 7.96936729297347051624E-4 8.28352392107440799803E-2 1.23953371646414299388E0
+    5.44725003058768775090E0 8.74716500199817011941E0 5.30324038235394892183E0
+    9.99999999999999997821E-1;
+PQ: 9.24408810558863637013E-4 8.56288474354474431428E-2 1.25352743901058953537E0
+    5.47097740330417105182E0 8.76190883237069594232E0 5.30605288235394617618E0
+    1.00000000000000000218E0;
+QP: -1.13663838898469149931E-2 -1.28252718670509318512E0 -1.95539544257735972385E1
+    -9.32060152123768231369E1 -1.77681167980488050595E2 -1.47077505154951170175E2
+    -5.14105326766599330220E1 -6.05014350600728481186E0;
+QQ: 6.43178256118178023184E1 8.56430025976980587198E2 3.88240183605401609683E3
+    7.24046774195652478189E3 5.93072701187316984827E3 2.06209331660327847417E3
+    2.42005740240291393179E2;
+Z: 5.78318596294678452118E0 3.04712623436620863991E1
+""")
+_J1 = _table("""
+RP: -8.99971225705559398224E8 4.52228297998194034323E11 -7.27494245221818276015E13
+    3.68295732863852883286E15;
+RQ: 6.20836478118054335476E2 2.56987256757748830383E5 8.35146791431949253037E7
+    2.21511595479792499675E10 4.74914122079991414898E12 7.84369607876235854894E14
+    8.95222336184627338078E16 5.32278620332680085395E18;
+PP: 7.62125616208173112003E-4 7.31397056940917570436E-2 1.12719608129684925192E0
+    5.11207951146807644818E0 8.42404590141772420927E0 5.21451598682361504063E0
+    1.00000000000000000254E0;
+PQ: 5.71323128072548699714E-4 6.88455908754495404082E-2 1.10514232634061696926E0
+    5.07386386128601488557E0 8.39985554327604159757E0 5.20982848682361821619E0
+    9.99999999999999997461E-1;
+QP: 5.10862594750176621635E-2 4.98213872951233449420E0 7.58238284132545283818E1
+    3.66779609360150777800E2 7.10856304998926107277E2 5.97489612400613639965E2
+    2.11688757100572135698E2 2.52070205858023719784E1;
+QQ: 7.42373277035675149943E1 1.05644886038262816351E3 4.98641058337653607651E3
+    9.56231892404756170795E3 7.99704160447350683650E3 2.82619278517639096600E3
+    3.36093607810698293419E2;
+Z: 1.46819706421238932572E1 4.92184563216946036703E1
+""")
+
+
+def _horner(coef, z, lead=None):
+    p = jnp.ones_like(z) if lead else jnp.full_like(z, coef[0])
+    for c in coef if lead else coef[1:]:
+        p = p * z + c
+    return p
+
+
+def _bessel(x, t, order):
+    """Cephes ``J0`` or ``J1``: rational in ``x**2`` up to 5, Hankel's form above."""
     ax = jnp.abs(x)
-    # J_nu = sum (-x^2/4)^k (x/2)^nu / (k! (k+nu)!), 14 terms: last term < 1e-20 at x = 2.
-    xs = jnp.minimum(ax, 2.0)
-    q = -xs * xs / 4
-    t0, t1 = jnp.ones_like(x), xs / 2
-    s0, s1 = t0, t1
-    for k in range(1, 15):
-        t0, t1 = t0 * q / (k * k), t1 * q / (k * (k + 1))
-        s0, s1 = s0 + t0, s1 + t1
-    # Miller's backward recurrence from order 80, normalised by J0 + 2 (J2 + J4 + ...) = 1.
-    xm = jnp.clip(ax, 2.0, 25.0)
-
-    def back(i, c):
-        bk1, bk, s = c
-        k = 80 - i
-        bm = 2 * k / xm * bk - bk1
-        s = s + jnp.where((k % 2 == 1) & (k > 1), 2 * bm, 0.0)
-        f = jnp.where(jnp.abs(bm) > 1e30, 1e-30, 1.0)  # growth per step <= 80: float32 is safe
-        return bk * f, bm * f, s * f
-
-    b1, b0, s = jax.lax.fori_loop(
-        0, 80, back, (jnp.zeros_like(x), jnp.ones_like(x), jnp.zeros_like(x))
-    )
-    m0, m1 = b0 / (b0 + s), b1 / (b0 + s)
-    # Hankel expansion (DLMF 10.17.3), 30 terms; at x >= 25 the omitted terms are below 1e-17.
-    xa = jnp.maximum(ax, 25.0)
-    p0 = p1 = jnp.ones_like(x)
-    q0 = q1 = jnp.zeros_like(x)
-    a0 = a1 = jnp.ones_like(x)
-    for k in range(1, 31):
-        a0 = a0 * (-((2 * k - 1) ** 2)) / (8 * k * xa)
-        a1 = a1 * (4 - (2 * k - 1) ** 2) / (8 * k * xa)
-        sign = (-1) ** (k // 2)
-        if k % 2:
-            q0, q1 = q0 + sign * a0, q1 + sign * a1
-        else:
-            p0, p1 = p0 + sign * a0, p1 + sign * a1
-    # cos(x - pi/4) = (cos x + sin x) / sqrt(2) avoids shifting a large argument.
-    c, sn = jnp.cos(xa), jnp.sin(xa)
-    amp = jnp.sqrt(1 / (math.pi * xa))
-    h0 = amp * (p0 * (c + sn) - q0 * (sn - c))
-    h1 = amp * (p1 * (sn - c) + q1 * (sn + c))
-    j0 = jnp.where(ax < 2, s0, jnp.where(ax < 25, m0, h0))
-    j1 = jnp.where(ax < 2, s1, jnp.where(ax < 25, m1, h1))
-    return j0, jnp.sign(x) * j1
+    xs = jnp.minimum(ax, 5.0)
+    z = xs * xs
+    small = (z - t["Z"][0]) * (z - t["Z"][1]) * _horner(t["RP"], z) / _horner(t["RQ"], z, 1)
+    small = small * xs if order else small
+    xl = jnp.maximum(ax, 5.0)
+    w = 5.0 / xl
+    p = _horner(t["PP"], w * w) / _horner(t["PQ"], w * w)
+    q = w * _horner(t["QP"], w * w) / _horner(t["QQ"], w * w, 1)
+    c, sn = jnp.cos(xl), jnp.sin(xl)  # cos(x - pi/4) = (c + sn) / sqrt(2): no shift of a large x
+    big = (p * (c + sn) - q * (sn - c)) if order == 0 else (p * (sn - c) + q * (sn + c))
+    out = jnp.where(ax <= 5, small, jnp.where(jnp.isinf(ax), 0.0, big / jnp.sqrt(math.pi * xl)))
+    return jnp.sign(x) * out if order else out
 
 
 @jax.custom_jvp
 def bessel_j0(x):
-    """Bessel function ``J0(x)`` of real argument, about 1e-15 absolute for ``|x| <= 1e3``.
+    """Bessel function ``J0(x)`` of real argument, 1e-15 absolute for finite ``x``, 0 at ``inf``.
 
-    Drop-in for ``gkx.core.velocity.bessel_j0``. Derivative ``J0' = -J1``.
+    Same call signature as ``gkx.core.velocity.bessel_j0``. Derivative ``J0' = -J1``.
     """
-    return _bessel01(_inexact(x))[0]
+    return _bessel(_inexact(x), _J0, 0)
 
 
 @jax.custom_jvp
 def bessel_j1(x):
-    """Bessel function ``J1(x)`` of real argument, about 1e-15 absolute for ``|x| <= 1e3``.
+    """Bessel function ``J1(x)`` of real argument, 1e-15 absolute for finite ``x``, 0 at ``inf``.
 
-    Drop-in for ``gkx.core.velocity.bessel_j1``. Derivative ``J1' = J0 - J1 / x``.
+    Same call signature as ``gkx.core.velocity.bessel_j1``. Derivative ``J1' = J0 - J1 / x``.
     """
-    return _bessel01(_inexact(x))[1]
+    return _bessel(_inexact(x), _J1, 1)
 
 
 @bessel_j0.defjvp
 def _bessel_j0_jvp(primals, tangents):
-    j0, j1 = _bessel01(_inexact(primals[0]))
-    return j0, -j1 * tangents[0]
+    x = _inexact(primals[0])
+    return bessel_j0(x), -bessel_j1(x) * tangents[0]
 
 
 @bessel_j1.defjvp
 def _bessel_j1_jvp(primals, tangents):
     x = _inexact(primals[0])
-    j0, j1 = _bessel01(x)
+    j0, j1 = bessel_j0(x), bessel_j1(x)
     small = jnp.abs(x) < 1e-4
     ratio = jnp.where(small, 0.5 - x * x / 16, j1 / jnp.where(small, 1.0, x))
     return j1, (j0 - ratio) * tangents[0]
@@ -232,14 +262,20 @@ def _faddeeva_upper(z):
 def faddeeva(z):
     """Faddeeva function ``w(z) = exp(-z**2) erfc(-i z)``, entire, as ``scipy.special.wofz``.
 
-    The lower half plane uses ``w(z) = 2 exp(-z**2) - w(-z)``. Against SciPy over
-    ``|Re z|, |Im z| <= 30``: 8.3e-15 relative in float64; near the real axis SciPy itself errs by
-    up to 2.5e-14. Derivative ``w' = -2 z w + 2 i / sqrt(pi)``, holomorphic.
+    The lower half plane uses ``w(z) = 2 exp(-z**2) - w(-z)``. Over ``|Re z|, |Im z| <= 30`` the
+    error is 1e-13 relative in modulus (float64). On the real axis ``Re w = exp(-x**2)``; just off
+    it (``0 < |Im z| <= 1e-2``) the error of ``Re w`` is 6e-17 absolute, not relative, so for
+    ``|Re z| > 4`` there ``Re w`` may have few correct digits. Derivative
+    ``w' = -2 z w + 2 i / sqrt(pi)``, holomorphic; NaN where ``w`` overflows below the axis.
     """
     z = jnp.asarray(z) + 0j  # complex64 from float32, complex128 otherwise
     lower = jnp.imag(z) < 0
     wu = _faddeeva_upper(jnp.where(lower, -z, z))
-    return jnp.where(lower, 2 * jnp.exp(-z * z) - wu, wu)
+    w = jnp.where(lower, 2 * jnp.exp(-z * z) - wu, wu)
+    x = jnp.real(z)
+    return jnp.where(
+        jnp.imag(z) == 0, jnp.exp(-x * x) + 1j * jnp.imag(w), w
+    )  # Re w(x) = exp(-x**2)
 
 
 @faddeeva.defjvp

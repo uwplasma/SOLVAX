@@ -187,3 +187,44 @@ def test_float32_precision_is_kept():
         np.testing.assert_allclose(
             got, ref(arg.astype(dtype).astype(arg.dtype)), rtol=1e-5, atol=1e-6
         )
+
+
+def test_bessel_second_derivatives_and_large_argument():
+    """J0'', J1'' at the branch points and generic x, and J at 1e6, 1e8, 1e15, against 40-digit
+    mpmath values printed to 20 digits; 1e-13 absolute is 450 units in the last place of O(1)."""
+    x = np.array([0.0, 2.0, 25.0, 7.3])
+    d2 = {
+        sp.bessel_j0: [
+            -0.5,
+            0.064471624737201025549,
+            -0.10128079325916971236,
+            -0.27690592975922563365,
+        ],
+        sp.bessel_j1: [
+            0.0,
+            -0.40030779344905452763,
+            0.12109845745059465231,
+            -0.11895329513482457653,
+        ],
+    }
+    for fun, ref in d2.items():
+        np.testing.assert_allclose(jax.vmap(jax.grad(jax.grad(fun)))(x), ref, rtol=0, atol=1e-13)
+    big = np.array([1e6, 1e8, 1e15])
+    j0 = [0.00033104301373987374099, 0.000032060295340412078037, 6.1566386468850216773e-9]
+    j1 = [-0.00072596835681376304185, 0.000073063911815518548593, 2.4468665123771326465e-8]
+    np.testing.assert_allclose(sp.bessel_j0(big), j0, rtol=0, atol=1e-15)
+    np.testing.assert_allclose(sp.bessel_j1(big), j1, rtol=0, atol=1e-15)
+    np.testing.assert_array_equal(sp.bessel_j0(np.array([np.inf, -np.inf])), [0.0, 0.0])
+
+
+def test_dispersion_landau_term_on_the_real_axis():
+    """Im Z(x) = sqrt(pi) exp(-x**2), x in [0, 10], to 1e-14 relative (Fried and Conte 1961)."""
+    x = np.linspace(0, 10, 1001)
+    got = np.imag(np.asarray(sp.plasma_dispersion(x)))
+    np.testing.assert_allclose(got, np.sqrt(np.pi) * np.exp(-x * x), rtol=1e-14, atol=0)
+
+
+def test_complex_parameter_is_refused():
+    """Complex m is outside the stated domain of ellipk and ellipe."""
+    with pytest.raises(TypeError, match="real"):
+        sp.ellipk(0.5 + 0.1j)
