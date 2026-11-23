@@ -175,9 +175,21 @@ class ProductKernelCudaTests(unittest.TestCase):
 
     def test_vector_empty_and_non_fp64_products(self):
         a, b = self.arrays()
-        for aa, bb in ((a, b[:, 0]), (a[:, :0], b[:0]), (a.astype('float32'), b.astype('float32'))):
-            actual = self.jax.jit(self.product)(aa, bb)
-            np.testing.assert_allclose(actual, np.asarray(aa) @ np.asarray(bb), rtol=3e-5, atol=3e-5)
+        for name, aa, bb in (("vector", a, b[:, 0]), ("empty", a[:, :0], b[:0]),
+                             ("float32", a.astype('float32'), b.astype('float32'))):
+            with self.subTest(case=name):
+                if name == "float32":
+                    # NumPy computes at full FP32 precision. Match that policy
+                    # only for this fallback/reference check; library defaults
+                    # and the fixed FP64 kernel are unchanged.
+                    with self.jax.default_matmul_precision("highest"):
+                        actual = self.jax.jit(self.product)(aa, bb)
+                    tolerance = 3e-5
+                else:
+                    actual = self.jax.jit(self.product)(aa, bb)
+                    tolerance = 3e-13
+                np.testing.assert_allclose(actual, np.asarray(aa) @ np.asarray(bb),
+                                           rtol=tolerance, atol=tolerance)
 
     def test_generated_solver_and_its_parameter_gradient(self):
         from solvax.direct import block_thomas_truncated_fn

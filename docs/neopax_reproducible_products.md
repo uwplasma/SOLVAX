@@ -63,3 +63,31 @@ importing JAX. It rejects unsupported keywords, wrong positional arguments,
 unindexed loads/stores and ordinary sliced reductions. Both local tests pass;
 the five CUDA checks remain pending. The correction changes no tile sizes,
 reduction order, solver equations or derivative formulas.
+
+## CUDA execution at `48d3698`
+
+The second remote run passes the FP64 product and nested-JIT checks, ordinary
+JVP/VJP and mapped operands, the generated solve against a dense reference,
+and its parameter-gradient check. Both NumPy/API checks pass. The remaining
+failure is the FP32 fallback versus a NumPy FP32 reference: its `(33,19)`
+output identifies the last subcase, after the vector and empty cases complete.
+
+NumPy rounding of the original inputs to TF32 reproduces all five printed
+CUDA values within `2.384185792e-07`. The failing comparison mixed the GPU's
+default product precision with the CPU reference's full FP32 arithmetic.
+The correction uses a scoped `jax.default_matmul_precision("highest")`
+only in that FP32 test. Its `3e-5` tolerance is unchanged; the FP64 vector/empty
+checks are tightened to `3e-13`. No production source or precision default
+changes, and each test subcase now has a label. The corrected FP32 test has
+not yet rerun on CUDA.
+
+| Right operand | Fixed median latency | Native median latency | Fixed/native | Fixed temporary bytes | Native temporary bytes |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `775x775` | `1.690755002e-03 s` | `1.446174007e-03 s` | `1.169123` | 0 | 4194560 |
+| `775x2` | `1.472404998e-03 s` | `1.400377994e-03 s` | `1.051434` | 0 | 4194560 |
+
+These are three-call standalone wall-clock medians and compiled temporary
+buffer estimates, not complete NTX timing or peak GPU memory. Process maximum
+RSS for the entire seven-test run is `1315368 kB`; there is no comparable
+native-only process measurement. Captured-row consistency across independent
+compilations and both full NEOPAX AD16/FD16 comparisons remain unverified.
