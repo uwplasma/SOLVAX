@@ -623,7 +623,9 @@ def _scalar_newton(f, x0, bracket, tol, max_iter, damped):
     xp, fp, _ = step(x, fx, lo, hi)
     better = jnp.abs(fp) < jnp.abs(fx)
     x = jnp.where(better, xp, x)
-    return x, (it, jnp.where(status < 0, ROOT_MAX_ITER, status).astype(jnp.int32))
+    # Float aux: JAX before 0.7 gives custom_root's integer aux an int tangent.
+    status = jnp.where(status < 0, ROOT_MAX_ITER, status)
+    return x, jnp.stack([it, status]).astype(jnp.abs(x).dtype)
 
 
 def certified_root(
@@ -684,11 +686,12 @@ def certified_root(
     else:
 
         def solve(g, x):
-            return solver(g, x), (jnp.asarray(-1, jnp.int32), jnp.asarray(-1, jnp.int32))
+            return solver(g, x), jnp.full((2,), -1.0, jnp.abs(x0).dtype)
 
     if tangent_solve is None:
         tangent_solve = partial(_default_tangent_solve, dense_limit=dense_limit)
-    x, (iterations, status) = jax.lax.custom_root(f, x0, solve, tangent_solve, has_aux=True)
+    x, aux = jax.lax.custom_root(f, x0, solve, tangent_solve, has_aux=True)
+    iterations, status = jax.lax.stop_gradient(aux).astype(jnp.int32)
     residual = jnp.max(jnp.abs(f(jax.lax.stop_gradient(x))))
     converged = residual <= tol
     status = jnp.where(converged, ROOT_CONVERGED, jnp.where(status < 0, ROOT_STAGNATED, status))
