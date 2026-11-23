@@ -515,8 +515,8 @@ def root_solve(
             GMRES does not reach a relative residual of
             ``max(1e-10, 100 eps)``. The limit is not a cost crossover; it keeps
             the dense solve, which never gives NaN on a nonsingular
-            Jacobian, where it is affordable: unpreconditioned GMRES is cheaper on a well-conditioned
-            Jacobian but returns NaN on a hard one (even a non-normal
+            Jacobian, where it is affordable: unpreconditioned GMRES is
+            cheaper on a well-conditioned Jacobian but returns NaN on a hard one (even a non-normal
             Jacobian of condition 1e2), where the remedy is
             ``dense_limit=n`` or a preconditioned ``tangent_solve``. Complex
             vector roots may be non-holomorphic (``conj`` in ``f``): they
