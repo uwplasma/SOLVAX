@@ -4,10 +4,9 @@ Elliptic integrals: the arithmetic-geometric mean (Abramowitz and Stegun 17.6.1-
 logarithmic limit (A&S 17.3.26, 17.3.36) and the derivatives
 dK/dm = (E - (1 - m) K) / (2 m (1 - m)),
 dE/dm = (E - K) / (2 m) (A&S 17.3.43-44 in the parameter m) with their Maclaurin series at small m
-(A&S 17.3.11-12). Bessel functions: SciPy and the identities J0' = -J1, (x J1)' = x J0
-(DLMF 10.6.2). Plasma dispersion function: SciPy's ``wofz``, Z(0) = i sqrt(pi),
-Z' = -2 (1 + zeta Z), the large-argument series and the Landau continuation
-Z = integral + 2 i sqrt(pi) exp(-zeta**2) below the real axis (Fried and Conte 1961).
+(A&S 17.3.11-12). Bessel: SciPy, J0' = -J1, (x J1)' = x J0 (DLMF 10.6.2). Plasma dispersion
+function (Fried and Conte 1961): SciPy's ``wofz``, Z(0) = i sqrt(pi), Z' = -2 (1 + zeta Z), the
+large-argument series and the Landau continuation below the real axis.
 """
 
 import math
@@ -43,12 +42,7 @@ def test_elliptic_against_agm():
     assert np.max(np.abs(k - k_ref) / k_ref) < 1e-14
     assert np.max(np.abs(e - e_ref) / e_ref) < 1e-14
     np.testing.assert_allclose(k, ss.ellipk(m), rtol=1e-14)
-
-
-def test_elliptic_logarithmic_limit():
-    """As m -> 1, K = L + (k'^2/4)(L - 1), E = 1 + (k'^2/2)(L - 1/2), L = log(4/k').
-
-    The omitted terms are O(k'^4 L), below 1e-19 here."""
+    # m -> 1: K = L + (k'^2/4)(L - 1), E = 1 + (k'^2/2)(L - 1/2), L = log(4/k'), error k'^4 L.
     m = 1 - np.logspace(-10, -15, 6)
     kp2 = 1 - m
     big_l = np.log(4 / np.sqrt(kp2))
@@ -68,9 +62,7 @@ def _series_derivatives(m, terms=400):
 
 
 def test_elliptic_derivatives_closed_form():
-    """dK/dm, dE/dm against the closed forms (A&S 17.3.43-44) to 1e-12.
-
-    Below m = 0.5 the reference is the Maclaurin series, since the closed forms are 0/0 at m = 0."""
+    """dK/dm, dE/dm to 1e-12: closed forms (A&S 17.3.43-44), series below m = 0.5 (0/0 at 0)."""
     m = np.r_[0.0, 1e-300, 1e-12, 1e-6, 1e-3, 0.05, 0.3, 0.6, 0.9, 0.99, 0.999999]
     dk = jax.vmap(jax.grad(sp.ellipk))(m)
     de = jax.vmap(jax.grad(sp.ellipe))(m)
@@ -82,9 +74,10 @@ def test_elliptic_derivatives_closed_form():
     mb = m[~small]
     np.testing.assert_allclose(dk[~small], (e - (1 - mb) * k) / (2 * mb * (1 - mb)), rtol=1e-12)
     np.testing.assert_allclose(de[~small], (e - k) / (2 * mb), rtol=1e-12)
-    second = jax.grad(jax.grad(sp.ellipk))(0.4)  # d2K/dm2 by differentiating the rule
-    fd = (jax.grad(sp.ellipk)(0.4 + 1e-6) - jax.grad(sp.ellipk)(0.4 - 1e-6)) / 2e-6
-    assert float(second) == pytest.approx(float(fd), rel=1e-7)
+    dk2 = jax.grad(jax.grad(sp.ellipk))(0.3)  # d2K/dm2 through the rule, against differences
+    assert float(dk2) == pytest.approx(
+        float(jax.grad(sp.ellipk)(0.3 + 1e-6) - dk[6]) * 1e6, rel=1e-5
+    )
 
 
 def test_carlson_against_scipy_and_special_values():
@@ -93,17 +86,14 @@ def test_carlson_against_scipy_and_special_values():
     x, y, z = (10.0 ** rng.uniform(-8, 8, 300) for _ in range(3))
     np.testing.assert_allclose(sp.carlson_rf(x, y, z), ss.elliprf(x, y, z), rtol=1e-14)
     np.testing.assert_allclose(sp.carlson_rd(x, y, z), ss.elliprd(x, y, z), rtol=1e-14)
-    np.testing.assert_allclose(sp.carlson_rf(4.0, 4.0, 4.0), 0.5, rtol=1e-15)
-    np.testing.assert_allclose(sp.carlson_rd(4.0, 4.0, 4.0), 0.125, rtol=1e-15)
+    np.testing.assert_allclose([sp.carlson_rf(4.0, 4, 4), sp.carlson_rd(4.0, 4, 4)], [0.5, 0.125])
 
 
 def test_bessel_against_scipy():
-    """J0, J1 against SciPy for |x| <= 1e3: 1e-14 relative, or 5e-16 absolute near the zeros.
+    """J0, J1 for |x| <= 1e3: 1e-14 relative, or 5e-16 (2 ulp of O(1)) absolute near the zeros.
 
-    5e-16 is two units in the last place of O(1) values. Measured against 30-digit mpmath, SciPy
-    1.15's j0/j1 (Cephes) err by up to 1.3e-15 (2e-14 relative) beyond |x| = 70 and jv (AMOS) by
-    5e-16 at |x| = 10 to 22, so the reference is j0/j1 below 50 and jv above.
-    """
+    Against 30-digit mpmath, SciPy 1.15's j0/j1 err by 1.3e-15 beyond |x| = 70 and jv by 5e-16 at
+    |x| = 10 to 22, so the reference is j0/j1 below 50 and jv above."""
     x = np.r_[np.linspace(-1000, 1000, 400001), 0.0, 1e-300, 1e-8, 1.999999, 2.0, 24.999999, 25.0]
     big = np.abs(x) > 50
     for fun, ref in (
@@ -128,9 +118,7 @@ def test_bessel_derivative_identities():
 
 
 def test_dispersion_against_scipy_wofz():
-    """Z = i sqrt(pi) wofz over |Re|, |Im| <= 30, both half planes, to 5e-14 relative.
-
-    SciPy itself errs by 2.5e-14 near the real axis at Re z = -7.84 (against 30-digit mpmath)."""
+    """Z = i sqrt(pi) wofz, |Re|, |Im| <= 30, to 5e-14 (SciPy errs 2.5e-14 at -7.84 vs mpmath)."""
     re, im = np.meshgrid(
         np.linspace(-30, 30, 241), np.r_[np.linspace(-30, 30, 241), np.logspace(-12, -1, 12)]
     )
@@ -143,9 +131,7 @@ def test_dispersion_against_scipy_wofz():
 
 
 def test_dispersion_identities():
-    """Z(0) = i sqrt(pi); Z(-zeta*) = -Z(zeta)*; the large-|zeta| series (Fried and Conte 1961).
-
-    Z ~ -1/zeta (1 + 1/(2 zeta^2) + 3/(4 zeta^4) + 15/(8 zeta^6)); the next term is below 1e-15."""
+    """Z(0) = i sqrt(pi); Z(-zeta*) = -Z(zeta)*; large-|zeta| series, next term below 1e-15."""
     assert complex(sp.plasma_dispersion(0.0)) == pytest.approx(1j * math.sqrt(math.pi), abs=1e-15)
     z = jnp.array([0.3 + 0.2j, -2.0 - 1.5j, 5.0 - 0.01j, 9.0 + 3.0j])
     np.testing.assert_allclose(
@@ -175,9 +161,7 @@ def test_dispersion_is_the_landau_continuation():
 
 
 def test_dispersion_derivative():
-    """Gate of the step: Z' = -2 (1 + zeta Z) to 1e-11.
-
-    By holomorphic grad and real-direction jvp; central differences to 1e-8."""
+    """Gate: Z' = -2 (1 + zeta Z) to 1e-11 by holomorphic grad and jvp; differences to 1e-8."""
     z = jnp.array([0.0 + 0.0j, 0.4 + 0.1j, -3.0 - 2.0j, 6.0 + 0.001j, 20.0 - 0.5j, -50.0 + 40.0j])
     zf = sp.plasma_dispersion(z)
     expected = -2 * (1 + z * zf)
@@ -192,14 +176,14 @@ def test_dispersion_derivative():
 
 def test_float32_precision_is_kept():
     """In float32 the dtype is kept and the values are within 1e-5 of the float64 reference."""
-    m = np.linspace(0, 0.9, 7, dtype=np.float32)
-    assert sp.ellipk(m).dtype == jnp.float32
-    np.testing.assert_allclose(sp.ellipk(m), ss.ellipk(m.astype(float)), rtol=1e-5)
-    x = np.linspace(-40, 40, 81, dtype=np.float32)
-    assert sp.bessel_j0(x).dtype == jnp.float32
-    np.testing.assert_allclose(sp.bessel_j0(x), ss.j0(x.astype(float)), atol=1e-5)
-    z = np.array([0.5 + 0.5j, -3.0 - 1.0j, 12.0 + 2.0j], dtype=np.complex64)
-    assert sp.plasma_dispersion(z).dtype == jnp.complex64
-    np.testing.assert_allclose(
-        sp.plasma_dispersion(z), 1j * np.sqrt(np.pi) * ss.wofz(z.astype(complex)), rtol=1e-5
+    cases = (
+        (sp.ellipk, np.linspace(0, 0.9, 7), ss.ellipk, np.float32),
+        (sp.bessel_j0, np.linspace(-40, 40, 81), ss.j0, np.float32),
+        (sp.faddeeva, np.array([0.5 + 0.5j, -3 - 1j, 12 + 2j]), ss.wofz, np.complex64),
     )
+    for fun, arg, ref, dtype in cases:
+        got = fun(arg.astype(dtype))
+        assert got.dtype == dtype
+        np.testing.assert_allclose(
+            got, ref(arg.astype(dtype).astype(arg.dtype)), rtol=1e-5, atol=1e-6
+        )

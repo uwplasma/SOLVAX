@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- `solvax.special` adds special functions in plain JAX that compose with `jit`, `vmap` and `grad`: Carlson's `carlson_rf` and `carlson_rd`; the complete elliptic integrals `ellipk(m)` and `ellipe(m)` in the parameter `m = k**2` (SciPy's convention), with closed-form derivatives that hold at `m = 0`; `bessel_j0` and `bessel_j1` of real argument; the Faddeeva function `faddeeva` and the plasma dispersion function `plasma_dispersion`, the Landau-continued `Z = i sqrt(pi) w` with `Z' = -2 (1 + zeta Z)`. In float64: K and E within 6e-15 of the arithmetic-geometric mean, J0 and J1 within 1.3e-15 absolute of 30-digit values for `|x| <= 1e3`, `w` within 8e-15 relative of SciPy's `wofz` for `|Re z|, |Im z| <= 30`. JAX 0.4.38 and 0.6.2 have no `wofz`, and `jax.scipy.special.bessel_jn` errs by up to 19 at `x = 1e3`, so none of these call JAX's own.
+- `solvax.special` adds special functions in plain JAX that compose with `jit`, `vmap` and `grad`: Carlson's `carlson_rf` and `carlson_rd`; the complete elliptic integrals `ellipk(m)` and `ellipe(m)` in the parameter `m = k**2` (SciPy's convention), with closed-form derivatives that hold at `m = 0`; `bessel_j0` and `bessel_j1` of real argument; the Faddeeva function `faddeeva` and the plasma dispersion function `plasma_dispersion`, the Landau-continued `Z = i sqrt(pi) w` with `Z' = -2 (1 + zeta Z)`. In float64: K and E within 6e-15 of the arithmetic-geometric mean, J0 and J1 within 4.4e-16 absolute of SciPy for `|x| <= 1e3`, `w` within 8e-15 relative of SciPy's `wofz` for `|Re z|, |Im z| <= 30`. JAX 0.4.38 and 0.6.2 have no `wofz`, and `jax.scipy.special.bessel_jn` errs by up to 19 at `x = 1e3`, so none of these call JAX's own.
 
 ## 0.36.2 - 2026-11-12
 

@@ -9,24 +9,11 @@ Convention for the complete elliptic integrals: the argument is the parameter
 ``m = k**2``, as in SciPy's ``ellipk`` and ``ellipe``, not the modulus ``k``.
 """
 
-from __future__ import annotations
-
 import math
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-
-__all__ = [
-    "bessel_j0",
-    "bessel_j1",
-    "carlson_rd",
-    "carlson_rf",
-    "ellipe",
-    "ellipk",
-    "faddeeva",
-    "plasma_dispersion",
-]
 
 _DUPLICATIONS = 16  # differences shrink 4x per step; 4**16 leaves a wide margin for float64
 
@@ -91,25 +78,21 @@ def carlson_rd(x, y, z):
 
 
 def _kd(m):
-    """``K(m)`` and ``R_D(0, 1 - m, 1)``, from which ``E = K - m R_D / 3``."""
+    """``K(m)``, ``E(m)`` and ``R_D(0, 1 - m, 1)``."""
     m = _inexact(m)
     zero, one = jnp.zeros_like(m), jnp.ones_like(m)
     k = jnp.where(m == 1, jnp.inf, carlson_rf(zero, 1 - m, one))  # R_F(0, 0, 1) diverges
-    return k, carlson_rd(zero, 1 - m, one)
-
-
-def _e(m, k, rd):
-    return jnp.where(m == 1, 1.0, k - m * rd / 3)
+    rd = carlson_rd(zero, 1 - m, one)
+    return k, jnp.where(m == 1, 1.0, k - m * rd / 3), rd
 
 
 @jax.custom_jvp
 def ellipk(m):
     """Complete elliptic integral of the first kind ``K(m) = R_F(0, 1 - m, 1)``.
 
-    The argument is the parameter ``m = k**2 <= 1``, as in ``scipy.special.ellipk``. ``K`` diverges
-    as ``log(4 / sqrt(1 - m))`` when ``m -> 1`` and is ``inf`` at 1. The derivative
-    ``(E - (1 - m) K) / (2 m (1 - m))`` is evaluated as ``(K - R_D / 3) / (2 (1 - m))``, which has
-    no 0/0 at ``m = 0``.
+    Parameter ``m = k**2 <= 1``, as in ``scipy.special.ellipk``; ``K ~ log(4 / sqrt(1 - m))`` as
+    ``m -> 1``. ``dK/dm = (E - (1 - m) K) / (2 m (1 - m))`` is evaluated as
+    ``(K - R_D / 3) / (2 (1 - m))``, without the 0/0 at ``m = 0``.
     """
     return _kd(m)[0]
 
@@ -121,22 +104,21 @@ def ellipe(m):
     The argument is the parameter ``m = k**2 <= 1``, as in ``scipy.special.ellipe``. The derivative
     ``(E - K) / (2 m)`` is evaluated as ``-R_D(0, 1 - m, 1) / 6``.
     """
-    m = _inexact(m)
-    return _e(m, *_kd(m))
+    return _kd(m)[1]
 
 
 @ellipk.defjvp
 def _ellipk_jvp(primals, tangents):
     (m,), (dm,) = primals, tangents
-    k, rd = _kd(m)
+    k, _, rd = _kd(m)
     return k, (k - rd / 3) / (2 * (1 - m)) * dm
 
 
 @ellipe.defjvp
 def _ellipe_jvp(primals, tangents):
     (m,), (dm,) = primals, tangents
-    k, rd = _kd(m)
-    return _e(m, k, rd), -rd / 6 * dm
+    _, e, rd = _kd(m)
+    return e, -rd / 6 * dm
 
 
 def _bessel01(x):
@@ -221,18 +203,11 @@ def _bessel_j1_jvp(primals, tangents):
     return j1, (j0 - ratio) * tangents[0]
 
 
-def _weideman_coefficients(n=40):
-    """Coefficients of Weideman (1994, SIAM J. Numer. Anal. 31, eq. 3.13), highest power first."""
-    big_m = 2 * n
-    k = np.arange(-big_m + 1, big_m)
-    scale = np.sqrt(n / np.sqrt(2.0))
-    t = scale * np.tan(k * np.pi / (2 * big_m))
-    f = np.r_[0.0, np.exp(-t * t) * (scale * scale + t * t)]
-    a = np.real(np.fft.fft(np.fft.fftshift(f))) / (2 * big_m)
-    return float(scale), tuple(float(v) for v in a[n:0:-1])
-
-
-_W_SCALE, _W_COEF = _weideman_coefficients()
+# Weideman (1994, SIAM J. Numer. Anal. 31, eq. 3.13), N = 40: scale and coefficients, highest first.
+_W_SCALE = math.sqrt(40 / math.sqrt(2.0))
+_t = _W_SCALE * np.tan(np.arange(-79, 80) * np.pi / 160)
+_a = np.fft.fft(np.fft.fftshift(np.r_[0.0, np.exp(-_t * _t) * (_W_SCALE**2 + _t * _t)])).real / 160
+_W_COEF = tuple(float(v) for v in _a[40:0:-1])
 
 
 def _faddeeva_upper(z):
@@ -253,13 +228,6 @@ def _faddeeva_upper(z):
     return jnp.where(jnp.abs(z) < 8, near, far)
 
 
-def _complex(z):
-    z = jnp.asarray(z)
-    if jnp.issubdtype(z.dtype, jnp.complexfloating):
-        return z
-    return z.astype(jnp.result_type(complex))
-
-
 @jax.custom_jvp
 def faddeeva(z):
     """Faddeeva function ``w(z) = exp(-z**2) erfc(-i z)``, entire, as ``scipy.special.wofz``.
@@ -268,7 +236,7 @@ def faddeeva(z):
     ``|Re z|, |Im z| <= 30``: 8.3e-15 relative in float64; near the real axis SciPy itself errs by
     up to 2.5e-14. Derivative ``w' = -2 z w + 2 i / sqrt(pi)``, holomorphic.
     """
-    z = _complex(z)
+    z = jnp.asarray(z) + 0j  # complex64 from float32, complex128 otherwise
     lower = jnp.imag(z) < 0
     wu = _faddeeva_upper(jnp.where(lower, -z, z))
     return jnp.where(lower, 2 * jnp.exp(-z * z) - wu, wu)
@@ -276,7 +244,7 @@ def faddeeva(z):
 
 @faddeeva.defjvp
 def _faddeeva_jvp(primals, tangents):
-    z = _complex(primals[0])
+    z = jnp.asarray(primals[0]) + 0j
     w = faddeeva(z)
     return w, (-2 * z * w + 2j / math.sqrt(math.pi)) * tangents[0]
 
