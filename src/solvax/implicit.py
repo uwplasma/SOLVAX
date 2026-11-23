@@ -533,3 +533,165 @@ def root_solve(
     if tangent_solve is None:
         tangent_solve = partial(_default_tangent_solve, dense_limit=dense_limit)
     return jax.lax.custom_root(f, x0, solver, tangent_solve)
+
+
+ROOT_CONVERGED = 0
+"""Status of :func:`certified_root`: the residual reached ``tol``."""
+ROOT_MAX_ITER = 1
+"""Status of :func:`certified_root`: ``max_iter`` steps without reaching ``tol``."""
+ROOT_STAGNATED = 2
+"""Status of :func:`certified_root`: no step lowers the residual (or no sign change)."""
+
+
+class RootResult(NamedTuple):
+    """Result of :func:`certified_root`.
+
+    ``root`` is differentiable; its derivative is NaN when ``converged`` is
+    false. ``residual`` is ``max |f(root)|``. ``iterations`` is ``-1`` for a
+    user ``solver``, which does not report it.
+    """
+
+    root: jax.Array
+    residual: jax.Array
+    iterations: jax.Array
+    converged: jax.Array
+    status: jax.Array
+
+
+@jax.custom_jvp
+def _nan_unless(x: jax.Array, ok: jax.Array) -> jax.Array:
+    return x
+
+
+@_nan_unless.defjvp
+def _nan_unless_jvp(primals, tangents):
+    x, ok = primals
+    return x, tangents[0] * jnp.where(ok, 1.0, jnp.nan).astype(x.dtype)
+
+
+def _scalar_newton(f, x0, bracket, tol, max_iter, damped):
+    """Newton for a scalar root: bisection inside ``bracket``, else halving on ``|f|``."""
+    real = not jnp.iscomplexobj(x0)
+
+    def step(x, fx, lo, hi):
+        dfx = jax.jvp(f, (x,), (jnp.ones_like(x),))[1]
+        xn = x - fx / dfx
+        if bracket is not None:
+            inside = jnp.isfinite(xn) & (xn > jnp.minimum(lo, hi)) & (xn < jnp.maximum(lo, hi))
+            xn = jnp.where(inside, xn, 0.5 * (lo + hi))
+            return xn, f(xn), True
+        if not damped:
+            fn = f(xn)
+            return xn, fn, jnp.isfinite(fn)
+
+        def halve(c):
+            t = c[0] * 0.5
+            return t, f(x - t * (fx / dfx))
+
+        def worse(c):
+            t, fn = c
+            return (t > 2.0**-30) & ~(jnp.abs(fn) < jnp.abs(fx))
+
+        t, fn = jax.lax.while_loop(worse, halve, (jnp.ones((), jnp.abs(x).dtype), f(xn)))
+        return x - t * (fx / dfx), fn, jnp.abs(fn) < jnp.abs(fx)
+
+    def body(c):
+        x, fx, lo, hi, it, _ = c
+        xn, fn, ok = step(x, fx, lo, hi)
+        if bracket is not None and real:
+            same = jnp.sign(fn) == jnp.sign(f(lo))
+            lo, hi = jnp.where(same, xn, lo), jnp.where(same, hi, xn)
+        done = jnp.abs(fn) <= tol
+        status = jnp.where(done, ROOT_CONVERGED, jnp.where(ok, -1, ROOT_STAGNATED))
+        return xn, fn, lo, hi, it + 1, status
+
+    def cond(c):
+        return (c[5] < 0) & (c[4] < max_iter)
+
+    lo, hi = (x0, x0) if bracket is None else (jnp.asarray(b, x0.dtype) for b in bracket)
+    fx0 = f(x0)
+    status0 = jnp.where(jnp.abs(fx0) <= tol, ROOT_CONVERGED, -1)
+    if bracket is not None:
+        status0 = jnp.where(jnp.sign(f(lo)) == jnp.sign(f(hi)), ROOT_STAGNATED, status0)
+        out_of = (x0 < jnp.minimum(lo, hi)) | (x0 > jnp.maximum(lo, hi))
+        x0 = jnp.where(out_of, 0.5 * (lo + hi), x0)
+        fx0 = f(x0)
+    c = (x0, fx0, lo, hi, jnp.zeros((), jnp.int32), status0)
+    x, fx, lo, hi, it, status = jax.lax.while_loop(cond, body, c)
+    # One more Newton step, kept if it lowers |f|: the residual test alone
+    # leaves the root at tol / |f'| when Newton has just entered its basin.
+    xp, fp, _ = step(x, fx, lo, hi)
+    better = jnp.abs(fp) < jnp.abs(fx)
+    x = jnp.where(better, xp, x)
+    return x, (it, jnp.where(status < 0, ROOT_MAX_ITER, status).astype(jnp.int32))
+
+
+def certified_root(
+    f: Callable,
+    x0: jax.Array,
+    *,
+    solver: Callable | None = None,
+    bracket: tuple | None = None,
+    tol: jax.Array | float | None = None,
+    max_iter: int = 100,
+    damped: bool = True,
+    tangent_solve: Callable | None = None,
+    dense_limit: int = DENSE_TANGENT_LIMIT,
+) -> RootResult:
+    """Root of ``f`` with its residual and status; the derivative is NaN unless converged.
+
+    The root is differentiated by the implicit rule of :func:`root_solve`.
+    Unlike :func:`root_solve`, a solver that stops short (for instance one
+    that returns its start) is reported: ``converged`` is ``max |f(x)| <= tol``
+    and the derivative of an unconverged root is NaN.
+
+    Args:
+        f: residual, ``f(x)`` of the shape of ``x``. Must be holomorphic for a
+            complex scalar root.
+        x0: start.
+        solver: optional ``solver(f, x0) -> x``, any shape. When omitted, ``x0``
+            must be a scalar and a built-in Newton iteration runs: inside
+            ``bracket`` (real roots), a Newton step leaving the current sign
+            change is replaced by bisection; without ``bracket`` (real or
+            complex), the step is halved until ``|f|`` decreases, or taken
+            whole when ``damped=False``. Usable under ``jit`` and ``vmap``.
+        bracket: optional ``(a, b)`` with ``f(a) f(b) < 0`` (real scalars only).
+            Without a sign change the status is ``ROOT_STAGNATED``.
+        tol: residual tolerance on ``max |f|``; may be a traced value. Default
+            ``100 eps`` of the dtype times ``max(1, |f(x0)|)``.
+        max_iter: built-in iteration limit (static).
+        damped: halve Newton steps that do not lower ``|f|`` (no bracket).
+        tangent_solve, dense_limit: as in :func:`root_solve`.
+
+    Returns:
+        :class:`RootResult` with ``status`` one of ``ROOT_CONVERGED``,
+        ``ROOT_MAX_ITER``, ``ROOT_STAGNATED``.
+    """
+    x0 = jnp.asarray(x0)
+    if bracket is not None and (jnp.iscomplexobj(x0) or x0.ndim):
+        raise ValueError("bracket needs a real scalar start")
+    if tol is None:
+        eps = jnp.finfo(x0.dtype).eps
+        tol = 100 * eps * jnp.maximum(1.0, jnp.max(jnp.abs(f(x0))))
+    tol = jax.lax.stop_gradient(tol)
+    if solver is None:
+        if x0.ndim:
+            raise ValueError("the built-in solver is scalar; pass solver= for a vector root")
+
+        def solve(g, x):
+            return _scalar_newton(g, x, bracket, tol, max_iter, damped)
+
+    else:
+
+        def solve(g, x):
+            return solver(g, x), (jnp.asarray(-1, jnp.int32), jnp.asarray(-1, jnp.int32))
+
+    if tangent_solve is None:
+        tangent_solve = partial(_default_tangent_solve, dense_limit=dense_limit)
+    x, (iterations, status) = jax.lax.custom_root(f, x0, solve, tangent_solve, has_aux=True)
+    residual = jnp.max(jnp.abs(f(jax.lax.stop_gradient(x))))
+    converged = residual <= tol
+    status = jnp.where(converged, ROOT_CONVERGED, jnp.where(status < 0, ROOT_STAGNATED, status))
+    status = jnp.where(~converged & (status == ROOT_CONVERGED), ROOT_STAGNATED, status)
+    status = status.astype(jnp.int32)
+    return RootResult(_nan_unless(x, converged), residual, iterations, converged, status)

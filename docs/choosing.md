@@ -101,6 +101,16 @@ Use {func}`solvax.implicit.linear_solve`,
 {func}`solvax.pcg.pcg_linear_solve` for the second interpretation. The backward
 solve must be at least as accurate as the gradient application requires.
 
+`root_solve` returns the root only, so a solver that stops short still yields a
+root and a finite gradient. {func}`solvax.implicit.certified_root` returns a
+`RootResult` with the residual `max |f|`, the iterations, `converged` and a
+`status` (`ROOT_CONVERGED`, `ROOT_MAX_ITER`, `ROOT_STAGNATED`), and the
+derivative of an unconverged root is NaN. Without `solver=` it runs a scalar
+Newton iteration under `jit` and `vmap`: inside `bracket=(a, b)` a step that
+leaves the sign change is replaced by bisection, otherwise the step is halved
+until `|f|` decreases; complex scalars need a holomorphic `f`. `tol` may be
+traced.
+
 ## Precision and hardware
 
 - `tridiagonal_solve(method="auto")` uses the reproducible Thomas path on CPU
