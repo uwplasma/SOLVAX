@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Breaking: the default tangent of `root_solve` no longer forms the dense Jacobian above `dense_limit` unknowns (new keyword, default `DENSE_TANGENT_LIMIT = 1024`). Above it the tangent and the adjoint are unpreconditioned restarted GMRES (cycle 50, 40 restarts, relative residual `max(1e-10, 100 eps)`), and the derivative is NaN when GMRES does not converge. A 4000-unknown root now differentiates (forward and reverse) with no array above 204,000 elements in its program, against a 4000 x 4000 Jacobian before. Up to the limit the tangent is unchanged bit for bit. A user whose large Jacobian needs a preconditioner passes `tangent_solve`, or `dense_limit=n` to keep the dense solve.
+- `root_solve` with a complex vector root and the default dense tangent no longer raises (the Jacobian is formed with `holomorphic=True`).
+
 ## 0.36.2 - 2026-11-12
 
 - `fast_diagonal`, `flux_form_operator` and `fast_diagonal_schur` take a `(lower, upper)` pair of `"dirichlet"` and `"neumann"` ends for an axis, such as `("neumann", "dirichlet")` for an inflow-outflow duct's pressure (#172). The axis is factored as before, with the half-cell Dirichlet face at one end only; one Dirichlet end makes the operator nonsingular, and `lift` takes each end's data by its own kind. Checked against the dense face-by-face assembly on stretched cells, forward and transposed, and the Schur multiplier on a periodic and a mixed axis against the dense staggered complement.

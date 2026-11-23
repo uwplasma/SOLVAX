@@ -195,14 +195,23 @@ root = sx.root_solve(
 
 `solver(f, x0)` computes the primal root. `tangent_solve(g, y)` solves the
 linearized system $g(v)=y$, where `g` is a Jacobian-vector product at the root.
-The default uses scalar division for scalar roots and materializes a dense
-Jacobian for vectors, so large roots should always supply a matrix-free tangent
-solver.
+The default uses scalar division for scalar roots, a dense Jacobian for vectors
+of at most `dense_limit` unknowns (1024, `solvax.implicit.DENSE_TANGENT_LIMIT`),
+and above that unpreconditioned restarted GMRES (cycle of 50, 40 restarts,
+relative residual `max(1e-10, 100 eps)`), so no `n x n` buffer is formed. If
+GMRES does not converge the tangent is NaN. A Jacobian that needs a
+preconditioner supplies its own tangent solver; reverse mode transposes it, so
+wrap a Krylov solve in `jax.lax.custom_linear_solve`:
 
 ```python
 def tangent_solve(jvp, rhs):
-    return sx.gmres(jvp, rhs, rtol=1e-10).x
+    def solve(matvec, b):
+        return sx.gmres(matvec, b, precond=precond, rtol=1e-10).x
+
+    return jax.lax.custom_linear_solve(jvp, rhs, solve, transpose_solve=solve)
 ```
+
+To keep the dense tangent above the limit, pass `dense_limit=n`.
 
 ## PCG-specific wrapper
 

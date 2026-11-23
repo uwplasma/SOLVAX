@@ -133,9 +133,9 @@ def objective_pcg(theta):
 ## 6. Nonlinear extension
 
 For a root $f(x,\theta)=0$, retain the application-specific Newton, Aitken, or
-Anderson primal solve and use `root_solve`. For a large state, provide a
-matrix-free `tangent_solve`; otherwise the default vector tangent path
-materializes a dense Jacobian.
+Anderson primal solve and use `root_solve`. Above 1024 unknowns the default
+tangent is unpreconditioned GMRES and returns NaN if it does not converge; for
+a Jacobian that needs a preconditioner, provide a matrix-free `tangent_solve`.
 
 ## 7. Common mistakes
 
