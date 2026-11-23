@@ -435,19 +435,36 @@ def recycled_linear_solve(
     return _recycled_solve(operator, solver, transpose_solver, params, b)
 
 
-def _default_tangent_solve(g: Callable, y: jax.Array) -> jax.Array:
+DENSE_TANGENT_LIMIT = 1024
+"""Largest vector size whose default root tangent forms the dense Jacobian."""
+
+
+def _default_tangent_solve(
+    g: Callable, y: jax.Array, dense_limit: int = DENSE_TANGENT_LIMIT
+) -> jax.Array:
     """Solve the linearised system ``g(x) = y`` for the root tangent.
 
     ``g`` is the (linear) Jacobian-vector product of ``f`` at the root. For
-    scalars a single division suffices; for small vector systems the dense
-    Jacobian is materialised and solved with :func:`jnp.linalg.solve`. For
-    large systems pass a custom ``tangent_solve`` (e.g. a Krylov solve).
+    scalars a single division suffices. Up to ``dense_limit`` unknowns the
+    dense Jacobian is materialised and solved with :func:`jnp.linalg.solve`;
+    above it, restarted GMRES on ``g`` runs matrix-free (memory ``O(n m)``
+    for a cycle of ``m``) to a relative residual of ``max(1e-10, 100 eps)``,
+    and the tangent is NaN if it does not converge.
     """
     y = jnp.asarray(y)
     if y.ndim == 0:
         return y / g(jnp.ones_like(y))
-    jac = jax.jacobian(g)(jnp.zeros_like(y))
-    return jnp.linalg.solve(jac, y)
+    if y.size <= dense_limit:
+        holomorphic = jnp.iscomplexobj(y)
+        jac = jax.jacobian(g, holomorphic=holomorphic)(jnp.zeros_like(y))
+        return jnp.linalg.solve(jac, y)
+    rtol = max(1e-10, 100 * float(jnp.finfo(y.dtype).eps))
+
+    def krylov(matvec: Callable, b: jax.Array) -> jax.Array:
+        sol = gmres(matvec, b, restart=min(50, b.size), rtol=rtol, max_restarts=40)
+        return jnp.where(sol.converged, sol.x, jnp.nan)
+
+    return jax.lax.custom_linear_solve(g, y, krylov, transpose_solve=krylov)
 
 
 def root_solve(
@@ -456,6 +473,7 @@ def root_solve(
     solver: Callable,
     *,
     tangent_solve: Callable | None = None,
+    dense_limit: int = DENSE_TANGENT_LIMIT,
 ) -> jax.Array:
     """Differentiable root find with a user-supplied black-box rootfinder.
 
@@ -478,14 +496,20 @@ def root_solve(
         tangent_solve: optional callable ``tangent_solve(g, y) -> x`` solving
             the linearised system ``g(x) = y``, where ``g`` is the Jacobian
             of ``f`` at the root as a linear map. Defaults to a scalar
-            division for scalar problems and a dense
-            :func:`jnp.linalg.solve` of the materialised Jacobian for small
-            vector systems.
+            division for scalar problems, a dense :func:`jnp.linalg.solve`
+            of the materialised Jacobian up to ``dense_limit`` unknowns, and
+            matrix-free restarted GMRES above it, whose tangent is NaN when
+            GMRES does not reach a relative residual of
+            ``max(1e-10, 100 eps)``. A problem whose Jacobian GMRES cannot
+            solve unpreconditioned passes its own ``tangent_solve``.
+        dense_limit: largest number of unknowns for which the default
+            tangent forms the dense ``n x n`` Jacobian (static). Ignored
+            when ``tangent_solve`` is given.
 
     Returns:
         The root ``x``, differentiable w.r.t. the parameters closed over by
         ``f``.
     """
     if tangent_solve is None:
-        tangent_solve = _default_tangent_solve
+        tangent_solve = partial(_default_tangent_solve, dense_limit=dense_limit)
     return jax.lax.custom_root(f, x0, solver, tangent_solve)

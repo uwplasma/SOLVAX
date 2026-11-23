@@ -694,3 +694,148 @@ def test_newton_krylov_eisenstat_walker_reduces_inner_work_quadratically():
 def test_newton_krylov_rejects_invalid_forcing_parameters(kwargs, message):
     with pytest.raises(ValueError, match=message):
         newton_krylov(lambda x: x - 1.0, jnp.array(0.0), **kwargs)
+
+
+# --- root_solve default tangent: dense only for small systems ---------------
+#
+# Above ``dense_limit`` unknowns the default tangent of ``root_solve`` is a
+# matrix-free GMRES solve, so a large root never materialises its n x n
+# Jacobian. The checks are exact identities of the implicit function theorem
+# (``J dx = df/dp`` at the root) or central differences, not stored numbers.
+
+_N_LARGE = 4000
+_COUPLING = 0.3  # contraction factor: J = I + 0.3 diag(sech^2) roll, cond <= 1.9
+
+
+def _ring_residual(p):
+    b = jnp.linspace(0.5, 1.5, _N_LARGE)
+
+    def f(x):
+        return x + _COUPLING * jnp.tanh(jnp.roll(x, 1)) - p * b
+
+    return f, b
+
+
+def _fixed_point_solver(f, x0):
+    # x = x - f(x) is a 0.3-contraction; 80 sweeps reach 1e-40 relative.
+    return jax.lax.fori_loop(0, 80, lambda _, x: x - f(x), x0)
+
+
+def _ring_root(p):
+    f, _ = _ring_residual(p)
+    return root_solve(f, jnp.zeros(_N_LARGE), _fixed_point_solver)
+
+
+def _largest_aval(closed_jaxpr):
+    """Largest array size of any variable in a jaxpr and all its sub-jaxprs."""
+
+    def sub_jaxprs(value):
+        if hasattr(value, "jaxpr") and hasattr(value.jaxpr, "eqns"):
+            yield value.jaxpr  # ClosedJaxpr
+        elif hasattr(value, "eqns"):  # Jaxpr
+            yield value
+        elif isinstance(value, (tuple, list)):
+            for item in value:
+                yield from sub_jaxprs(item)
+
+    def walk(jaxpr):
+        sizes = [0]
+        for var in list(jaxpr.invars) + list(jaxpr.constvars):
+            sizes.append(int(np.prod(var.aval.shape)))
+        for eqn in jaxpr.eqns:
+            for var in eqn.outvars:
+                sizes.append(int(np.prod(getattr(var.aval, "shape", ()))))
+            for value in eqn.params.values():
+                for sub in sub_jaxprs(value):
+                    sizes.append(walk(sub))
+        return max(sizes)
+
+    return walk(closed_jaxpr.jaxpr)
+
+
+def test_root_solve_large_vector_has_no_dense_jacobian():
+    p = 0.8
+    n2 = _N_LARGE * _N_LARGE
+    jvp_fn = lambda p_: jax.jvp(_ring_root, (p_,), (1.0,))  # noqa: E731
+    loss = lambda p_: jnp.sum(_ring_root(p_) ** 2)  # noqa: E731
+    assert _largest_aval(jax.make_jaxpr(jvp_fn)(p)) < n2
+    assert _largest_aval(jax.make_jaxpr(jax.grad(loss))(p)) < n2
+
+    x, dx = jax.jit(jvp_fn)(p)
+    f, b = _ring_residual(p)
+    # Implicit function theorem: (df/dx) dx = -df/dp = b at the root.
+    _, jdx = jax.jvp(f, (x,), (dx,))
+    assert float(jnp.linalg.norm(jdx - b) / jnp.linalg.norm(b)) < 1e-9
+
+    h = 1e-5
+    fd = (loss(p + h) - loss(p - h)) / (2 * h)  # truncation O(h^2) ~ 1e-10
+    assert np.isclose(float(jax.jit(jax.grad(loss))(p)), float(fd), rtol=1e-8)
+
+
+def test_root_solve_small_default_is_the_dense_solve():
+    # Below the limit the tangent is bit-identical to the former dense solve.
+    def dense(g, y):
+        return jnp.linalg.solve(jax.jacobian(g)(jnp.zeros_like(y)), y)
+
+    def root(p, **kw):
+        f = lambda x: x**3 + 0.1 * jnp.roll(x, 1) - p  # noqa: E731
+        return root_solve(f, jnp.ones_like(p), newton_solver, **kw)
+
+    p = jnp.array([8.0, 27.0, 5.0])
+    t = jnp.array([1.0, -2.0, 0.5])
+    default = jax.jvp(root, (p,), (t,))[1]
+    explicit = jax.jvp(lambda q: root(q, tangent_solve=dense), (p,), (t,))[1]
+    assert np.array_equal(np.asarray(default), np.asarray(explicit))
+    krylov = jax.jvp(lambda q: root(q, dense_limit=0), (p,), (t,))[1]
+    assert np.allclose(np.asarray(krylov), np.asarray(default), rtol=1e-9)
+
+
+def complex_newton(f, z0):
+    z = z0
+    for _ in range(30):
+        z = z - jnp.linalg.solve(jax.jacfwd(f, holomorphic=True)(z), f(z))
+    return z
+
+
+@pytest.mark.parametrize("dense_limit", [1024, 0])
+def test_root_solve_complex_vector_tangent(dense_limit):
+    # z_k^2 = p_k: dz_k/dp_k = 1 / (2 z_k), holomorphic, both tangent paths.
+    p = jnp.array([2.0 + 1.0j, -1.0 + 3.0j, 4.0 - 0.5j])
+
+    def root(q):
+        return root_solve(
+            lambda z: z**2 - q, jnp.sqrt(q) * (1 + 1e-3), complex_newton,
+            dense_limit=dense_limit,
+        )
+
+    t = jnp.array([1.0, 1.0j, 0.5 - 0.5j])
+    z, dz = jax.jvp(root, (p,), (t,))
+    assert np.allclose(np.asarray(z), np.sqrt(np.asarray(p)), rtol=1e-12)
+    assert np.allclose(np.asarray(dz), np.asarray(t / (2 * z)), rtol=1e-9)
+
+
+def test_root_solve_krylov_tangent_under_vmap_and_jit():
+    p = jnp.array([[1.0, 2.0, 3.0], [0.5, 0.7, 0.9]])
+
+    def root(q):
+        f = lambda x: x**3 + 0.1 * jnp.roll(x, 1) - q  # noqa: E731
+        return root_solve(f, jnp.ones_like(q), newton_solver, dense_limit=0)
+
+    batched = jax.jit(jax.vmap(jax.jacobian(root)))(p)
+    for row, jac in zip(p, batched, strict=True):
+        ref = jax.jacobian(lambda q: root_solve(
+            lambda x: x**3 + 0.1 * jnp.roll(x, 1) - q, jnp.ones_like(q),
+            newton_solver))(row)
+        assert np.allclose(np.asarray(jac), np.asarray(ref), rtol=1e-9)
+
+
+def test_root_solve_unconverged_krylov_tangent_is_nan():
+    # A singular Jacobian at the root (f = x^2, root 0) has no tangent: the
+    # Krylov solve cannot converge and the tangent is NaN, never a number.
+    def root(p):
+        return root_solve(
+            lambda x: x**2 - p, jnp.zeros(3), lambda f, x0: x0, dense_limit=0
+        )
+
+    _, dx = jax.jvp(root, (jnp.zeros(3),), (jnp.ones(3),))
+    assert np.all(np.isnan(np.asarray(dx)))
