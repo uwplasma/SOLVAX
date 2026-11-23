@@ -2,8 +2,8 @@
 
 ## Unreleased
 
-- Breaking: the default tangent of `root_solve` no longer forms the dense Jacobian above `dense_limit` unknowns (new keyword, default `DENSE_TANGENT_LIMIT = 1024`). Above it the tangent and the adjoint are unpreconditioned restarted GMRES (cycle 50, 40 restarts, relative residual `max(1e-10, 100 eps)`), and the derivative is NaN when GMRES does not converge. A 4000-unknown root now differentiates (forward and reverse) with no array above 204,000 elements in its program, against a 4000 x 4000 Jacobian before. Up to the limit the tangent is unchanged bit for bit. A user whose large Jacobian needs a preconditioner passes `tangent_solve`, or `dense_limit=n` to keep the dense solve.
-- `root_solve` with a complex vector root and the default dense tangent no longer raises (the Jacobian is formed with `holomorphic=True`).
+- Breaking: the default tangent of `root_solve` no longer forms the dense Jacobian above `dense_limit` unknowns (new keyword, default `DENSE_TANGENT_LIMIT = 1024`). Above it the tangent and the adjoint are unpreconditioned restarted GMRES (cycle 50, 40 restarts, relative residual `max(1e-10, 100 eps)`), and the derivative is NaN when GMRES does not converge. A 4000-unknown root now differentiates (forward and reverse) with no array above 204,000 elements in its program, against a 4000 x 4000 Jacobian before. Up to the limit the real tangent is unchanged bit for bit. The limit is chosen for robustness, not cost: on a well-conditioned Jacobian GMRES is faster already at 512 unknowns (warm gradient 0.30 against 0.96 ms), but unpreconditioned GMRES fails on hard Jacobians, even a non-normal one of condition 1e2, and then the tangent is NaN. A user whose large Jacobian needs a preconditioner passes `tangent_solve`, or `dense_limit=n` to keep the dense solve.
+- `root_solve` with a complex vector root and the default tangent no longer raises: the tangent is solved as the real system of size `2n`, which is correct also for a non-holomorphic residual (one containing `conj`). Complex scalar roots still require a holomorphic residual.
 
 ## 0.36.2 - 2026-11-12
 

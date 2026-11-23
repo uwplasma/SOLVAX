@@ -198,10 +198,15 @@ linearized system $g(v)=y$, where `g` is a Jacobian-vector product at the root.
 The default uses scalar division for scalar roots, a dense Jacobian for vectors
 of at most `dense_limit` unknowns (1024, `solvax.implicit.DENSE_TANGENT_LIMIT`),
 and above that unpreconditioned restarted GMRES (cycle of 50, 40 restarts,
-relative residual `max(1e-10, 100 eps)`), so no `n x n` buffer is formed. If
-GMRES does not converge the tangent is NaN. A Jacobian that needs a
-preconditioner supplies its own tangent solver; reverse mode transposes it, so
-wrap a Krylov solve in `jax.lax.custom_linear_solve`:
+relative residual `max(1e-10, 100 eps)`), so no `n x n` buffer is formed. The
+limit is a robustness choice, not a cost crossover: on a well-conditioned
+Jacobian GMRES is already cheaper at 512 unknowns, but unpreconditioned GMRES
+fails on hard Jacobians (a random non-normal one of condition 1e2 is enough),
+and then the tangent is NaN. The remedy is `dense_limit=n` or a preconditioned
+tangent solver. Complex vector roots are solved as the real system of size
+`2n`, so `f` may contain `conj`; complex scalar roots need a holomorphic `f`.
+Reverse mode transposes a custom tangent solver, so wrap a Krylov solve in
+`jax.lax.custom_linear_solve`:
 
 ```python
 def tangent_solve(jvp, rhs):
