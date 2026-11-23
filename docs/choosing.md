@@ -108,8 +108,18 @@ root and a finite gradient. {func}`solvax.implicit.certified_root` returns a
 derivative of an unconverged root is NaN. Without `solver=` it runs a scalar
 Newton iteration under `jit` and `vmap`: inside `bracket=(a, b)` a step that
 leaves the sign change is replaced by bisection, otherwise the step is halved
-until `|f|` decreases; complex scalars need a holomorphic `f`. `tol` may be
-traced.
+until `|f|` decreases. Inside a bracket bisection also replaces a Newton step
+that is not at most half the previous one, so it takes no more steps than
+bisection. An explicit `tol` bounds `|f(root)|` and may be traced; it is
+required with `solver=`. The built-in default certifies the Newton correction
+at the returned root, `|f| <= 100 eps max(1, |x|) |f'|` (a zero or non-finite
+`f'` converges only when `f(x) == 0`). Certification is by residual, so a
+function with no root can pass where `|f|` underflows (`exp(z)`); a double
+root converges to about the square root of the tolerance with an unbounded
+slope. The derivative of a complex scalar root is solved as a real 2 x 2
+system, so it is right also for a non-holomorphic `f`; the built-in Newton
+iteration itself assumes a holomorphic one. `residual` is differentiable.
+Arrays only; under `vmap` the batch runs until its slowest member stops.
 
 ## Precision and hardware
 

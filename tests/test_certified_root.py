@@ -20,7 +20,9 @@ def test_unconverged_solver_gives_nan_gradient():
     """A solver that returns its start unchanged must not yield a finite derivative."""
 
     def root(p):
-        res = sx.certified_root(lambda x: x**2 - p, jnp.asarray(1.0), solver=lambda f, x0: x0, tol=1e-12)
+        res = sx.certified_root(
+            lambda x: x**2 - p, jnp.asarray(1.0), solver=lambda f, x0: x0, tol=1e-12
+        )
         return res.root, res.converged
 
     x, converged = root(2.0)
@@ -31,13 +33,13 @@ def test_unconverged_solver_gives_nan_gradient():
 
 def test_user_solver_converged_keeps_gradient():
     res = sx.certified_root(
-        lambda x: x**2 - 2.0, jnp.asarray(1.0), solver=lambda f, x0: jnp.sqrt(2.0)
+        lambda x: x**2 - 2.0, jnp.asarray(1.0), solver=lambda f, x0: jnp.sqrt(2.0), tol=1e-12
     )
     assert bool(res.converged)
     g = jax.grad(
         lambda p: (
             sx.certified_root(
-                lambda x: x**2 - p, jnp.asarray(1.0), solver=lambda f, x0: jnp.sqrt(p)
+                lambda x: x**2 - p, jnp.asarray(1.0), solver=lambda f, x0: jnp.sqrt(p), tol=1e-12
             ).root
         )
     )(2.0)
@@ -189,14 +191,18 @@ def test_non_holomorphic_complex_scalar_derivative(dp):
         # Newton on the real 2 x 2 system, independent of the code under test.
         for _ in range(60):
             v = jnp.array([z.real, z.imag])
-            jac = jax.jacfwd(lambda u: jnp.array([f(u[0] + 1j * u[1]).real, f(u[0] + 1j * u[1]).imag]))(v)
+            jac = jax.jacfwd(
+                lambda u: jnp.array([f(u[0] + 1j * u[1]).real, f(u[0] + 1j * u[1]).imag])
+            )(v)
             r = f(z)
             d = jnp.linalg.solve(jac, jnp.array([r.real, r.imag]))
             z = z - (d[0] + 1j * d[1])
         return z
 
     def root(p):
-        return sx.certified_root(lambda z: z * jnp.conj(z) + z - p, z0, solver=solver, tol=1e-12).root
+        return sx.certified_root(
+            lambda z: z * jnp.conj(z) + z - p, z0, solver=solver, tol=1e-12
+        ).root
 
     h = 1e-6
     fd = (root(p0 + h * dp) - root(p0 - h * dp)) / (2 * h)
