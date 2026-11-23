@@ -180,6 +180,11 @@ def test_exported_surface_is_stable():
         "gmres",
         "pcg",
         "newton_krylov",
+        "bessel_j0",
+        "bessel_j1",
+        "ellipk",
+        "ellipe",
+        "plasma_dispersion",
     }
     missing = sorted(required - set(sx.__all__))
     assert not missing, f"public names disappeared from solvax.__all__: {missing}"
