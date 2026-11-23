@@ -760,6 +760,11 @@ def test_root_solve_large_vector_has_no_dense_jacobian():
     loss = lambda p_: jnp.sum(_ring_root(p_) ** 2)  # noqa: E731
     assert _largest_aval(jax.make_jaxpr(jvp_fn)(p)) < n2
     assert _largest_aval(jax.make_jaxpr(jax.grad(loss))(p)) < n2
+    # The jaxpr walk cannot see inside custom_root on every JAX version, so
+    # also bound the compiled temporaries: a dense float64 Jacobian is 8 n^2.
+    for fn in (jvp_fn, jax.grad(loss)):
+        mem = jax.jit(fn).lower(p).compile().memory_analysis()
+        assert mem.temp_size_in_bytes < 8 * n2
 
     x, dx = jax.jit(jvp_fn)(p)
     f, b = _ring_residual(p)
@@ -839,3 +844,27 @@ def test_root_solve_unconverged_krylov_tangent_is_nan():
 
     _, dx = jax.jvp(root, (jnp.zeros(3),), (jnp.ones(3),))
     assert np.all(np.isnan(np.asarray(dx)))
+
+
+@pytest.mark.parametrize("dense_limit", [1024, 0])
+def test_root_solve_non_holomorphic_complex_tangent(dense_limit):
+    # f(z) = z + 0.2 conj(z) - p is only R-linear. With z = a + ib the root is
+    # a = Re p / 1.2, b = Im p / 0.8, so dz/dp . t = Re t / 1.2 + i Im t / 0.8.
+    def root(q):
+        return root_solve(
+            lambda z: z + 0.2 * jnp.conj(z) - q, jnp.zeros_like(q),
+            lambda f, z0: q.real / 1.2 + 1j * q.imag / 0.8,
+            dense_limit=dense_limit,
+        )
+
+    p = jnp.array([1.0 + 2.0j, -0.5 + 0.3j, 2.0 - 1.0j])
+    t = jnp.array([1.0j, 1.0, 0.5 - 2.0j])
+    _, dz = jax.jvp(root, (p,), (t,))
+    expected = t.real / 1.2 + 1j * t.imag / 0.8
+    assert np.allclose(np.asarray(dz), np.asarray(expected), rtol=1e-9)
+    # Reverse mode: loss = sum |z|^2, dL/dRe p = 2a/1.2, dL/dIm p = 2b/0.8;
+    # JAX returns the conjugate-free gradient dL/dRe p - i dL/dIm p.
+    grad = jax.grad(lambda q: jnp.sum(jnp.abs(root(q)) ** 2))(p)
+    a, b = p.real / 1.2, p.imag / 0.8
+    assert np.allclose(np.asarray(grad), np.asarray(2 * a / 1.2 - 2j * b / 0.8),
+                       rtol=1e-9)

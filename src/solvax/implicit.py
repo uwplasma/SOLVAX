@@ -449,14 +449,27 @@ def _default_tangent_solve(
     dense Jacobian is materialised and solved with :func:`jnp.linalg.solve`;
     above it, restarted GMRES on ``g`` runs matrix-free (memory ``O(n m)``
     for a cycle of ``m``) to a relative residual of ``max(1e-10, 100 eps)``,
-    and the tangent is NaN if it does not converge.
+    and the tangent is NaN if it does not converge. A complex vector is
+    solved as the real system of twice the size, so ``g`` need only be
+    real-linear (a residual with ``conj`` is handled); a complex scalar uses
+    the division and requires a holomorphic residual.
     """
     y = jnp.asarray(y)
     if y.ndim == 0:
         return y / g(jnp.ones_like(y))
+    if jnp.iscomplexobj(y):
+        # Solve the real 2n system, valid for any R-linear g (holomorphic or not).
+        n = y.size
+
+        def g_real(u: jax.Array) -> jax.Array:
+            w = g((u[:n] + 1j * u[n:]).reshape(y.shape))
+            return jnp.concatenate([w.real.ravel(), w.imag.ravel()])
+
+        y_real = jnp.concatenate([y.real.ravel(), y.imag.ravel()])
+        v = _default_tangent_solve(g_real, y_real, 2 * dense_limit)
+        return (v[:n] + 1j * v[n:]).reshape(y.shape)
     if y.size <= dense_limit:
-        holomorphic = jnp.iscomplexobj(y)
-        jac = jax.jacobian(g, holomorphic=holomorphic)(jnp.zeros_like(y))
+        jac = jax.jacobian(g)(jnp.zeros_like(y))
         return jnp.linalg.solve(jac, y)
     rtol = max(1e-10, 100 * float(jnp.finfo(y.dtype).eps))
 
@@ -500,8 +513,14 @@ def root_solve(
             of the materialised Jacobian up to ``dense_limit`` unknowns, and
             matrix-free restarted GMRES above it, whose tangent is NaN when
             GMRES does not reach a relative residual of
-            ``max(1e-10, 100 eps)``. A problem whose Jacobian GMRES cannot
-            solve unpreconditioned passes its own ``tangent_solve``.
+            ``max(1e-10, 100 eps)``. The limit is chosen for robustness, not
+            cost: unpreconditioned GMRES is cheaper on a well-conditioned
+            Jacobian but returns NaN on a hard one (even a non-normal
+            Jacobian of condition 1e2), where the remedy is
+            ``dense_limit=n`` or a preconditioned ``tangent_solve``. Complex
+            vector roots may be non-holomorphic (``conj`` in ``f``): they
+            are solved as the real system of size ``2n``. Complex scalar
+            roots require a holomorphic ``f``.
         dense_limit: largest number of unknowns for which the default
             tangent forms the dense ``n x n`` Jacobian (static). Ignored
             when ``tangent_solve`` is given.
