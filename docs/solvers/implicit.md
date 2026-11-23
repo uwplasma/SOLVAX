@@ -199,7 +199,8 @@ The default uses scalar division for scalar roots, a dense Jacobian for vectors
 of at most `dense_limit` unknowns (1024, `solvax.implicit.DENSE_TANGENT_LIMIT`),
 and above that unpreconditioned restarted GMRES (cycle of 50, 40 restarts,
 relative residual `max(1e-10, 100 eps)`), so no `n x n` buffer is formed. The
-limit is a robustness choice, not a cost crossover: on a well-conditioned
+limit is not a cost crossover; it keeps the dense solve, which never gives NaN
+on a nonsingular Jacobian, where it is affordable: on a well-conditioned
 Jacobian GMRES is already cheaper at 512 unknowns, but unpreconditioned GMRES
 fails on hard Jacobians (a random non-normal one of condition 1e2 is enough),
 and then the tangent is NaN. The remedy is `dense_limit=n` or a preconditioned
