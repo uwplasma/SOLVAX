@@ -44,3 +44,22 @@ products. They have **not run locally**. A fresh-process replay of the captured
 disabled. Full AD16/FD16, total solver timing, RSS and device peak memory remain
 unverified. Fixed ordering alone is not an independent coefficient-accuracy
 certificate, and this candidate must not be promoted on that claim.
+
+## First CUDA run and API correction
+
+The first remote run completed the NumPy check but all five CUDA checks
+stopped during lowering: JAX 0.10 rejects the removed `pallas_call(backend=...)`
+keyword. No CUDA arithmetic, derivative, or timing result was obtained.
+
+The correction selects Triton through its existing `CompilerParams` type,
+passes indexed references to Triton's masked load/store functions, and
+expresses the same balanced reduction with supported equal-size `lax.split`
+and `squeeze` operations instead of array slices. The loads/stores and split
+signatures were checked against installed JAX 0.10 and upstream 0.7.2 source;
+this is not an execution test on both versions.
+
+A new local regression reads the actual installed API signatures without
+importing JAX. It rejects unsupported keywords, wrong positional arguments,
+unindexed loads/stores and ordinary sliced reductions. Both local tests pass;
+the five CUDA checks remain pending. The correction changes no tile sizes,
+reduction order, solver equations or derivative formulas.

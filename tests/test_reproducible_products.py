@@ -4,6 +4,7 @@ SOLVAX_TEST_REPRODUCIBLE_GPU=1 python -m unittest discover -s tests
     -p test_reproducible_products.py -v
 """
 import ast
+import importlib.metadata
 import os
 from pathlib import Path
 import sys
@@ -14,35 +15,88 @@ import unittest
 import numpy as np
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def pallas_kernel_ast():
+    path = ROOT/"src/solvax/_reproducible.py"
+    tree = ast.parse(path.read_text())
+    return path, next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                     and node.name == "_cuda_matmul")
+
+
 class ProductKernelNumpyTests(unittest.TestCase):
+    def test_calls_match_installed_jax_api_without_importing_jax(self):
+        """Validate actual package signatures, not a permissive mock API."""
+        root = Path(importlib.metadata.distribution("jax").locate_file("jax"))
+        _, kernel = pallas_kernel_ast()
+        calls = [node for node in ast.walk(kernel) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Attribute)]
+        for name, file in (("pallas_call", "pallas/pallas_call.py"),
+                           ("load", "pallas/triton/primitives.py"),
+                           ("store", "pallas/triton/primitives.py"),
+                           ("split", "lax/lax.py")):
+            tree = ast.parse((root/"_src"/file).read_text())
+            function = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                            and node.name == name)
+            positional = function.args.posonlyargs + function.args.args
+            accepted = {arg.arg for arg in positional + function.args.kwonlyargs}
+            for call in (node for node in calls if node.func.attr == name):
+                self.assertLessEqual(len(call.args), len(positional), name)
+                self.assertLessEqual({kw.arg for kw in call.keywords}, accepted, name)
+                if name in ("load", "store"):
+                    self.assertIsInstance(call.args[0], ast.Subscript)
+                    self.assertEqual(call.args[0].value.attr, "at")
+        # Ordinary array slices/gathers have no Triton lowering here. The
+        # reduction uses supported equal-size split and squeeze primitives.
+        for node in ast.walk(kernel):
+            if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
+                # Full slices below only insert broadcast axes into indices.
+                indices = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
+                for index in indices:
+                    self.assertTrue((isinstance(index, ast.Constant) and index.value is None)
+                                    or (isinstance(index, ast.Slice)
+                                        and index.lower is index.upper is index.step is None))
+        if os.environ.get("SOLVAX_TEST_REPRODUCIBLE_GPU") != "1":
+            self.assertNotIn("jax", sys.modules)
+
     def test_real_kernel_indexing_and_reduction_against_extended_precision(self):
         """Execute the actual kernel body with NumPy-backed masked loads."""
-        path = Path(__file__).resolve().parents[1]/"src/solvax/_reproducible.py"
-        tree = ast.parse(path.read_text())
-        function = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
-                        and node.name == "_cuda_matmul")
+        path, function = pallas_kernel_ast()
         function.body = [node for node in function.body if not isinstance(node, ast.ImportFrom)]
         position = [0, 0]
         params = []
 
-        def load(ref, indices, *, mask, other):
+        class Ref:
+            def __init__(self, array):
+                self.array = array
+
+            @property
+            def at(self):
+                return self
+
+            def __getitem__(self, indices):
+                return self.array, indices
+
+        def load(view, *, mask, other):
+            ref, indices = view
             clipped = tuple(np.clip(index, 0, ref.shape[axis]-1)
                             for axis, index in enumerate(indices))
             return np.where(mask, ref[clipped], other)
 
-        def store(ref, indices, values, *, mask):
+        def store(view, values, *, mask):
+            ref, indices = view
             rows, cols = np.broadcast_arrays(*indices)
             ref[rows[mask], cols[mask]] = values[mask]
 
-        def pallas_call(kernel, *, out_shape, grid, compiler_params, name, backend):
-            self.assertEqual(backend, "triton")
+        def pallas_call(kernel, *, out_shape, grid, compiler_params, name):
             params.append((compiler_params, name))
 
             def execute(a, b):
                 result = np.empty(out_shape.shape, out_shape.dtype)
                 for position[0] in range(grid[0]):
                     for position[1] in range(grid[1]):
-                        kernel(a, b, result)
+                        kernel(Ref(a), Ref(b), Ref(result))
                 return result
             return execute
 
@@ -51,7 +105,10 @@ class ProductKernelNumpyTests(unittest.TestCase):
                 carry = body(i, carry)
             return carry
 
-        env = dict(jnp=np, jax=SimpleNamespace(lax=SimpleNamespace(fori_loop=loop),
+        def split(array, sizes, axis):
+            return np.split(array, np.cumsum(sizes)[:-1], axis=axis)
+
+        env = dict(jnp=np, jax=SimpleNamespace(lax=SimpleNamespace(fori_loop=loop, split=split),
             ShapeDtypeStruct=lambda shape, dtype: SimpleNamespace(shape=shape, dtype=dtype)),
             pl=SimpleNamespace(program_id=lambda i: position[i], pallas_call=pallas_call),
             plt=SimpleNamespace(load=load, store=store, CompilerParams=lambda **kw: kw))

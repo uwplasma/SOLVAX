@@ -18,9 +18,6 @@ def _cuda_matmul(a, b):
     from jax.experimental import pallas as pl
     from jax.experimental.pallas import triton as plt
 
-    # Pallas moved masked loads/stores into its Triton namespace after 0.7.
-    load = getattr(plt, "load", None) or pl.load
-    store = getattr(plt, "store", None) or pl.store
     m, k = a.shape
     n = b.shape[1]
     bm, bn, bk = 16, 16, 8
@@ -32,25 +29,27 @@ def _cuda_matmul(a, b):
 
         def step(i, total):
             kk = i * bk + inner
-            left = load(a_ref, (rows[:, None], kk[None, :]),
-                        mask=(rows[:, None] < m) & (kk[None, :] < k), other=0.)
-            right = load(b_ref, (kk[:, None], cols[None, :]),
-                         mask=(kk[:, None] < k) & (cols[None, :] < n), other=0.)
+            left = plt.load(a_ref.at[rows[:, None], kk[None, :]],
+                            mask=(rows[:, None] < m) & (kk[None, :] < k), other=0.)
+            right = plt.load(b_ref.at[kk[:, None], cols[None, :]],
+                             mask=(kk[:, None] < k) & (cols[None, :] < n), other=0.)
             products = left[:, :, None] * right[None, :, :]
             # Explicit balanced additions: no dot, split-K or atomic reduction.
             for width in (4, 2, 1):
-                products = products[:, :width, :] + products[:, width:2*width, :]
-            return total + products[:, 0, :]
+                first, second = jax.lax.split(products, (width, width), axis=1)
+                products = first + second
+            return total + jnp.squeeze(products, axis=1)
 
         total = jax.lax.fori_loop(0, (k + bk - 1) // bk, step,
                                   jnp.zeros((bm, bn), dtype=a.dtype))
-        store(out_ref, (rows[:, None], cols[None, :]), total,
-              mask=(rows[:, None] < m) & (cols[None, :] < n))
+        plt.store(out_ref.at[rows[:, None], cols[None, :]], total,
+                  mask=(rows[:, None] < m) & (cols[None, :] < n))
 
     return pl.pallas_call(
         kernel, out_shape=jax.ShapeDtypeStruct((m, n), a.dtype),
         grid=((m + bm - 1) // bm, (n + bn - 1) // bn),
-        backend="triton",
+        # The parameter type selects Triton, including on JAX 0.10, where
+        # pallas_call no longer accepts a separate backend keyword.
         compiler_params=plt.CompilerParams(num_warps=4, num_stages=1),
         name="solvax_fixed_order_f64_matmul",
     )(a, b)
