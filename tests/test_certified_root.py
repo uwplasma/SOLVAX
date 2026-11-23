@@ -20,7 +20,7 @@ def test_unconverged_solver_gives_nan_gradient():
     """A solver that returns its start unchanged must not yield a finite derivative."""
 
     def root(p):
-        res = sx.certified_root(lambda x: x**2 - p, jnp.asarray(1.0), solver=lambda f, x0: x0)
+        res = sx.certified_root(lambda x: x**2 - p, jnp.asarray(1.0), solver=lambda f, x0: x0, tol=1e-12)
         return res.root, res.converged
 
     x, converged = root(2.0)
@@ -143,3 +143,62 @@ def test_traced_tolerance_and_stagnation_status():
     bad = sx.certified_root(lambda x: x**2 + 1.0, jnp.asarray(0.5))
     assert not bool(bad.converged)
     assert int(bad.status) == sx.ROOT_STAGNATED
+
+
+def test_far_start_does_not_certify_a_non_root():
+    """x^20 - 1e-6 from 10 on (0, 10): the root is 1e-6^(1/20) = 0.501187...; 1.937 is not one."""
+    res = sx.certified_root(lambda x: x**20 - 1e-6, jnp.asarray(10.0), bracket=(0.0, 10.0))
+    assert bool(res.converged)
+    np.testing.assert_allclose(float(res.root), 1e-6 ** (1 / 20), rtol=1e-13)
+
+
+def test_bracket_iterations_bounded_by_bisection():
+    """rtsafe: on (0, 100) bisection to the float64 spacing of 0.5 needs about 60 halvings."""
+    res = sx.certified_root(lambda x: x**20 - 1e-6, jnp.asarray(50.0), bracket=(0.0, 100.0))
+    assert bool(res.converged)
+    assert int(res.iterations) <= 64
+    np.testing.assert_allclose(float(res.root), 1e-6 ** (1 / 20), rtol=1e-13)
+
+
+def test_start_outside_bracket_iterates_inside():
+    """(x - 5)(x + 0.5) from 5 with bracket (-1, 1): the bracketed root is -0.5."""
+    res = sx.certified_root(lambda x: (x - 5.0) * (x + 0.5), jnp.asarray(5.0), bracket=(-1.0, 1.0))
+    assert bool(res.converged)
+    np.testing.assert_allclose(float(res.root), -0.5, atol=1e-14)
+
+
+def test_zero_slope_start_keeps_a_finite_iterate():
+    """x^2 - 2 from 0: f'(0) = 0, the Newton step is infinite."""
+    res = sx.certified_root(lambda x: x**2 - 2.0, jnp.asarray(0.0))
+    assert np.isfinite(float(res.root))
+    assert not bool(res.converged)
+
+
+def test_user_solver_needs_tol():
+    with pytest.raises(ValueError, match="tol"):
+        sx.certified_root(lambda x: x - 1.0, jnp.asarray(0.0), solver=lambda f, x0: x0)
+
+
+@pytest.mark.parametrize("dp", [1.0 + 0.0j, 1.0j])
+def test_non_holomorphic_complex_scalar_derivative(dp):
+    """f = z conj(z) + z - p is not holomorphic; check dz/dp along dp by central differences."""
+    z0 = jnp.asarray(1.0 + 0.5j)
+    p0 = jnp.asarray(2.0 + 0.5j)
+
+    def solver(f, z):
+        # Newton on the real 2 x 2 system, independent of the code under test.
+        for _ in range(60):
+            v = jnp.array([z.real, z.imag])
+            jac = jax.jacfwd(lambda u: jnp.array([f(u[0] + 1j * u[1]).real, f(u[0] + 1j * u[1]).imag]))(v)
+            r = f(z)
+            d = jnp.linalg.solve(jac, jnp.array([r.real, r.imag]))
+            z = z - (d[0] + 1j * d[1])
+        return z
+
+    def root(p):
+        return sx.certified_root(lambda z: z * jnp.conj(z) + z - p, z0, solver=solver, tol=1e-12).root
+
+    h = 1e-6
+    fd = (root(p0 + h * dp) - root(p0 - h * dp)) / (2 * h)
+    tangent = jax.jvp(root, (p0,), (jnp.asarray(dp),))[1]
+    np.testing.assert_allclose(complex(tangent), complex(fd), atol=1e-8)
