@@ -937,7 +937,11 @@ def newton_krylov_root(
     :func:`certified_root`: ``residual`` is ``max |F(root)|``, ``converged``
     is the Newton stopping test, the root's derivative is NaN when it fails,
     and ``status`` is ``ROOT_MAX_ITER`` after ``max_steps`` updates and
-    ``ROOT_STAGNATED`` when the line search or GMRES stopped the iteration.
+    ``ROOT_STAGNATED`` when the iteration stopped before ``max_steps``:
+    the line search found no acceptable step (``x`` is kept), or an inner
+    GMRES did not converge (its step is taken and the iteration then stops,
+    as in :func:`newton_krylov`). A tangent GMRES that does not converge
+    leaves the status as it is and makes the derivative NaN.
     """
     if tangent_precond is None and precond is not None:
         tangent_precond = (precond, precond_transpose)

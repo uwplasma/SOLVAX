@@ -81,6 +81,13 @@ when `precond` is linear. `tangent_precond` overrides it. Status, residual
 unknowns and `M` the inverse Laplacian, the gradient in `(lam, c)` agrees with
 central differences to 6.4e-9 and with the dense implicit derivative to 4.6e-13.
 Arrays only, no pytrees.
+A forward solve that converges with a tangent GMRES that does not
+(`dense_limit=0, tangent_restart=1, tangent_max_restarts=0`) gives a NaN
+gradient where the default tangent gives a finite one. A loop that takes the
+full step when no halving passes cannot adopt `line_search=True` as is: this
+search stops with `ROOT_STAGNATED`, so such a loop keeps its own fallback.
+Damping on Deuflhard's natural monotonicity test is a different criterion and
+is not provided.
 
 For large PDE or kinetic systems, `precond=` should approximate the inverse
 Jacobian action using inexpensive problem structure. Jacobian-free products

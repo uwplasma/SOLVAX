@@ -97,12 +97,32 @@ def test_unconverged_root_reports_status_and_nan_derivative():
     assert int(stalled.status) == sx.ROOT_STAGNATED
 
 
+def test_unconverged_inner_gmres_stops_with_stagnated_status():
+    def f(x):
+        return x**3 + 0.1 * jnp.roll(x, 1) - jnp.linspace(1.0, 8.0, 30)
+
+    res = sx.newton_krylov_root(
+        f, jnp.ones(30), linear_restart=1, linear_max_restarts=1, linear_rtol=1e-12
+    )
+    assert int(res.iterations) == 1 and int(res.status) == sx.ROOT_STAGNATED
+
+
+def test_unconverged_tangent_gmres_gives_nan_gradient():
+    def loss(p, **kw):
+        f = lambda x: x**3 + 0.1 * jnp.roll(x, 1) - p * jnp.linspace(1.0, 8.0, 30)  # noqa: E731
+        return jnp.sum(sx.newton_krylov_root(f, jnp.ones(30), rtol=1e-12, **kw).root)
+
+    starved = dict(dense_limit=0, tangent_restart=1, tangent_max_restarts=0, tangent_rtol=1e-14)
+    assert np.isfinite(float(jax.grad(loss)(1.0)))
+    assert np.isnan(float(jax.grad(lambda p: loss(p, **starved))(1.0)))
+
+
 def test_jit_and_vmap():
     lams = jnp.array([0.5, 1.0, 2.0])
     batched = jax.jit(jax.vmap(lambda lam: _root(lam, 0.0).root))(lams)
     for i, lam in enumerate(lams):
-        # Batched GMRES sums differently; both roots meet atol 1e-8, |du| ~ 1e-9.
-        np.testing.assert_allclose(batched[i], _root(lam, 0.0).root, rtol=1e-9)
+        # Batched GMRES sums in another order, so compare by the stopping test.
+        assert float(jnp.linalg.norm(_bratu(lam, 0.0)(batched[i]))) <= 1e-8
     grads = jax.jit(jax.vmap(jax.grad(lambda lam: H * jnp.sum(_root(lam, 0.0).root))))(lams)
     assert np.all(np.isfinite(np.asarray(grads))) and np.all(np.diff(np.asarray(grads)) > 0)
 
