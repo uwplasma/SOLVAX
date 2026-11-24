@@ -208,3 +208,53 @@ def test_non_holomorphic_complex_scalar_derivative(dp):
     fd = (root(p0 + h * dp) - root(p0 - h * dp)) / (2 * h)
     tangent = jax.jvp(root, (p0,), (jnp.asarray(dp),))[1]
     np.testing.assert_allclose(complex(tangent), complex(fd), atol=1e-8)
+
+
+_N = 1200  # above DENSE_TANGENT_LIMIT, so the default tangent is GMRES
+
+
+def _adv_certified(p, **kw):
+    """Certified root of A x + 10 x^3 = 10 p b, A advection-diffusion (Peclet 50, cond ~1e6)."""
+    h = 1.0 / (_N + 1)
+    one = np.ones(_N - 1)
+    d2 = (np.diag(-2 * np.ones(_N)) + np.diag(one, 1) + np.diag(one, -1)) / h**2
+    a = jnp.asarray(-d2 + 50.0 * (np.diag(one, 1) - np.diag(one, -1)) / (2 * h))
+    b = jnp.linspace(0.5, 1.5, _N)
+
+    def solver(f, x0):
+        def step(_, x):
+            return x - jnp.linalg.solve(a + 30.0 * jnp.diag(x**2), f(x))
+
+        return jax.lax.fori_loop(0, 8, step, x0)
+
+    f = lambda x: a @ x + 10.0 * x**3 - 10.0 * p * b  # noqa: E731
+    return sx.certified_root(f, jnp.zeros(_N), solver=solver, tol=1e-8, **kw), a
+
+
+def test_certified_vector_root_forwards_the_tangent_preconditioner():
+    """Unpreconditioned GMRES tangent is NaN; with M = A^{-1} it matches the dense tangent."""
+    p = jnp.asarray(1.0)
+    base, a = _adv_certified(p)
+    lu = jax.scipy.linalg.lu_factor(a)
+    pair = (lambda v: jax.scipy.linalg.lu_solve(lu, v),
+            lambda v: jax.scipy.linalg.lu_solve(lu, v, trans=1))
+    dense = jax.jvp(lambda q: _adv_certified(q, dense_limit=_N)[0].root, (p,), (1.0,))[1]
+    nan = jax.jvp(lambda q: _adv_certified(q)[0].root, (p,), (1.0,))[1]
+    assert np.all(np.isnan(np.asarray(nan)))
+    for pc in (pair, lambda x: pair):
+        res = _adv_certified(p, tangent_precond=pc, tangent_rtol=1e-12)[0]
+        assert bool(res.converged) and int(res.status) == sx.ROOT_CONVERGED
+        assert float(res.residual) == float(base.residual)
+        tangent = jax.jvp(
+            lambda q, pc=pc: _adv_certified(q, tangent_precond=pc)[0].root, (p,), (1.0,)
+        )[1]
+        np.testing.assert_allclose(tangent, dense, rtol=1e-8, atol=1e-12)
+        grad = jax.grad(
+            lambda q, pc=pc: jnp.sum(_adv_certified(q, tangent_precond=pc)[0].root)
+        )(p)
+        np.testing.assert_allclose(grad, jnp.sum(dense), rtol=1e-8)
+
+
+def test_scalar_root_refuses_a_tangent_preconditioner():
+    with pytest.raises(ValueError, match="scalar"):
+        sx.certified_root(lambda x: x**2 - 2.0, jnp.asarray(1.0), tangent_precond=(None, None))

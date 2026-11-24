@@ -747,6 +747,10 @@ def certified_root(
     damped: bool = True,
     tangent_solve: Callable | None = None,
     dense_limit: int = DENSE_TANGENT_LIMIT,
+    tangent_precond: tuple | Callable | None = None,
+    tangent_rtol: float | None = None,
+    tangent_restart: int | None = None,
+    tangent_max_restarts: int = 40,
 ) -> RootResult:
     """Root of ``f`` with its residual and status; the derivative is NaN unless converged.
 
@@ -785,7 +789,12 @@ def certified_root(
             finite the root is converged only if ``f(x) == 0``.
         max_iter: built-in iteration limit (static).
         damped: halve Newton steps that do not lower ``|f|`` (no bracket).
-        tangent_solve, dense_limit: as in :func:`root_solve`.
+        tangent_solve, dense_limit, tangent_precond, tangent_rtol,
+            tangent_restart, tangent_max_restarts: as in :func:`root_solve`.
+            The GMRES keywords apply to vector roots; a scalar root's
+            tangent is a division (a 2 x 2 solve if complex), so a scalar
+            start with ``tangent_precond`` raises and the other three are
+            unused.
 
     Returns:
         :class:`RootResult` with ``status`` one of ``ROOT_CONVERGED``,
@@ -799,6 +808,8 @@ def certified_root(
         raise ValueError("certified_root with solver= needs an explicit tol on max |f(root)|")
     if solver is None and x0.ndim:
         raise ValueError("the built-in solver is scalar; pass solver= for a vector root")
+    if tangent_precond is not None and not x0.ndim:
+        raise ValueError("tangent_precond applies to vector roots, not to a scalar start")
     if tol is None:
         eps = 100 * jnp.finfo(x0.dtype).eps
 
@@ -822,11 +833,14 @@ def certified_root(
         def solve(g, x):
             return solver(g, x), jnp.full((2,), -1.0, jnp.abs(x0).dtype)
 
-    if tangent_solve is None:
-        tangent_solve = partial(_default_tangent_solve, dense_limit=dense_limit)
-        if jnp.iscomplexobj(x0) and x0.ndim == 0:
-            tangent_solve = partial(_complex_scalar_tangent, dense_limit=dense_limit)
-    x, aux = jax.lax.custom_root(f, x0, solve, tangent_solve, has_aux=True)
+    if tangent_solve is None and jnp.iscomplexobj(x0) and x0.ndim == 0:
+        tangent_solve = partial(_complex_scalar_tangent, dense_limit=dense_limit)
+    x, aux = root_solve(
+        f, x0, solve, tangent_solve=tangent_solve, dense_limit=dense_limit,
+        tangent_precond=tangent_precond, tangent_rtol=tangent_rtol,
+        tangent_restart=tangent_restart, tangent_max_restarts=tangent_max_restarts,
+        has_aux=True,
+    )
     iterations, status = jax.lax.stop_gradient(aux).astype(jnp.int32)
     xs = jax.lax.stop_gradient(x)
     fr = f(xs)
