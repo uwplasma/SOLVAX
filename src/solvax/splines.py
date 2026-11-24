@@ -38,6 +38,7 @@ non-periodic spline continues the cubic of the end interval. Everything is
 written in ``jax.numpy`` and the tridiagonal solves of :mod:`solvax.tridiagonal`,
 so fit and evaluation compose with ``jit``, ``vmap``, ``jvp`` and ``grad`` with
 respect to the knots, the data and the evaluation points.
+:func:`cubic_spline_integrate` gives the exact integral between two limits.
 
 Knots must be real and strictly increasing; this is checked when ``x`` is
 concrete and not inside a trace, where repeated or unsorted knots give NaN or
@@ -56,7 +57,7 @@ import numpy as np
 
 from solvax.tridiagonal import cyclic_tridiagonal_solve, tridiagonal_solve
 
-__all__ = ["CubicSpline", "cubic_spline", "cubic_spline_evaluate"]
+__all__ = ["CubicSpline", "cubic_spline", "cubic_spline_evaluate", "cubic_spline_integrate"]
 
 _BCS = ("not-a-knot", "natural", "clamped", "periodic")
 
@@ -232,3 +233,30 @@ def _locate(spline: CubicSpline, points):
     c2 = (3.0 * delta - 2.0 * s0 - s1) / h
     c3 = (s0 + s1 - 2.0 * delta) / (h * h)
     return i, u, (y0, s0, c2, c3)
+
+
+def _antiderivative(spline: CubicSpline, points) -> jax.Array:
+    """Integral from ``x[0]``: whole intervals, the partial one, and whole periods."""
+    x, period = spline.x, spline.period
+    p = jnp.asarray(points, x.dtype)
+    _, _, coef = _locate(spline, x[:-1])
+    h = _column(jnp.diff(x), spline.y.ndim)
+    full = sum(c * h ** (k + 1) / (k + 1) for k, c in enumerate(coef))
+    prefix = jnp.concatenate([jnp.zeros_like(full[:1]), jnp.cumsum(full, axis=0)])
+    i, u, coef = _locate(spline, p)
+    partial = sum(c * u ** (k + 1) / (k + 1) for k, c in enumerate(coef))
+    turns = jnp.where(period > 0, jnp.floor((p - x[0]) / jnp.where(period > 0, period, 1.0)), 0)
+    return prefix[i] + partial + _column(turns, partial.ndim) * prefix[-1]
+
+
+def cubic_spline_integrate(spline: CubicSpline, a: jax.Array, b: jax.Array) -> jax.Array:
+    """Exact integral of the spline from ``a`` to ``b`` (negative when ``a > b``).
+
+    ``a`` and ``b`` broadcast together; the result has their shape plus the
+    batch shape. Limits outside the knots integrate the extrapolated end
+    cubics, or whole periods of a periodic spline. A definite integral is
+    returned rather than an antiderivative because the latter needs a base
+    point; ``a = x[0]`` gives the cumulative integral.
+    """
+    a, b = jnp.broadcast_arrays(jnp.asarray(a, spline.x.dtype), jnp.asarray(b, spline.x.dtype))
+    return _antiderivative(spline, b) - _antiderivative(spline, a)

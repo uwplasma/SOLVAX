@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `cubic_spline_integrate(spline, a, b)`: exact integral of a cubic spline between limits, with whole periods for a periodic spline and the end cubics beyond the knots. With `a = x[0]` it is the cumulative integral that the VMEX profile spline computes; it equals that copy to 2.2e-16 and SciPy's `CubicSpline.integrate` to 1e-12.
 - `cubic_spline` and `cubic_spline_evaluate` (new module `solvax.splines`): cubic interpolating splines on non-uniform knots with not-a-knot, natural, clamped or periodic ends, or Fritsch-Carlson monotone slopes, and their value, first and second derivative. Data may be complex on real knots; a periodic fit ignores `y[-1]`; concrete knots must be strictly increasing. The slopes come from one `tridiagonal_solve` (one `cyclic_tridiagonal_solve` when periodic); trailing axes of the data are fitted together. Agrees with SciPy's `CubicSpline` and `PchipInterpolator` to 1e-12 on the tested grids (to 1e-9 when knot spacings differ by 1e6, from the conditioning of the slope system) and differentiates with respect to knots, data and points.
 
 ## 0.36.2 - 2026-11-12
