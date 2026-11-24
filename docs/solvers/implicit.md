@@ -51,6 +51,37 @@ systems to terminal accuracy while tightening the inner tolerance as the
 nonlinear residual contracts. `forcing_gamma`, `forcing_alpha`, and
 `forcing_max` control the choice-2 formula; the maximum must remain below one.
 
+`line_search=True` backtracks each step on the residual norm: the step `s`
+of forcing `eta` is halved, and `eta <- 1 - (1 - eta)/2`, until
+`norm(F(x + s)) <= [1 - t (1 - eta)] norm(F(x))` with `t = armijo = 1e-4`
+(Algorithm INB of Eisenstat and Walker, SIAM J. Optim. 4, 393 (1994); the
+condition is eq. (2.5) of Pawlowski, Shadid, Simonis and Walker, SIAM Rev. 48,
+700 (2006)). A full step that passes is taken unchanged, so a problem whose
+full steps all pass gives the same iterates bit for bit. After
+`max_backtracks` halvings without a pass the iteration stops unconverged with
+`newton_iterations < max_steps`. On `arctan(x - b) = 0` with 50 unknowns
+started 2 to the right of the root, plain Newton diverges (final residual norm
+11.1) and the line search converges in 5 steps. It is not available with
+`fixed_work=True`.
+
+`newton_krylov_root` returns a `RootResult` whose root is differentiable by the
+implicit rule of `root_solve` (the Newton iterations are not differentiated;
+`jax.grad` through `newton_krylov` itself raises in its `while_loop`):
+
+```python
+res = sx.newton_krylov_root(residual, x0, precond=m, precond_transpose=m_t,
+                            atol=1e-8, rtol=0.0, line_search=True)
+```
+
+A forward `precond` also preconditions the GMRES tangent, so reverse mode
+needs `precond_transpose` (`v -> M^{-T} v`), or `jax.linear_transpose(precond)`
+when `precond` is linear. `tangent_precond` overrides it. Status, residual
+`max |F|` and the NaN derivative of an unconverged root follow
+`certified_root`. On the 1-D Bratu problem `-u'' = lam exp(u) + c` with 1000
+unknowns and `M` the inverse Laplacian, the gradient in `(lam, c)` agrees with
+central differences to 6.4e-9 and with the dense implicit derivative to 4.6e-13.
+Arrays only, no pytrees.
+
 For large PDE or kinetic systems, `precond=` should approximate the inverse
 Jacobian action using inexpensive problem structure. Jacobian-free products
 remove matrix storage, but do not by themselves make Krylov convergence
@@ -293,6 +324,7 @@ branch. It should not be used to claim differentiability across a branch jump.
 ## API summary
 
 - {func}`solvax.implicit.newton_krylov`
+- {func}`solvax.implicit.newton_krylov_root`
 - {func}`solvax.implicit.linear_solve`
 - {func}`solvax.implicit.recycled_linear_solve`
 - {func}`solvax.implicit.root_solve`

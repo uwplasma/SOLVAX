@@ -100,6 +100,9 @@ def newton_krylov(
     forcing_alpha: float = 2.0,
     forcing_max: float = 0.9,
     fixed_work: bool = False,
+    line_search: bool = False,
+    max_backtracks: int = 20,
+    armijo: float = 1e-4,
 ) -> NewtonKrylovSolution:
     """Solve a nonlinear system with matrix-free Newton--GMRES.
 
@@ -137,7 +140,17 @@ def newton_krylov(
             inner GMRES slots, masking updates after convergence. This uses
             reverse-mode-compatible ``scan`` control flow for bounded-cost
             embedding in an outer scan. The default early-exit path is
-            unchanged.
+            unchanged. Exclusive with ``line_search``.
+        line_search: backtrack each step ``s`` of forcing ``eta`` by halving
+            until ``norm(F(x + s)) <= [1 - armijo (1 - eta)] norm(F(x))``,
+            updating ``eta <- 1 - (1 - eta) / 2`` with each halving
+            (Algorithm INB of Eisenstat and Walker 1994; condition (2.5) of
+            Pawlowski et al. 2006, with ``theta = 1/2``). A full step that
+            passes is taken unchanged. After ``max_backtracks`` halvings
+            without a pass the iteration stops at ``x`` unconverged, with
+            ``newton_iterations`` below ``max_steps``.
+        max_backtracks: halvings per Newton step (static).
+        armijo: the sufficient-decrease fraction ``t``.
 
     Returns:
         A :class:`NewtonKrylovSolution` with the final iterate and diagnostics.
@@ -145,8 +158,16 @@ def newton_krylov(
     References:
         S. C. Eisenstat and H. F. Walker, "Choosing the Forcing Terms in an
         Inexact Newton Method", SIAM J. Sci. Comput. 17, 16--32 (1996),
-        https://doi.org/10.1137/0917003.
+        https://doi.org/10.1137/0917003. S. C. Eisenstat and H. F. Walker,
+        "Globally Convergent Inexact Newton Methods", SIAM J. Optim. 4,
+        393--422 (1994), https://doi.org/10.1137/0804022. R. P. Pawlowski,
+        J. N. Shadid, J. P. Simonis and H. F. Walker, "Globalization
+        Techniques for Newton--Krylov Methods and Applications to the
+        Fully Coupled Solution of the Navier--Stokes Equations", SIAM Rev.
+        48, 700--721 (2006), eq. (2.5).
     """
+    if line_search and fixed_work:
+        raise ValueError("line_search uses a while_loop: not with fixed_work")
     if forcing not in ("constant", "eisenstat_walker"):
         raise ValueError(
             "forcing must be 'constant' or 'eisenstat_walker', "
@@ -222,17 +243,46 @@ def newton_krylov(
                 max_restarts=linear_max_restarts,
                 fixed_work=fixed_work,
             )
-            next_x = jax.tree.map(
-                lambda value, step: value + step, x, linear_solution.x
-            )
+            if not line_search:
+                next_x = jax.tree.map(
+                    lambda value, step: value + step, x, linear_solution.x
+                )
+                taken, stop = jnp.int32(1), jnp.array(False)
+            else:
+
+                def trial(theta):
+                    return jax.tree.map(
+                        lambda value, step: value + theta * step, x, linear_solution.x
+                    )
+
+                def failing(c):
+                    theta, eta, k, trial_norm = c
+                    bound = (1 - armijo * (1 - eta)) * residual_norm
+                    return (k < max_backtracks) & ~(trial_norm <= bound)
+
+                def halve(c):
+                    theta, eta, k, _ = c
+                    theta, eta = 0.5 * theta, 1 - 0.5 * (1 - eta)
+                    return theta, eta, k + 1, norm(residual_fn(trial(theta)))
+
+                one = jnp.ones((), residual_norm.dtype)
+                theta, eta, _, trial_norm = jax.lax.while_loop(
+                    failing, halve,
+                    (one, current_forcing, jnp.int32(0), norm(residual_fn(trial(one)))),
+                )
+                ok = trial_norm <= (1 - armijo * (1 - eta)) * residual_norm
+                next_x = jax.tree.map(
+                    lambda new, old: jnp.where(ok, new, old), trial(theta), x
+                )
+                taken, stop = ok.astype(jnp.int32), ~ok
             return (
                 next_x,
                 residual_norm,
                 current_forcing,
-                newton_iterations + 1,
+                newton_iterations + taken,
                 linear_iterations + linear_solution.iterations,
                 linear_converged & linear_solution.converged,
-                jnp.array(False),
+                stop,
             )
 
         def finish_fn(_):
@@ -853,4 +903,62 @@ def certified_root(
     status = jnp.where(converged, ROOT_CONVERGED, jnp.where(status < 0, ROOT_STAGNATED, status))
     status = jnp.where(~converged & (status == ROOT_CONVERGED), ROOT_STAGNATED, status)
     status = status.astype(jnp.int32)
+    return RootResult(_nan_unless(x, converged), residual, iterations, converged, status)
+
+
+def newton_krylov_root(
+    residual_fn: Callable[[jax.Array], jax.Array],
+    x0: jax.Array,
+    *,
+    precond: Callable[[jax.Array], jax.Array] | None = None,
+    precond_transpose: Callable[[jax.Array], jax.Array] | None = None,
+    tangent_precond: tuple | Callable | None = None,
+    tangent_rtol: float | None = None,
+    tangent_restart: int | None = None,
+    tangent_max_restarts: int = 40,
+    dense_limit: int = DENSE_TANGENT_LIMIT,
+    **newton_options: Any,
+) -> RootResult:
+    """:func:`newton_krylov` whose root is differentiable by the implicit rule.
+
+    The Newton iterations are not differentiated: the root goes through
+    :func:`root_solve`, so ``jax.grad``, ``jvp``, ``vmap`` and higher
+    derivatives work with the parameters closed over by ``residual_fn``. A
+    forward ``precond`` (``v -> M^{-1} v``, fixed, not state dependent) also
+    preconditions the GMRES tangent; reverse mode then needs
+    ``precond_transpose`` (``v -> M^{-T} v``), else ``jax.linear_transpose``
+    of ``precond``, which must be linear. ``tangent_precond`` (a pair or a
+    factory of the root, as in :func:`root_solve`) overrides that. Without
+    either, the tangent is the default of :func:`root_solve` (dense up to
+    ``dense_limit``, unpreconditioned GMRES above).
+
+    Arrays only. ``newton_options`` go to :func:`newton_krylov` (``rtol``,
+    ``max_steps``, ``line_search``, ...). The result follows
+    :func:`certified_root`: ``residual`` is ``max |F(root)|``, ``converged``
+    is the Newton stopping test, the root's derivative is NaN when it fails,
+    and ``status`` is ``ROOT_MAX_ITER`` after ``max_steps`` updates and
+    ``ROOT_STAGNATED`` when the line search or GMRES stopped the iteration.
+    """
+    if tangent_precond is None and precond is not None:
+        tangent_precond = (precond, precond_transpose)
+    max_steps = newton_options.get("max_steps", 20)
+
+    def solve(f, x):
+        sol = newton_krylov(f, x, precond=precond, **newton_options)
+        info = jnp.stack([sol.newton_iterations, sol.converged & jnp.all(jnp.isfinite(sol.x))])
+        return sol.x, info.astype(jnp.abs(sol.x).dtype)
+
+    x, info = root_solve(
+        residual_fn, jnp.asarray(x0), solve, dense_limit=dense_limit,
+        tangent_precond=tangent_precond, tangent_rtol=tangent_rtol,
+        tangent_restart=tangent_restart, tangent_max_restarts=tangent_max_restarts,
+        has_aux=True,
+    )
+    iterations, ok = jax.lax.stop_gradient(info)
+    converged = ok > 0
+    iterations = iterations.astype(jnp.int32)
+    status = jnp.where(
+        converged, ROOT_CONVERGED, jnp.where(iterations >= max_steps, ROOT_MAX_ITER, ROOT_STAGNATED)
+    ).astype(jnp.int32)
+    residual = jnp.max(jnp.abs(residual_fn(jax.lax.stop_gradient(x))))
     return RootResult(_nan_unless(x, converged), residual, iterations, converged, status)

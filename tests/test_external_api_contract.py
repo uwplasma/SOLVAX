@@ -180,6 +180,7 @@ def test_exported_surface_is_stable():
         "gmres",
         "pcg",
         "newton_krylov",
+        "newton_krylov_root",
         "root_solve",
         "certified_root",
         "RootResult",
