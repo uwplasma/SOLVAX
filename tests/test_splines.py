@@ -24,6 +24,7 @@ from solvax import (
     cubic_spline_coefficients,
     cubic_spline_evaluate,
     cubic_spline_integrate,
+    piecewise_cubic_evaluate,
 )
 
 jax.config.update("jax_enable_x64", True)
@@ -353,7 +354,7 @@ def _block_errors(c, exact):
 
 
 @pytest.mark.parametrize("bc", ["not-a-knot", "natural", "clamped", "periodic", "monotone"])
-def test_coefficients_match_scipy_ppoly_and_the_knot_curvatures(bc):
+def test_coefficients_match_scipy_ppoly(bc):
     y = RNG.normal(size=(X.size, 2))
     if bc == "periodic":
         y[-1] = y[0]
@@ -361,28 +362,24 @@ def test_coefficients_match_scipy_ppoly_and_the_knot_curvatures(bc):
         spline, ref = cubic_spline(X, y, monotone=True), interpolate.PchipInterpolator(X, y)
     else:
         spline, ref = cubic_spline(X, y, bc=bc), interpolate.CubicSpline(X, y, bc_type=bc)
-    c = jax.jit(cubic_spline_coefficients)(spline)
+    c = jax.jit(cubic_spline_coefficients, static_argnames="monotone")(
+        spline, monotone=bc == "monotone"
+    )
     assert c.shape == ref.c.shape
     scale = np.abs(ref.c).max(axis=(1, 2), keepdims=True)
     np.testing.assert_allclose(c / scale, ref.c / scale, atol=1e-12)
-    if bc != "monotone":
-        knots = cubic_spline_evaluate(spline, X[:-1], derivative=2)
-        np.testing.assert_allclose(spline.curvatures[:-1], knots, atol=1e-10 * np.abs(knots).max())
 
 
 def test_coefficients_against_exact_arithmetic_on_a_fine_grid():
     """Data that vary over 500 knot spacings: the highest coefficient carries
     rounding of order eps (f / (h**3 f3)) in either form, f3 the third
     derivative; the moment form keeps the constant smaller."""
-    x = np.cumsum(np.r_[0.0, RNG.uniform(0.5, 1.5, 39)])
+    x = np.cumsum(np.r_[0.0, np.random.default_rng(11).uniform(0.5, 1.5, 39)])
     y = np.sin(0.002 * x) + 0.3 * np.cos(0.0014 * x)
     exact = _exact_natural([Fraction(v) for v in x], [Fraction(v) for v in y])
     spline = cubic_spline(x, y, bc="natural")
     chosen = _block_errors(cubic_spline_coefficients(spline), exact)
-    s, h, d = np.asarray(spline.slopes), np.diff(x), np.diff(y) / np.diff(x)
-    slope_form = _block_errors(
-        [(s[:-1] + s[1:] - 2 * d) / h**2, (3 * d - 2 * s[:-1] - s[1:]) / h, s[:-1], y[:-1]], exact
-    )
+    slope_form = _block_errors(cubic_spline_coefficients(spline, monotone=True), exact)
     assert np.all(chosen[:3] <= slope_form[:3]), (chosen, slope_form)
     assert chosen[0] < 1e-11 and chosen[1] < 2e-12 and chosen[2] < 1e-15, chosen
 
@@ -421,3 +418,42 @@ def test_coefficient_gradients_and_joint_evaluation():
     np.testing.assert_allclose(fused[1], joint[1], rtol=1e-14, atol=1e-14)
     with pytest.raises(ValueError, match="tuple"):
         cubic_spline_evaluate(spline, P, derivative=(0, 3))
+
+
+@pytest.mark.parametrize("bc", ["not-a-knot", "natural", "clamped", "periodic", "monotone"])
+@pytest.mark.parametrize("uniform", [False, True])
+def test_stored_coefficients_evaluate_as_the_spline(bc, uniform):
+    x = np.linspace(0.0, 2.0, 15) if uniform else X
+    y = RNG.normal(size=(x.size, 2))
+    if bc == "periodic":
+        y[-1] = y[0]
+    monotone = bc == "monotone"
+    spline = cubic_spline(x, y, monotone=True) if monotone else cubic_spline(x, y, bc=bc)
+    c = cubic_spline_coefficients(spline, monotone=monotone)
+    q = np.r_[P, x]  # inside, at the knots and beyond the ends
+    stored = jax.jit(
+        lambda c, q: piecewise_cubic_evaluate(
+            x, c, q, derivative=(0, 1, 2), uniform=uniform, periodic=bc == "periodic"
+        )
+    )(c, q)
+    for k, value in enumerate(stored):
+        ref = cubic_spline_evaluate(spline, q, derivative=k)
+        keep = slice(None, P.size) if (monotone and k == 2) else slice(None)  # C1: jumps at knots
+        np.testing.assert_allclose(value[keep], ref[keep], atol=1e-11 * (1 + np.abs(ref).max()))
+    periodic = bc == "periodic"
+    one = lambda c, p: piecewise_cubic_evaluate(x, c, p, uniform=uniform, periodic=periodic)[0]  # noqa: E731
+    gp = jax.vmap(jax.grad(one, argnums=1), (None, 0))(c, q[:5])
+    slope = cubic_spline_evaluate(spline, q[:5], derivative=1)[:, 0]
+    np.testing.assert_allclose(gp, slope, atol=1e-11 * (1 + np.abs(slope).max()))
+    v, eps = RNG.normal(size=c.shape), 1e-2  # linear in c: the difference is exact
+    gc = jax.grad(one)(c, 0.37)
+    fd = (one(c + eps * v, 0.37) - one(c - eps * v, 0.37)) / (2 * eps)
+    np.testing.assert_allclose(np.vdot(gc, v), fd, rtol=1e-8)
+    if uniform:
+        with pytest.raises(ValueError, match="equally spaced"):
+            piecewise_cubic_evaluate(
+                X, cubic_spline_coefficients(cubic_spline(X, X)), q, uniform=True
+            )
+    for bad in (True, 0.0, (1, False)):
+        with pytest.raises(ValueError, match="tuple"):
+            piecewise_cubic_evaluate(x, c, q, derivative=bad)
