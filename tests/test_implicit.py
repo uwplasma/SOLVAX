@@ -1017,3 +1017,69 @@ def test_root_solve_complex_preconditioned_tangent(adjoint):
     grad = jax.grad(lambda r: loss(r, tangent_precond=pair))(q)
     dense = jax.grad(lambda r: loss(r, dense_limit=2 * _N_ADV))(q)
     assert _rel(grad, dense) < 1e-9
+
+
+# A smaller nonsymmetric root whose operator and preconditioner both depend
+# on the differentiated parameter: f = (A0 + p B) x + 0.1 sin(p) x^3 - p c.
+_N_PAR = 20
+
+
+def _parametric(p):
+    rng = np.random.default_rng(3)
+    a0 = jnp.asarray(4.0 * np.eye(_N_PAR) + rng.standard_normal((_N_PAR, _N_PAR)) / 3)
+    b = jnp.asarray(rng.standard_normal((_N_PAR, _N_PAR)) / 10)
+    c = jnp.linspace(0.5, 1.5, _N_PAR)
+    return a0 + p * b, lambda x: (a0 + p * b) @ x + 0.1 * jnp.sin(p) * x**3 - p * c
+
+
+def _par_root(p, **kw):
+    a, f = _parametric(p)
+    return root_solve(f, jnp.zeros(_N_PAR), newton_solver, **kw)
+
+
+def _par_loss(p, **kw):
+    return jnp.sum(_par_root(p, **kw) ** 2)
+
+
+def test_root_solve_preconditioned_tangent_second_derivatives():
+    # GMRES at rtol 1e-12 on cond(J M) near 1 leaves ~1e-12 per solve; the
+    # central difference of the gradient with h = 1e-4 has truncation O(h^2).
+    a0, _ = _parametric(0.0)
+    kw = dict(tangent_precond=_lu_pair(a0), tangent_rtol=1e-12)
+    p = jnp.asarray(0.7)
+    dense = jax.grad(jax.grad(_par_loss))(p)
+    grad = jax.grad(lambda q: _par_loss(q, **kw))
+    fd = (grad(p + 1e-4) - grad(p - 1e-4)) / 2e-4
+    for hess in (jax.grad(grad), jax.jacfwd(grad), jax.jacrev(grad)):
+        assert np.isclose(float(hess(p)), float(dense), rtol=1e-9)
+        assert np.isclose(float(hess(p)), float(fd), rtol=1e-6)
+
+
+def test_root_solve_preconditioner_built_from_the_parameter():
+    # M built from p (pair) or from p and the root (factory) must give the
+    # derivative of a p-independent M: a converged tangent ignores M.
+    a0, _ = _parametric(0.0)
+    reference = dict(tangent_precond=_lu_pair(a0), tangent_rtol=1e-12)
+
+    def pair(q):
+        return dict(tangent_precond=_lu_pair(_parametric(q)[0]), tangent_rtol=1e-12)
+
+    def factory(q):
+        jac = lambda x: jax.jacfwd(_parametric(q)[1])(x)  # noqa: E731
+        return dict(tangent_precond=lambda x: _lu_pair(jac(x)), tangent_rtol=1e-12)
+
+    ps = jnp.array([0.3, 0.7])
+    ref_grad = jax.vmap(jax.grad(lambda q: _par_loss(q, **reference)))(ps)
+    for kw in (pair, factory):
+        grad = jax.jit(jax.vmap(jax.grad(lambda q, kw=kw: _par_loss(q, **kw(q)))))(ps)
+        assert np.allclose(np.asarray(grad), np.asarray(ref_grad), rtol=1e-9)
+        p = ps[1]
+        jvp = jax.jvp(lambda q, kw=kw: _par_root(q, **kw(q)), (p,), (1.0,))[1]
+        ref = jax.jvp(lambda q: _par_root(q, **reference), (p,), (1.0,))[1]
+        assert _rel(jvp, ref) < 1e-9
+
+
+def test_root_solve_nonlinear_preconditioner_needs_its_transpose():
+    a0, _ = _parametric(0.0)
+    with pytest.raises(ValueError, match="pass M_T"):
+        jax.grad(lambda q: _par_loss(q, tangent_precond=(jnp.tanh, None)))(0.7)

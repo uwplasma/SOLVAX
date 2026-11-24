@@ -48,7 +48,6 @@ from typing import Any, Literal, NamedTuple
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 
 from solvax.krylov import gmres
 from solvax.nonlinear import eisenstat_walker_forcing
@@ -494,7 +493,15 @@ def _default_tangent_solve(
         rtol = max(1e-10, 100 * float(jnp.finfo(y.dtype).eps))
     m, m_t = (None, None) if precond is None else precond
     if m is not None and m_t is None:
-        m_t = lambda v: jax.linear_transpose(m, v)(v)[0]  # noqa: E731
+
+        def m_t(v: jax.Array) -> jax.Array:
+            try:
+                return jax.linear_transpose(m, v)(v)[0]
+            except NotImplementedError as error:
+                raise ValueError(
+                    "tangent_precond: M is not linear, so M_T=None cannot "
+                    "transpose it; pass M_T"
+                ) from error
 
     def krylov(pc: Callable | None, matvec: Callable, b: jax.Array) -> jax.Array:
         sol = gmres(
@@ -506,45 +513,6 @@ def _default_tangent_solve(
     return jax.lax.custom_linear_solve(
         g, y, partial(krylov, m), transpose_solve=partial(krylov, m_t)
     )
-
-
-def _zero_tangent(value: jax.Array) -> jax.Array:
-    value = jnp.asarray(value)
-    if jnp.issubdtype(value.dtype, jnp.inexact):
-        return jnp.zeros_like(value)
-    return np.zeros(value.shape, jax.dtypes.float0)
-
-
-def _root_at(
-    f: Callable, x0: jax.Array, solver: Callable, tangent: Callable, has_aux: bool
-) -> Any:
-    """Root with a tangent ``tangent(g, y, x_root)`` that sees the root."""
-    f_closed, consts = jax.closure_convert(f, x0)
-
-    k = len(consts)
-
-    def solve(x0: jax.Array, *consts: Any) -> Any:
-        return solver(lambda x: f_closed(x, *consts), x0)
-
-    # Values the solver itself closes over carry no derivative, as in custom_root.
-    solve_closed, extra = jax.closure_convert(solve, x0, *consts)
-    run = jax.custom_jvp(solve_closed)
-
-    @run.defjvp
-    def _run_jvp(primals: tuple, tangents: tuple) -> tuple:
-        x0, *args = primals
-        out = solve_closed(x0, *args)
-        consts, dconsts = tuple(args[:k]), tuple(tangents[1 : 1 + k])
-        x = jax.lax.stop_gradient(out[0] if has_aux else out)
-        _, rhs = jax.jvp(lambda *c: f_closed(x, *c), consts, dconsts)
-
-        def g(v: jax.Array) -> jax.Array:
-            return jax.jvp(lambda u: f_closed(u, *consts), (x,), (v,))[1]
-
-        dx = tangent(g, -rhs, x)
-        return out, ((dx, jax.tree.map(_zero_tangent, out[1])) if has_aux else dx)
-
-    return run(x0, *consts, *extra)
 
 
 def root_solve(
@@ -614,7 +582,8 @@ def root_solve(
         tangent_max_restarts: GMRES cycles before the tangent is NaN.
         has_aux: ``solver`` returns ``(x_root, aux)`` and so does this
             function; ``aux`` (iterations, residual, status) carries a zero
-            derivative. Before JAX 0.7, give ``aux`` a floating dtype.
+            derivative. Before JAX 0.7 an integer or boolean ``aux`` fails
+            (in ``jax.lax.custom_root``): give it a floating dtype.
 
     Returns:
         The root ``x``, differentiable w.r.t. the parameters closed over by
@@ -636,8 +605,14 @@ def root_solve(
         tangent_precond if callable(tangent_precond)
         else lambda _: tuple(tangent_precond)
     )
-
-    def tangent(g: Callable, y: jax.Array, x: jax.Array) -> jax.Array:
-        return _default_tangent_solve(g, y, precond=factory(x), **options)
-
-    return _root_at(f, x0, solver, tangent, has_aux)
+    # Solve once for the root, build the pair there, then let custom_root
+    # differentiate (to any order) with a no-op solver returning that root.
+    # The pair enters custom_root's tangent as a constant, so derivatives of
+    # M (and of values it closes over) are not taken: a converged tangent
+    # does not depend on its preconditioner.
+    found = jax.lax.stop_gradient(
+        jax.lax.custom_root(f, x0, solver, lambda g, y: y, has_aux=has_aux)
+    )
+    precond = factory(found[0] if has_aux else found)
+    tangent = partial(_default_tangent_solve, precond=precond, **options)
+    return jax.lax.custom_root(f, x0, lambda *_: found, tangent, has_aux=has_aux)
