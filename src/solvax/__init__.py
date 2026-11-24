@@ -222,6 +222,7 @@ from solvax.splines import (
     CubicSpline,
     cubic_spline,
     cubic_spline_antiderivative,
+    cubic_spline_coefficients,
     cubic_spline_evaluate,
     cubic_spline_integrate,
 )
@@ -332,6 +333,7 @@ __all__ = [
     "cubic_spline_evaluate",
     "cubic_spline_integrate",
     "cubic_spline_antiderivative",
+    "cubic_spline_coefficients",
     "FixedPointSolution",
     "affine_fixed_point_gmres",
     "aitken_fixed_point",

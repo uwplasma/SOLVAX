@@ -11,6 +11,8 @@ J. Numer. Anal. 17 (1980) 238). SciPy's ``CubicSpline`` and
 
 from __future__ import annotations
 
+from fractions import Fraction
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -19,6 +21,7 @@ import pytest
 from solvax import (
     cubic_spline,
     cubic_spline_antiderivative,
+    cubic_spline_coefficients,
     cubic_spline_evaluate,
     cubic_spline_integrate,
 )
@@ -316,3 +319,105 @@ def test_antiderivative_is_the_integral_from_the_first_knot(bc):
     np.testing.assert_allclose(scalar(q), F(spline, q)[:, 0], atol=1e-14)
     slope = jax.vmap(jax.grad(lambda p: cubic_spline_antiderivative(spline, p)[1]))(q)
     np.testing.assert_allclose(slope, cubic_spline_evaluate(spline, q)[:, 1], atol=1e-13)
+
+
+def _exact_natural(x, y):
+    """Natural-spline power coefficients in exact rational arithmetic (moment form)."""
+    n = len(x)
+    h = [x[i + 1] - x[i] for i in range(n - 1)]
+    d = [(y[i + 1] - y[i]) / h[i] for i in range(n - 1)]
+    lower, diag, upper = [Fraction(0)] * n, [Fraction(1)] * n, [Fraction(0)] * n
+    rhs = [Fraction(0)] * n
+    for i in range(1, n - 1):
+        lower[i], diag[i], upper[i] = h[i - 1], 2 * (h[i - 1] + h[i]), h[i]
+        rhs[i] = 6 * (d[i] - d[i - 1])
+    for i in range(1, n):
+        w = lower[i] / diag[i - 1]
+        diag[i] -= w * upper[i - 1]
+        rhs[i] -= w * rhs[i - 1]
+    m = [Fraction(0)] * n
+    m[-1] = rhs[-1] / diag[-1]
+    for i in range(n - 2, -1, -1):
+        m[i] = (rhs[i] - upper[i] * m[i + 1]) / diag[i]
+    return [
+        [(m[i + 1] - m[i]) / (6 * h[i]) for i in range(n - 1)],
+        [m[i] / 2 for i in range(n - 1)],
+        [d[i] - h[i] * (2 * m[i] + m[i + 1]) / 6 for i in range(n - 1)],
+        [y[i] for i in range(n - 1)],
+    ]
+
+
+def _block_errors(c, exact):
+    exact = np.array([[float(v) for v in row] for row in exact])
+    return np.abs(np.asarray(c) - exact).max(axis=1) / np.abs(exact).max(axis=1)
+
+
+@pytest.mark.parametrize("bc", ["not-a-knot", "natural", "clamped", "periodic", "monotone"])
+def test_coefficients_match_scipy_ppoly_and_the_knot_curvatures(bc):
+    y = RNG.normal(size=(X.size, 2))
+    if bc == "periodic":
+        y[-1] = y[0]
+    if bc == "monotone":
+        spline, ref = cubic_spline(X, y, monotone=True), interpolate.PchipInterpolator(X, y)
+    else:
+        spline, ref = cubic_spline(X, y, bc=bc), interpolate.CubicSpline(X, y, bc_type=bc)
+    c = jax.jit(cubic_spline_coefficients)(spline)
+    assert c.shape == ref.c.shape
+    scale = np.abs(ref.c).max(axis=(1, 2), keepdims=True)
+    np.testing.assert_allclose(c / scale, ref.c / scale, atol=1e-12)
+    if bc != "monotone":
+        knots = cubic_spline_evaluate(spline, X[:-1], derivative=2)
+        np.testing.assert_allclose(spline.curvatures[:-1], knots, atol=1e-10 * np.abs(knots).max())
+
+
+def test_coefficients_against_exact_arithmetic_on_a_fine_grid():
+    """Data that vary over 500 knot spacings: the highest coefficient carries
+    rounding of order eps (f / (h**3 f3)) in either form, f3 the third
+    derivative; the moment form keeps the constant smaller."""
+    x = np.cumsum(np.r_[0.0, RNG.uniform(0.5, 1.5, 39)])
+    y = np.sin(0.002 * x) + 0.3 * np.cos(0.0014 * x)
+    exact = _exact_natural([Fraction(v) for v in x], [Fraction(v) for v in y])
+    spline = cubic_spline(x, y, bc="natural")
+    chosen = _block_errors(cubic_spline_coefficients(spline), exact)
+    s, h, d = np.asarray(spline.slopes), np.diff(x), np.diff(y) / np.diff(x)
+    slope_form = _block_errors(
+        [(s[:-1] + s[1:] - 2 * d) / h**2, (3 * d - 2 * s[:-1] - s[1:]) / h, s[:-1], y[:-1]], exact
+    )
+    assert np.all(chosen[:3] <= slope_form[:3]), (chosen, slope_form)
+    assert chosen[0] < 1e-11 and chosen[1] < 2e-12 and chosen[2] < 1e-15, chosen
+
+
+def test_tensor_product_cross_block_against_exact_arithmetic():
+    """Two natural splines in turn, as in NEO_JAX's spl2d. The bound 4.3e-10 on
+    the d_x^3 d_y^3 block, relative to its maximum, is the error of NEO_JAX's
+    own second-derivative code measured at frequency 0.01 against exact
+    arithmetic when the replacement was attempted."""
+    t = np.arange(24.0)
+    f = np.sin(0.01 * t[:, None] + 0.02 * t[None, :]) + np.cos(0.013 * t[:, None] * t[None, :])
+    along_x = cubic_spline_coefficients(cubic_spline(t, f, bc="natural"))  # (4, 23, 24)
+    both = cubic_spline_coefficients(cubic_spline(t, jnp.moveaxis(along_x, 2, 0), bc="natural"))
+    ft = [Fraction(v) for v in t]
+    rows = [_exact_natural(ft, [Fraction(v) for v in f[:, j]])[0] for j in range(t.size)]
+    cross = [_exact_natural(ft, [rows[j][i] for j in range(t.size)])[0] for i in range(t.size - 1)]
+    error = _block_errors(np.asarray(both[0, :, 0, :]).T, cross).max()
+    assert error < 4.3e-10, error
+
+
+def test_coefficient_gradients_and_joint_evaluation():
+    y = np.sin(X)
+    loss = lambda y: jnp.sum(cubic_spline_coefficients(cubic_spline(X, y)) ** 2)  # noqa: E731
+    v, eps = RNG.normal(size=X.size), 1e-6
+    fd = (loss(y + eps * v) - loss(y - eps * v)) / (2 * eps)
+    np.testing.assert_allclose(np.vdot(jax.grad(loss)(y), v), fd, rtol=1e-6)
+    batched = jax.vmap(lambda y: cubic_spline_coefficients(cubic_spline(X, y)))(
+        np.stack([y, 2 * y])
+    )
+    np.testing.assert_allclose(batched[1], 2 * batched[0], atol=1e-12)
+    spline = cubic_spline(X, RNG.normal(size=(X.size, 3)), bc="periodic")
+    joint = cubic_spline_evaluate(spline, P, derivative=(0, 1, 2))  # eager: same operations
+    for k, value in enumerate(joint):
+        np.testing.assert_array_equal(value, cubic_spline_evaluate(spline, P, derivative=k))
+    fused = jax.jit(lambda p: cubic_spline_evaluate(spline, p, derivative=(0, 1)))(P)
+    np.testing.assert_allclose(fused[1], joint[1], rtol=1e-14, atol=1e-14)
+    with pytest.raises(ValueError, match="tuple"):
+        cubic_spline_evaluate(spline, P, derivative=(0, 3))
