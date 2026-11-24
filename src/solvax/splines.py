@@ -57,7 +57,13 @@ import numpy as np
 
 from solvax.tridiagonal import cyclic_tridiagonal_solve, tridiagonal_solve
 
-__all__ = ["CubicSpline", "cubic_spline", "cubic_spline_evaluate", "cubic_spline_integrate"]
+__all__ = [
+    "CubicSpline",
+    "cubic_spline",
+    "cubic_spline_evaluate",
+    "cubic_spline_integrate",
+    "cubic_spline_antiderivative",
+]
 
 _BCS = ("not-a-knot", "natural", "clamped", "periodic")
 
@@ -235,8 +241,16 @@ def _locate(spline: CubicSpline, points):
     return i, u, (y0, s0, c2, c3)
 
 
-def _antiderivative(spline: CubicSpline, points) -> jax.Array:
-    """Integral from ``x[0]``: whole intervals, the partial one, and whole periods."""
+def cubic_spline_antiderivative(spline: CubicSpline, points: jax.Array) -> jax.Array:
+    """Integral of the spline from the first knot ``x[0]`` to each point.
+
+    It vanishes at ``x[0]`` and is negative for points below it. Beyond the
+    knots it integrates the end cubics; for a periodic spline it adds the
+    integral over one period for each whole period between ``x[0]`` and the
+    point. The result has shape ``points.shape + batch``; its derivative in
+    the points is the spline value. One evaluation, half the work of
+    ``cubic_spline_integrate(spline, x[0], points)``.
+    """
     x, period = spline.x, spline.period
     p = jnp.asarray(points, x.dtype)
     _, _, coef = _locate(spline, x[:-1])
@@ -261,4 +275,4 @@ def cubic_spline_integrate(spline: CubicSpline, a: jax.Array, b: jax.Array) -> j
     distance of its ends from ``x[0]`` loses digits to cancellation.
     """
     a, b = jnp.broadcast_arrays(jnp.asarray(a, spline.x.dtype), jnp.asarray(b, spline.x.dtype))
-    return _antiderivative(spline, b) - _antiderivative(spline, a)
+    return cubic_spline_antiderivative(spline, b) - cubic_spline_antiderivative(spline, a)

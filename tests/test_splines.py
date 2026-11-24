@@ -16,7 +16,12 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from solvax import cubic_spline, cubic_spline_evaluate, cubic_spline_integrate
+from solvax import (
+    cubic_spline,
+    cubic_spline_antiderivative,
+    cubic_spline_evaluate,
+    cubic_spline_integrate,
+)
 
 jax.config.update("jax_enable_x64", True)
 interpolate = pytest.importorskip("scipy.interpolate")
@@ -295,3 +300,19 @@ def test_cumulative_integral_equals_the_clamped_profile_formula():
     prefix = np.r_[0.0, np.cumsum([piece(k, h[k]) for k in range(h.size)])]
     reference = prefix[i] + piece(i, q - x[i])
     np.testing.assert_allclose(cubic_spline_integrate(spline, 0.0, q), reference, atol=1e-15)
+
+
+@pytest.mark.parametrize("bc", ["not-a-knot", "natural", "clamped", "periodic"])
+def test_antiderivative_is_the_integral_from_the_first_knot(bc):
+    y = RNG.normal(size=(X.size, 2))
+    if bc == "periodic":
+        y[-1] = y[0]
+    spline = cubic_spline(X, y, bc=bc)
+    q = np.r_[P, P + 5.0, P - 7.0] if bc == "periodic" else P  # outside the knots
+    F = jax.jit(cubic_spline_antiderivative)
+    np.testing.assert_allclose(F(spline, q), cubic_spline_integrate(spline, X[0], q), atol=1e-13)
+    np.testing.assert_allclose(F(spline, X[0]), 0.0, atol=0)
+    scalar = jax.vmap(lambda p: cubic_spline_antiderivative(spline, p)[0])
+    np.testing.assert_allclose(scalar(q), F(spline, q)[:, 0], atol=1e-14)
+    slope = jax.vmap(jax.grad(lambda p: cubic_spline_antiderivative(spline, p)[1]))(q)
+    np.testing.assert_allclose(slope, cubic_spline_evaluate(spline, q)[:, 1], atol=1e-13)
