@@ -210,14 +210,17 @@ def test_complex_data_on_real_knots_matches_scipy_parts():
 
 
 def test_periodic_ignores_last_value_and_knots_are_checked():
-    t = np.sort(np.r_[0.0, RNG.uniform(0, 1, 8), 1.0])
-    y = RNG.normal(size=t.size)
+    # Fixed knots and a generator of its own: the seam check below must not
+    # depend on which tests drew from the shared generator first.
+    t = np.array([0.0, 0.07, 0.2, 0.33, 0.5, 0.61, 0.78, 0.9, 1.0])
+    y = np.random.default_rng(11).normal(size=t.size)
     y[-1] = y[0] + 5.0  # ignored
     spline = cubic_spline(t, y, bc="periodic")
     y[-1] = y[0]
     ref = interpolate.CubicSpline(t, y, bc_type="periodic")
     for k in range(3):
-        left = cubic_spline_evaluate(spline, 1 - 1e-9, derivative=k)
+        # 1e-12 from the seam: the jump allowed is 1e-12 times the next derivative.
+        left = cubic_spline_evaluate(spline, 1 - 1e-12, derivative=k)
         np.testing.assert_allclose(
             left, cubic_spline_evaluate(spline, 0.0, derivative=k), atol=1e-6
         )
