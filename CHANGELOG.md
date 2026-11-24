@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `cubic_spline` and `cubic_spline_evaluate` (new module `solvax.splines`): cubic interpolating splines on non-uniform knots with not-a-knot, natural, clamped or periodic ends, or Fritsch-Carlson monotone slopes, and their value, first and second derivative. The slopes come from one `tridiagonal_solve` (one `cyclic_tridiagonal_solve` when periodic); trailing axes of the data are fitted together. Agrees with SciPy's `CubicSpline` and `PchipInterpolator` to 1e-12 and differentiates with respect to knots, data and points.
+
 ## 0.36.2 - 2026-11-12
 
 - `fast_diagonal`, `flux_form_operator` and `fast_diagonal_schur` take a `(lower, upper)` pair of `"dirichlet"` and `"neumann"` ends for an axis, such as `("neumann", "dirichlet")` for an inflow-outflow duct's pressure (#172). The axis is factored as before, with the half-cell Dirichlet face at one end only; one Dirichlet end makes the operator nonsingular, and `lift` takes each end's data by its own kind. Checked against the dense face-by-face assembly on stretched cells, forward and transposed, and the Schur multiplier on a periodic and a mixed axis against the dense staggered complement.
