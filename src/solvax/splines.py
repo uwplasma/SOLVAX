@@ -20,8 +20,9 @@ closed by the end condition:
   next-to-last knot; a cubic is reproduced exactly.
 - ``"natural"``: zero second derivative at both ends.
 - ``"clamped"``: the first derivative at the ends is ``end_slopes``.
-- ``"periodic"``: value, slope and curvature match across the seam; requires
-  ``y[0] == y[-1]`` and repeats with period ``x[-1] - x[0]``.
+- ``"periodic"``: value, slope and curvature match across the seam; ``y[-1]``
+  is ignored and taken as ``y[0]``, and the spline repeats with period
+  ``x[-1] - x[0]``.
 
 These are the conventions of :class:`scipy.interpolate.CubicSpline`, and the
 systems are its rows. ``monotone=True`` takes instead the Fritsch-Carlson
@@ -37,6 +38,12 @@ non-periodic spline continues the cubic of the end interval. Everything is
 written in ``jax.numpy`` and the tridiagonal solves of :mod:`solvax.tridiagonal`,
 so fit and evaluation compose with ``jit``, ``vmap``, ``jvp`` and ``grad`` with
 respect to the knots, the data and the evaluation points.
+
+Knots must be real and strictly increasing; this is checked when ``x`` is
+concrete and not inside a trace, where repeated or unsorted knots give NaN or
+an undefined result. Data may be complex (except with ``monotone=True``);
+the knots and points stay real. With knot spacings that differ by a factor
+of 1e6 the C2 slope systems lose about four digits (SciPy agrees to 1e-9).
 """
 
 from __future__ import annotations
@@ -45,6 +52,7 @@ from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from solvax.tridiagonal import cyclic_tridiagonal_solve, tridiagonal_solve
 
@@ -110,8 +118,7 @@ def cubic_spline(
         bc: ``"not-a-knot"``, ``"natural"``, ``"clamped"`` or ``"periodic"``.
             Not-a-knot needs ``n >= 4`` for a cubic: with three knots it is
             the parabola and with two the line through the data, as in SciPy.
-            Periodic needs ``n >= 4`` and ``y[0] == y[-1]`` (not checked, so
-            that it can be traced).
+            Periodic needs ``n >= 4`` and ignores ``y[-1]``.
         end_slopes: first derivative at ``x[0]`` and ``x[-1]`` for
             ``bc="clamped"``; scalars or arrays of the batch shape.
         monotone: Fritsch-Carlson (PCHIP) slopes instead of a C2 spline;
@@ -120,9 +127,20 @@ def cubic_spline(
     Returns:
         A :class:`CubicSpline` for :func:`cubic_spline_evaluate`.
     """
+    try:
+        concrete = np.asarray(x)
+    except jax.errors.TracerArrayConversionError:
+        concrete = None
+    if concrete is not None and not np.all(np.diff(concrete) > 0):
+        raise ValueError("knots must be strictly increasing")
     x = jnp.asarray(x)
-    dtype = jnp.result_type(x, y, float)
-    x, y = x.astype(dtype), jnp.asarray(y, dtype)
+    x = x.astype(jnp.result_type(x, float))
+    if jnp.iscomplexobj(x):
+        raise ValueError("knots must be real")
+    dtype = jnp.result_type(x, y)
+    y = jnp.asarray(y, dtype)
+    if monotone and jnp.iscomplexobj(y):
+        raise ValueError("monotone=True needs real data")
     n = x.shape[0]
     if x.ndim != 1 or y.shape[:1] != (n,):
         raise ValueError("x must be one-dimensional and y must have len(x) rows")
@@ -132,9 +150,11 @@ def cubic_spline(
         raise ValueError("monotone=True takes no boundary condition")
     if n < 2 or (bc == "periodic" and n < 4):
         raise ValueError(f"bc={bc!r} needs at least {4 if bc == 'periodic' else 2} knots")
+    if bc == "periodic":
+        y = y.at[-1].set(y[0])
     h = jnp.diff(x)
     d = jnp.diff(y, axis=0) / _column(h, y.ndim)
-    zero = jnp.zeros((), dtype)
+    zero = jnp.zeros((), x.dtype)
     if (n == 2 and bc != "clamped") or (n == 3 and bc == "not-a-knot" and not monotone):
         # Line or parabola through the data: its slope at a knot is a weighted secant.
         if n == 2:
@@ -191,21 +211,24 @@ def cubic_spline_evaluate(
     """
     if derivative not in (0, 1, 2):
         raise ValueError("derivative must be 0, 1 or 2")
-    x, y, s, period = spline
-    p = jnp.asarray(points, x.dtype)
-    has_period = period > 0
-    safe_period = jnp.where(has_period, period, 1.0)
-    p = jnp.where(has_period, x[0] + jnp.mod(p - x[0], safe_period), p)
-    i = jnp.clip(jnp.searchsorted(x, p, side="right") - 1, 0, x.shape[0] - 2)
-    batch = y.ndim - 1
-    h = _column(x[i + 1] - x[i], p.ndim + batch)
-    u = _column(p - x[i], p.ndim + batch)
-    y0, y1, s0, s1 = y[i], y[i + 1], s[i], s[i + 1]
-    delta = (y1 - y0) / h
-    c2 = (3.0 * delta - 2.0 * s0 - s1) / h
-    c3 = (s0 + s1 - 2.0 * delta) / (h * h)
+    i, u, (y0, s0, c2, c3) = _locate(spline, points)
     if derivative == 0:
         return y0 + u * (s0 + u * (c2 + u * c3))
     if derivative == 1:
         return s0 + u * (2.0 * c2 + 3.0 * u * c3)
     return 2.0 * c2 + 6.0 * u * c3
+
+
+def _locate(spline: CubicSpline, points):
+    """Interval index, offset and power coefficients at the (wrapped) points."""
+    x, y, s, period = spline
+    p = jnp.asarray(points, x.dtype)
+    p = jnp.where(period > 0, x[0] + jnp.mod(p - x[0], jnp.where(period > 0, period, 1.0)), p)
+    i = jnp.clip(jnp.searchsorted(x, p, side="right") - 1, 0, x.shape[0] - 2)
+    h = _column(x[i + 1] - x[i], y.ndim - 1 + p.ndim)
+    u = _column(p - x[i], y.ndim - 1 + p.ndim)
+    y0, y1, s0, s1 = y[i], y[i + 1], s[i], s[i + 1]
+    delta = (y1 - y0) / h
+    c2 = (3.0 * delta - 2.0 * s0 - s1) / h
+    c3 = (s0 + s1 - 2.0 * delta) / (h * h)
+    return i, u, (y0, s0, c2, c3)

@@ -192,3 +192,41 @@ def test_vmap_and_float32():
     assert v32.dtype == jnp.float32
     ref = interpolate.CubicSpline(X, ys[0], bc_type="natural")(P)
     np.testing.assert_allclose(v32, ref, atol=1e-4 * (1 + np.abs(ref).max()))
+
+
+def test_complex_data_on_real_knots_matches_scipy_parts():
+    y = np.exp(1j * X) + RNG.normal(size=X.size)
+    spline = cubic_spline(X, y, bc="natural")
+    assert spline.x.dtype == np.float64
+    for k in range(3):
+        v = np.asarray(cubic_spline_evaluate(spline, P, derivative=k))
+        for part in (np.real, np.imag):
+            ref = interpolate.CubicSpline(X, part(y), bc_type="natural")(P, k)
+            np.testing.assert_allclose(part(v), ref, atol=1e-12)
+    with pytest.raises(ValueError, match="real data"):
+        cubic_spline(X, y, monotone=True)
+    with pytest.raises(ValueError, match="real"):
+        cubic_spline(X + 0j, np.real(y))
+
+
+def test_periodic_ignores_last_value_and_knots_are_checked():
+    t = np.sort(np.r_[0.0, RNG.uniform(0, 1, 8), 1.0])
+    y = RNG.normal(size=t.size)
+    y[-1] = y[0] + 5.0  # ignored
+    spline = cubic_spline(t, y, bc="periodic")
+    y[-1] = y[0]
+    ref = interpolate.CubicSpline(t, y, bc_type="periodic")
+    for k in range(3):
+        left = cubic_spline_evaluate(spline, 1 - 1e-9, derivative=k)
+        np.testing.assert_allclose(
+            left, cubic_spline_evaluate(spline, 0.0, derivative=k), atol=1e-6
+        )
+        np.testing.assert_allclose(
+            cubic_spline_evaluate(spline, P, derivative=k), ref(P % 1, k), atol=1e-12
+        )
+    for bad in (X[::-1], np.r_[X[:3], X[2:]]):
+        for bc in ("not-a-knot", "natural", "clamped", "periodic"):
+            with pytest.raises(ValueError, match="increasing"):
+                cubic_spline(bad, np.zeros(bad.size), bc=bc)
+    traced = jax.jit(lambda x, y: cubic_spline_evaluate(cubic_spline(x, y), P))(X, np.sin(X))
+    np.testing.assert_allclose(traced, interpolate.CubicSpline(X, np.sin(X))(P), atol=1e-12)
