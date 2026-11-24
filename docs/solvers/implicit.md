@@ -219,6 +219,33 @@ def tangent_solve(jvp, rhs):
 
 To keep the dense tangent above the limit, pass `dense_limit=n`.
 
+The default GMRES tangent also takes a right preconditioner and its options,
+which avoids writing the wrapper above:
+
+```python
+root = sx.root_solve(f, x0, newton_solver, tangent_precond=(M, M_T))
+root = sx.root_solve(f, x0, newton_solver,
+                     tangent_precond=lambda x_root: build_pair(x_root),
+                     tangent_rtol=1e-10, tangent_restart=50,
+                     tangent_max_restarts=40)
+```
+
+`tangent_precond` is a pair of callables `v -> M^{-1} v` and
+`v -> M^{-T} v`, or a factory called once with the root, so a preconditioner
+built from the Jacobian at the root needs no second primal solve. Given, it
+selects the GMRES tangent at every size. `M_T` is used for the transposed
+system of reverse mode; `M_T=None` uses `jax.linear_transpose(M)`, so `M` must
+then be linear. For a complex root `M` acts on the complex vector, and `M_T` is
+its adjoint (conjugate transpose), because the tangent is the real `2n` system.
+On a nonsymmetric advection-diffusion root of 1200 unknowns with
+`cond(df/dx) = 7e4`, the unpreconditioned tangent is NaN, and
+`tangent_precond` with the LU of the linear part matches the dense tangent to
+2e-13 and central differences to 3e-10.
+
+With `has_aux=True` the solver returns `(root, aux)` and so does `root_solve`;
+`aux` (iterations, residual, status) has a zero derivative. Before JAX 0.7
+give it a floating dtype, as `certified_root` does.
+
 ## PCG-specific wrapper
 
 When the operator is HPD, `pcg_linear_solve` combines implicit gradients with

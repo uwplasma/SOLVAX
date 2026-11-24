@@ -868,3 +868,152 @@ def test_root_solve_non_holomorphic_complex_tangent(dense_limit):
     a, b = p.real / 1.2, p.imag / 0.8
     assert np.allclose(np.asarray(grad), np.asarray(2 * a / 1.2 - 2j * b / 0.8),
                        rtol=1e-9)
+
+
+# Preconditioned tangents. The residual f(x) = A x + 10 x^3 - 10 p b uses a
+# central-difference advection-diffusion operator A = -D2 + 50 D1 on 1200 cells:
+# nonsymmetric, cond(df/dx) = 7.0e4 at the root, and unpreconditioned GMRES(50)
+# does not reach 1e-10 in 40 cycles, so the default tangent is NaN. With
+# M = A^{-1} the preconditioned Jacobian is I + A^{-1} 30 diag(x^2), of
+# condition 1.002, so a residual below rtol = 1e-10 bounds the relative tangent
+# error by cond(J M) rtol ~ 1e-10: the tests allow 1e-9 against the dense one.
+# Central differences with h = 1e-4 have truncation O(h^2) = 1e-8 relative.
+_N_ADV = 1200
+
+
+def _advection_diffusion():
+    h = 1.0 / (_N_ADV + 1)
+    one = np.ones(_N_ADV - 1)
+    d2 = (np.diag(-2 * np.ones(_N_ADV)) + np.diag(one, 1) + np.diag(one, -1)) / h**2
+    d1 = (np.diag(one, 1) - np.diag(one, -1)) / (2 * h)
+    return jnp.asarray(-d2 + 50.0 * d1), jnp.linspace(0.5, 1.5, _N_ADV)
+
+
+def _lu_pair(matrix):
+    lu = jax.scipy.linalg.lu_factor(matrix)
+    return (lambda v: jax.scipy.linalg.lu_solve(lu, v),
+            lambda v: jax.scipy.linalg.lu_solve(lu, v, trans=1))
+
+
+def _adv_root(p, aux=False, **kw):
+    a, b = _advection_diffusion()
+
+    def solver(f, x0):
+        def step(_, x):
+            return x - jnp.linalg.solve(a + 30.0 * jnp.diag(x**2), f(x))
+        x = jax.lax.fori_loop(0, 8, step, x0)
+        return (x, jnp.linalg.norm(f(x))[None]) if aux else x
+
+    return root_solve(lambda x: a @ x + 10.0 * x**3 - 10.0 * p * b,
+                      jnp.zeros(_N_ADV), solver, has_aux=aux, **kw)
+
+
+def _rel(left, right):
+    return float(jnp.linalg.norm(left - right) / jnp.linalg.norm(right))
+
+
+def test_root_solve_preconditioned_tangent_on_an_ill_conditioned_root():
+    a, _ = _advection_diffusion()
+    pair = _lu_pair(a)
+    p = jnp.asarray(1.0)
+    dense = jax.jvp(lambda q: _adv_root(q, dense_limit=_N_ADV), (p,), (1.0,))[1]
+    assert np.all(np.isnan(np.asarray(jax.jvp(_adv_root, (p,), (1.0,))[1])))
+
+    def loss(q, **kw):
+        return jnp.sum(_adv_root(q, **kw) ** 2)
+
+    fd = (loss(p + 1e-4) - loss(p - 1e-4)) / 2e-4
+    for precond in (pair, (pair[0], None), lambda x: pair):
+        jvp = jax.jit(lambda q, pc=precond: jax.jvp(
+            lambda r: _adv_root(r, tangent_precond=pc), (q,), (1.0,))[1])
+        assert _rel(jvp(p), dense) < 1e-9
+        grad = jax.jit(jax.grad(lambda q, pc=precond: loss(q, tangent_precond=pc)))
+        assert np.isclose(float(grad(p)), float(fd), rtol=1e-6)
+    batched = jax.vmap(jax.grad(lambda q: loss(q, tangent_precond=pair)))(
+        jnp.array([0.5, 1.0]))
+    assert np.isclose(float(batched[1]), float(grad(p)), rtol=1e-9)
+
+
+def test_root_solve_precond_factory_receives_the_root():
+    a, _ = _advection_diffusion()
+    p = jnp.asarray(1.0)
+    dense = jax.jvp(lambda q: _adv_root(q, dense_limit=_N_ADV), (p,), (1.0,))[1]
+    # One GMRES iteration in one cycle: only the exact inverse of df/dx at
+    # the root solves the tangent; the same factory at x0 = 0 cannot.
+    one_step = dict(tangent_restart=1, tangent_max_restarts=1)
+
+    def exact(x):
+        return _lu_pair(a + 30.0 * jnp.diag(x**2))
+
+    tangent = jax.jvp(lambda q: _adv_root(q, tangent_precond=exact, **one_step),
+                      (p,), (1.0,))[1]
+    assert _rel(tangent, dense) < 1e-9
+    at_x0 = exact(jnp.zeros(_N_ADV))
+    stale = jax.jvp(lambda q: _adv_root(q, tangent_precond=at_x0, **one_step),
+                    (p,), (1.0,))[1]
+    assert np.all(np.isnan(np.asarray(stale)))
+
+
+def test_root_solve_tangent_keywords_are_honoured():
+    a, _ = _advection_diffusion()
+    p = jnp.asarray(1.0)
+    dense = jax.jvp(lambda q: _adv_root(q, dense_limit=_N_ADV), (p,), (1.0,))[1]
+    loose = jax.jvp(lambda q: _adv_root(q, tangent_precond=_lu_pair(a),
+                                        tangent_rtol=1e-3), (p,), (1.0,))[1]
+    assert 1e-8 < _rel(loose, dense) < 1e-2
+
+    def root(q, **kw):
+        f = lambda x: x**3 + 0.1 * jnp.roll(x, 1) - q  # noqa: E731
+        return root_solve(f, jnp.ones_like(q), newton_solver, dense_limit=0, **kw)
+
+    q = jnp.array([8.0, 27.0, 5.0])
+    assert np.all(np.isfinite(np.asarray(jax.jvp(root, (q,), (q,))[1])))
+    few = jax.jvp(lambda r: root(r, tangent_restart=1, tangent_max_restarts=1),
+                  (q,), (q,))[1]
+    assert np.all(np.isnan(np.asarray(few)))
+
+
+@pytest.mark.parametrize("precond", [False, True])
+def test_root_solve_has_aux_returns_aux_without_derivative(precond):
+    a, _ = _advection_diffusion()
+    kw = {"tangent_precond": _lu_pair(a)} if precond else {"dense_limit": _N_ADV}
+    p = jnp.asarray(1.0)
+    x, aux = jax.jit(lambda q: _adv_root(q, aux=True, **kw))(p)
+    assert np.allclose(np.asarray(x), np.asarray(_adv_root(p, **kw)), rtol=1e-12)
+    assert aux.shape == (1,) and float(aux[0]) < 1e-8
+    _, daux = jax.jvp(lambda q: _adv_root(q, aux=True, **kw)[1], (p,), (1.0,))
+    assert float(daux[0]) == 0.0
+    grad = jax.grad(lambda q: jnp.sum(_adv_root(q, aux=True, **kw)[1]))(p)
+    assert float(grad) == 0.0
+    batched = jax.vmap(lambda q: _adv_root(q, aux=True, **kw)[1])(jnp.array([0.5, 1.0]))
+    assert batched.shape == (2, 1)
+
+
+@pytest.mark.parametrize("adjoint", [True, False])
+def test_root_solve_complex_preconditioned_tangent(adjoint):
+    # f(z) = A z + 0.2 conj(z) - q is only R-linear; M = A^{-1} acts on the
+    # complex vector and M_T is its adjoint A^{-H} (or the linear transpose).
+    a, _ = _advection_diffusion()
+    lu = jax.scipy.linalg.lu_factor(a.astype(jnp.complex128))
+    m = lambda v: jax.scipy.linalg.lu_solve(lu, v)  # noqa: E731
+    m_h = lambda v: jax.scipy.linalg.lu_solve(lu, v, trans=2)  # noqa: E731
+    real = jnp.block([[a + 0.2 * jnp.eye(_N_ADV), jnp.zeros_like(a)],
+                      [jnp.zeros_like(a), a - 0.2 * jnp.eye(_N_ADV)]])
+
+    def solve(q):
+        u = jnp.linalg.solve(real, jnp.concatenate([q.real, q.imag]))
+        return u[:_N_ADV] + 1j * u[_N_ADV:]
+
+    def root(q, **kw):
+        return root_solve(lambda z: a @ z + 0.2 * jnp.conj(z) - q,
+                          jnp.zeros_like(q), lambda f, z0: solve(q), **kw)
+
+    q = jnp.linspace(0.5, 1.5, _N_ADV) * (1.0 + 0.5j)
+    t = jnp.ones(_N_ADV) * (0.3 - 1.0j)
+    pair = (m, m_h if adjoint else None)
+    tangent = jax.jvp(lambda r: root(r, tangent_precond=pair), (q,), (t,))[1]
+    assert _rel(tangent, solve(t)) < 1e-9
+    loss = lambda r, **kw: jnp.sum(jnp.abs(root(r, **kw)) ** 2)  # noqa: E731
+    grad = jax.grad(lambda r: loss(r, tangent_precond=pair))(q)
+    dense = jax.grad(lambda r: loss(r, dense_limit=2 * _N_ADV))(q)
+    assert _rel(grad, dense) < 1e-9
