@@ -256,7 +256,9 @@ def cubic_spline_integrate(spline: CubicSpline, a: jax.Array, b: jax.Array) -> j
     batch shape. Limits outside the knots integrate the extrapolated end
     cubics, or whole periods of a periodic spline. A definite integral is
     returned rather than an antiderivative because the latter needs a base
-    point; ``a = x[0]`` gives the cumulative integral.
+    point; ``a = x[0]`` gives the cumulative integral. The result is the
+    difference of two antiderivatives, so an interval much shorter than the
+    distance of its ends from ``x[0]`` loses digits to cancellation.
     """
     a, b = jnp.broadcast_arrays(jnp.asarray(a, spline.x.dtype), jnp.asarray(b, spline.x.dtype))
     return _antiderivative(spline, b) - _antiderivative(spline, a)
