@@ -545,7 +545,8 @@ def piecewise_bicubic_evaluate(
     j, v = _index(y, py, uniform[1], periodic[1])
     i, u, j, v = jnp.broadcast_arrays(i, u, j, v)
     batch = coefficients.shape[4:]
-    block = coefficients[:, i.ravel(), :, j.ravel()].reshape(u.size, 4, 4, -1)  # (m, a, b, k)
+    block = coefficients[:, i.ravel(), :, j.ravel()]  # (m, a, b, *batch)
+    block = block.reshape(u.size, 4, 4, np.prod(batch, dtype=int))
     along_x = {a: _horner(a, jnp.unstack(block, axis=1), u.reshape(-1, 1, 1)) for a, _ in pairs}
     values = tuple(
         _horner(b, jnp.unstack(along_x[a], axis=1), v.reshape(-1, 1)).reshape(u.shape + batch)

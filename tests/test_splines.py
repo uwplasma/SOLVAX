@@ -677,6 +677,8 @@ def test_tensor_spline_uniform_index_minimum_knots_and_errors():
     for bad in ((0, 3), (1,), 0):
         with pytest.raises(ValueError, match="pair"):
             piecewise_bicubic_evaluate(x, y, c, p, q, derivative=bad)
+    empty = piecewise_bicubic_evaluate(x, y, c[..., None], np.zeros((0, 3)), 0.5)
+    assert empty.shape == (0, 3, 1)
 
 
 def test_tensor_spline_derivatives_jit_and_vmap():
