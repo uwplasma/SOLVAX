@@ -247,6 +247,12 @@ With `has_aux=True` the solver returns `(root, aux)` and so does `root_solve`;
 `aux` (iterations, residual, status) has a zero derivative. Before JAX 0.7
 give it a floating dtype, as `certified_root` does.
 
+`certified_root` takes the same tangent keywords (`tangent_solve`,
+`dense_limit`, `tangent_precond`, `tangent_rtol`, `tangent_restart`,
+`tangent_max_restarts`) and passes them to `root_solve`. They apply to vector
+roots: a scalar root's tangent is a division, so `tangent_precond` with a
+scalar start raises. The status and residual do not depend on them.
+
 ## PCG-specific wrapper
 
 When the operator is HPD, `pcg_linear_solve` combines implicit gradients with

@@ -170,6 +170,7 @@ jobs:
               tests/test_certified_window.py tests/test_direct.py tests/test_direct_ops.py
               tests/test_exact_window_properties.py tests/test_window_semantics.py
               tests/test_multigrid.py tests/test_tridiagonal.py tests/test_implicit.py
+              tests/test_certified_root.py
               tests/test_banded.py tests/test_verification_practices.py
               tests/test_scope_and_scaling.py tests/test_autodiff.py tests/test_fixed_point.py
               tests/test_sharded_operands.py tests/test_external_api_contract.py
@@ -217,6 +218,7 @@ jobs:
         tests/test_packaging.py tests/test_external_api_contract.py
         tests/test_tridiagonal.py tests/test_direct.py tests/test_krylov.py
         tests/test_pcg.py tests/test_nonlinear.py tests/test_implicit.py
+        tests/test_certified_root.py
         tests/test_autodiff.py tests/test_fixed_point.py tests/test_precond.py
         tests/test_multigrid.py tests/test_eigen.py tests/test_generalized_eigenpairs.py
         tests/test_sharding.py
