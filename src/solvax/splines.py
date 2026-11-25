@@ -33,7 +33,14 @@ slopes, Fritsch & Carlson, *SIAM J. Numer. Anal.* 17 (1980) 238, in the
 weighted-harmonic-mean form of Fritsch & Butland (1984) with the three-point
 end rule of Moler, *Numerical Computing with MATLAB* (2004), section 3.4: the
 algorithm of :class:`scipy.interpolate.PchipInterpolator`. It is C1 only, and on
-monotone data it cannot overshoot.
+monotone data it cannot overshoot. ``slopes="akima"`` takes the slopes of Akima,
+*J. ACM* 17 (1970) 589, with his end extension (two secants beyond each end,
+continued linearly), and ``slopes="makima"`` the modified weights of Moler and
+Ionita (2019): the rules of :class:`scipy.interpolate.Akima1DInterpolator`,
+including its fallback to the mean secant where both weights are below 1e-9
+of their largest value (taken per data column here, over all of them in SciPy).
+An array ``slopes`` gives the knot slopes directly, a C1 Hermite spline as
+:class:`scipy.interpolate.CubicHermiteSpline`.
 
 Knots lie on the leading axis of ``y``; trailing axes are independent data
 sets that share the knots and are fitted in one solve. Outside the knots a
@@ -120,6 +127,20 @@ def _pchip_slopes(h: jax.Array, d: jax.Array) -> jax.Array:
     return jnp.concatenate([first[None], interior, last[None]], axis=0)
 
 
+def _akima_slopes(d: jax.Array, modified: bool) -> jax.Array:
+    """Akima's weighted secants, two secants added beyond each end."""
+    lo, hi = 2.0 * d[0] - d[1], 2.0 * d[-1] - d[-2]
+    m = jnp.concatenate([(2.0 * lo - d[0])[None], lo[None], d, hi[None], (2.0 * hi - d[-1])[None]])
+    w = jnp.abs(jnp.diff(m, axis=0))
+    if modified:
+        w = w + 0.5 * jnp.abs(m[1:] + m[:-1])
+    f1, f2 = w[2:], w[:-2]
+    f12 = f1 + f2
+    ok = f12 > 1e-9 * jnp.max(f12, axis=0)
+    weighted = m[1:-2] + f2 / jnp.where(ok, f12, 1.0) * (m[2:-1] - m[1:-2])
+    return jnp.where(ok, weighted, 0.5 * (m[3:] + m[:-3]))
+
+
 def cubic_spline(
     x: jax.Array,
     y: jax.Array,
@@ -127,6 +148,7 @@ def cubic_spline(
     bc: str = "not-a-knot",
     end_slopes: tuple = (0.0, 0.0),
     monotone: bool = False,
+    slopes: jax.Array | str | None = None,
 ) -> CubicSpline:
     """Fit a cubic spline through ``(x[i], y[i])``.
 
@@ -141,6 +163,9 @@ def cubic_spline(
             ``bc="clamped"``; scalars or arrays of the batch shape.
         monotone: Fritsch-Carlson (PCHIP) slopes instead of a C2 spline;
             ``bc`` must then be left at its default and is not used.
+        slopes: ``"akima"`` or ``"makima"`` for Akima slopes (real data), or
+            the knot slopes themselves, shape of ``y``; ``bc`` and ``monotone``
+            must then be left at their defaults.
 
     Returns:
         A :class:`CubicSpline` for :func:`cubic_spline_evaluate`.
@@ -157,23 +182,30 @@ def cubic_spline(
         raise ValueError("knots must be real")
     dtype = jnp.result_type(x, y)
     y = jnp.asarray(y, dtype)
-    if monotone and jnp.iscomplexobj(y):
-        raise ValueError("monotone=True needs real data")
+    if (monotone or isinstance(slopes, str)) and jnp.iscomplexobj(y):
+        raise ValueError("monotone=True and Akima slopes need real data")
     n = x.shape[0]
     if x.ndim != 1 or y.shape[:1] != (n,):
         raise ValueError("x must be one-dimensional and y must have len(x) rows")
     if bc not in _BCS:
         raise ValueError(f"unknown bc {bc!r}; expected one of {_BCS}")
-    if monotone and bc != "not-a-knot":
-        raise ValueError("monotone=True takes no boundary condition")
+    if (monotone or slopes is not None) and bc != "not-a-knot" or (monotone and slopes is not None):
+        raise ValueError(
+            "monotone=True and slopes take no boundary condition and exclude each other"
+        )
+    if isinstance(slopes, str) and slopes not in ("akima", "makima"):
+        raise ValueError(f"unknown slopes {slopes!r}; expected 'akima', 'makima' or an array")
     if n < 2 or (bc == "periodic" and n < 4):
         raise ValueError(f"bc={bc!r} needs at least {4 if bc == 'periodic' else 2} knots")
     if bc == "periodic":
         y = y.at[-1].set(y[0])
     h = jnp.diff(x)
     d = jnp.diff(y, axis=0) / _column(h, y.ndim)
-    zero, c2 = jnp.zeros((), x.dtype), jnp.asarray(not monotone)
-    if (n == 2 and bc != "clamped") or (n == 3 and bc == "not-a-knot" and not monotone):
+    smooth = not monotone and slopes is None
+    zero, c2 = jnp.zeros((), x.dtype), jnp.asarray(smooth)
+    if slopes is not None and not isinstance(slopes, str):
+        return CubicSpline(x, y, jnp.broadcast_to(jnp.asarray(slopes, dtype), y.shape), zero, c2)
+    if (n == 2 and bc != "clamped") or (n == 3 and bc == "not-a-knot" and smooth):
         # Line or parabola through the data: its slope at a knot is a weighted secant.
         if n == 2:
             return CubicSpline(x, y, jnp.concatenate([d, d]), zero, c2)
@@ -181,8 +213,9 @@ def cubic_spline(
         mid = w0 * d[0] + w1 * d[1]
         s = jnp.stack([2 * d[0] - mid, mid, 2 * d[1] - mid])
         return CubicSpline(x, y, s, zero, c2)
-    if monotone:
-        return CubicSpline(x, y, _pchip_slopes(h, d), zero, c2)
+    if monotone or slopes is not None:
+        s = _pchip_slopes(h, d) if monotone else _akima_slopes(d, slopes == "makima")
+        return CubicSpline(x, y, s, zero, c2)
     if bc == "periodic":
         hl, hr = jnp.roll(h, 1), h  # widths left and right of knots 0 .. n-2
         dl, dr = jnp.roll(d, 1, axis=0), d
