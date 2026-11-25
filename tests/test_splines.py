@@ -111,6 +111,13 @@ def test_monotone_matches_pchip_and_does_not_overshoot():
         np.testing.assert_allclose(
             cubic_spline_evaluate(spline, q, derivative=k), ref(q, k), atol=1e-12
         )
+    # At a knot the curvature jumps; the right interval is taken, as in SciPy,
+    # and the derivative in the point follows the same interval.
+    right = ref.derivative(2)(x[1:-1] + 1e-12)
+    np.testing.assert_allclose(cubic_spline_evaluate(spline, x, derivative=2), ref(x, 2), atol=1e-9)
+    np.testing.assert_allclose(ref(x[1:-1], 2), right, atol=1e-9)
+    slope_of = jax.vmap(jax.grad(lambda p: cubic_spline_evaluate(spline, p, derivative=1)))
+    np.testing.assert_allclose(slope_of(x[1:-1]), right, atol=1e-9)
     inside = np.asarray(cubic_spline_evaluate(spline, q[(q >= 0) & (q <= 4)]))
     assert np.all(np.diff(inside) >= -1e-15) and inside.min() >= 0 and inside.max() <= 2
     wavy = RNG.normal(size=(x.size, 3))

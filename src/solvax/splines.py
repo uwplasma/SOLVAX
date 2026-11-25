@@ -222,7 +222,10 @@ def cubic_spline_evaluate(
     Returns:
         Array (or tuple of arrays) of shape ``points.shape + batch``. A periodic spline is
         evaluated at the points reduced into ``[x[0], x[-1])``; any other
-        continues its end cubics beyond the knots.
+        continues its end cubics beyond the knots. At an interior knot the
+        cubic of the interval to its right is used, at ``x[-1]`` that of the
+        last interval: this decides the second derivative of a monotone
+        spline there and the derivative of any order with respect to the point.
     """
     _check_orders(derivative)
     i, u, (y0, s0, c2, c3) = _locate(spline, points)
