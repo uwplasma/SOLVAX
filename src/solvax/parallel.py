@@ -230,7 +230,7 @@ def _sharded_map(local_function: Callable, xs: Any, mesh: Mesh) -> Any:
     return jax.tree.map(lambda leaf: leaf[:size], mapped(jax.tree.map(pad, xs)))
 
 
-def axis_inner_product(axis_name: str):
+def axis_inner_product(axis_name: str | tuple[str, ...], weights: Any = None):
     """Inner product for Krylov solves running inside ``shard_map``.
 
     Inside a ``shard_map`` region every operand leaf is a local shard, so
@@ -241,7 +241,12 @@ def axis_inner_product(axis_name: str):
     per-shard: pass it as ``inner_product=``.
 
     Args:
-        axis_name: The mesh axis the caller's ``shard_map`` binds.
+        axis_name: The mesh axis, or tuple of axes, the caller's ``shard_map``
+            binds; a field sharded over several axes reduces over all of them.
+        weights: Optional real weights with the structure of the operands,
+            given as local shards (build the inner product inside the mapped
+            function). The product is ``sum conj(left) * weights * right``:
+            cell volumes for a finite-volume norm, zeros to mask inactive cells.
 
     Note:
         Call ``shard_map`` with ``check_vma=False`` around a solver using
@@ -256,6 +261,8 @@ def axis_inner_product(axis_name: str):
     """
 
     def inner(left, right):
+        if weights is not None:
+            right = jax.tree.map(jnp.multiply, weights, right)
         products = jax.tree.leaves(jax.tree.map(jnp.vdot, left, right))
         local = sum(products[1:], products[0])
         return jax.lax.psum(local, axis_name)
