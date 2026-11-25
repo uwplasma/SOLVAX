@@ -70,6 +70,11 @@ $$
 with the Eisenstat--Walker choice-2 safeguard
 $\widehat\eta_{k+1}\leftarrow\max(\widehat\eta_{k+1},\gamma\eta_k^p)$
 when $\gamma\eta_k^p>0.1$.
+The term is then kept above $\tfrac12\tau/\|F_{k+1}\|$, where $\tau$ is the
+outer residual tolerance (Kelley's rule, as in `nsolgm.m` and
+SIAMFANLEquations.jl), so the last inner solve asks for no more than the outer
+stop needs. `eta_min` defaults to zero; a positive value adds a fixed floor,
+which makes the tail linear near the root.
 
 Early linear systems are not solved to the final nonlinear tolerance. The
 history records the forcing term and Krylov iterations, while

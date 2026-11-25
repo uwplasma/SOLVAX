@@ -46,7 +46,8 @@ the Newton/Krylov iteration history.
 The default `forcing="constant"` passes `linear_rtol` to every inner GMRES
 solve. Opt-in `forcing="eisenstat_walker"` treats `linear_rtol` as the initial
 forcing term and uses the safeguarded Eisenstat--Walker choice 2 residual ratio
-for later Newton steps {cite}`eisenstat1996`. This avoids solving early Newton
+for later Newton steps {cite}`eisenstat1996`. The term never drops below `0.5*tol/||F_k||`, with `tol` the outer residual
+tolerance, so the last step is not oversolved. This avoids solving early Newton
 systems to terminal accuracy while tightening the inner tolerance as the
 nonlinear residual contracts. `forcing_gamma`, `forcing_alpha`, and
 `forcing_max` control the choice-2 formula; the maximum must remain below one.
@@ -245,6 +246,12 @@ On a nonsymmetric advection-diffusion root of 1200 unknowns with
 With `has_aux=True` the solver returns `(root, aux)` and so does `root_solve`;
 `aux` (iterations, residual, status) has a zero derivative. Before JAX 0.7
 give it a floating dtype, as `certified_root` does.
+
+`certified_root` takes the same tangent keywords (`tangent_solve`,
+`dense_limit`, `tangent_precond`, `tangent_rtol`, `tangent_restart`,
+`tangent_max_restarts`) and passes them to `root_solve`. They apply to vector
+roots: a scalar root's tangent is a division, so `tangent_precond` with a
+scalar start raises. The status and residual do not depend on them.
 
 ## PCG-specific wrapper
 

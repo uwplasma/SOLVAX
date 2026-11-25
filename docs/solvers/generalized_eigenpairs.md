@@ -69,10 +69,11 @@ large problems.
 | `vectors` | `(n_blocks, m, count)`, $y^H G y=1$, phase arbitrary |
 | `residuals` | the relative residual above, per pair |
 | `orthogonality` | $\max\lvert Y^H G Y-I\rvert$ |
-| `iterations` | sweeps after the first, each applying $T$ three times |
-| `converged` | `max(residuals) <= tol`, False if non-finite |
+| `iterations` | sweeps after the first, each applying $T$ six times |
+| `converged` | `max(residuals) <= tol` and `excluded_residual <= tol`, False if non-finite |
 | `gap` | $\lvert\lambda-\text{target}\rvert$ of the nearest excluded Ritz value minus that of the farthest selected one |
 | `fallback` | the dense pivoted path ran |
+| `excluded_residual` | the relative residual of the nearest excluded Ritz pair, the one that sets `gap`; zero if every Ritz value was selected |
 
 `gap` is zero when the selection splits a degenerate or tied set. It sees only
 the subspace: an eigenvalue the iteration never captured is not counted.
@@ -141,8 +142,8 @@ listed above are untested.
 
 ## Cost
 
-One block-Thomas factorization of $F-\sigma G$ ($O(Nm^3)$), then per sweep three
-solves with $p$ right-hand sides ($O(Nm^2p)$), two band products, and a
+One block-Thomas factorization of $F-\sigma G$ ($O(Nm^3)$), then per sweep six
+solves with $p$ right-hand sides ($O(Nm^2p)$), eight band products, and a
 $p\times p$ Ritz problem. The eigenvector tangent factors one shifted band per
 returned eigenpair.
 
