@@ -11,6 +11,7 @@ api/operators
 api/direct
 api/elliptic
 api/separable
+api/splines
 api/krylov
 api/eigen
 api/propagator

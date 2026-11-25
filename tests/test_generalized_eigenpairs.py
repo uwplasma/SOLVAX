@@ -138,6 +138,7 @@ def test_invertible_indefinite_two_by_two_pencil():
     result = sx.generalized_eigenpairs(F, G, 0.0, 2)
     np.testing.assert_allclose(result.values, [-1.0, 1.0], atol=1e-14)
     assert bool(result.fallback) and bool(result.converged)
+    assert float(result.excluded_residual) == 0.0 and float(result.gap) == np.inf  # all selected
 
 
 def test_lower_is_ignored_and_diag_is_hermitized():
@@ -409,3 +410,113 @@ def test_target_between_an_isolated_and_an_accumulating_eigenvalue_converges():
     assert bool(result.converged) and int(result.iterations) < 100
     np.testing.assert_allclose(np.asarray(result.values), want, rtol=1e-12)
     assert float(result.gap) > 0.0
+
+
+def _kronecker_pencil(n, m):
+    """``F = T_n (x) I_m + M_n (x) T_m``, ``G = M_n (x) I_m`` with its closed-form spectrum.
+
+    ``T = tridiag(-1, 2, -1)`` and the linear finite-element mass ``M = tridiag(1, 4, 1) / 6``
+    share the eigenvectors ``s_k = sin(i k pi / (n + 1))``, with eigenvalues
+    ``lam_k = 2 - 2 cos(k pi / (n + 1))`` and ``mu_k = (4 + 2 cos(k pi / (n + 1))) / 6``
+    (LeVeque, Finite Difference Methods, 2007, section 2.10), so that
+    ``F (s_j (x) s_k) = (lam_j / mu_j + lam_k) G (s_j (x) s_k)``.
+    """
+    theta_n, theta_m = (np.arange(1, k + 1) * np.pi / (k + 1) for k in (n, m))
+    t_m = 2 * np.eye(m) - np.eye(m, k=1) - np.eye(m, k=-1)
+    ones = np.ones((n, 1, 1))
+    F = (ones * (-np.eye(m) + t_m / 6), ones * (2 * np.eye(m) + 4 * t_m / 6))
+    G = (ones * np.eye(m) / 6, ones * 4 * np.eye(m) / 6)
+    mu = (4 + 2 * np.cos(theta_n)) / 6
+    spectrum = ((2 - 2 * np.cos(theta_n)) / mu)[:, None] + (2 - 2 * np.cos(theta_m))[None, :]
+    s_n = np.sin(np.outer(np.arange(1, n + 1), theta_n))
+    s_m = np.sin(np.outer(np.arange(1, m + 1), theta_m))
+    vectors = np.einsum("ij,ck->icjk", s_n, s_m)  # (block i, component c, pair j, k)
+    triple = [tuple(jnp.asarray(a) for a in (off, d, off)) for off, d in (F, G)]
+    return *triple, spectrum, mu, vectors
+
+
+@pytest.mark.parametrize("n,m", [(200, 1), (40, 3)])
+def test_kronecker_pencil_eigenvalues_match_closed_form(n, m):
+    F, G, spectrum, _, _ = _kronecker_pencil(n, m)
+    result = sx.generalized_eigenpairs(F, G, 3.0, 4)
+    want = _nearest(spectrum.ravel(), 3.0, 4)
+    # Hermitian pencil: |lam - theta| <= ||F y - theta G y||_2 / (lambda_min(G) ||y||_2), with
+    # lambda_min(G) > 1/3; the residual is reported in the infinity norm, which bounds the
+    # 2-norm ratio within a factor sqrt(n m).
+    Fd, Gd = _dense_pencil(F, G)
+    scale = np.abs(Fd).sum(1).max() + np.abs(want) * np.abs(Gd).sum(1).max()
+    bound = 3 * np.sqrt(n * m) * np.asarray(result.residuals) * scale
+    assert bool(result.converged)
+    assert np.all(np.abs(np.asarray(result.values) - want) <= bound)
+
+
+@pytest.mark.parametrize("n,m", [(200, 1), (40, 3)])
+def test_block_thomas_on_shifted_kronecker_pencil_matches_closed_form(n, m):
+    # (F - sigma G) v = mu_j (Lam - sigma) v for every Kronecker eigenvector v.
+    F, G, spectrum, mu, vectors = _kronecker_pencil(n, m)
+    shifted = tuple(f - 3.0 * g for f, g in zip(F, G, strict=True))
+    eig = mu[:, None] * (spectrum - 3.0)
+    x = sx.block_thomas(*shifted, jnp.asarray(vectors.reshape(n, m, n * m)))
+    want = (vectors / eig).reshape(n, m, n * m)
+    # Forward error of a backward-stable solve: kappa eps per column, with a margin of 100.
+    kappa = np.abs(eig).max() / np.abs(eig).min()
+    err = np.abs(np.asarray(x) - want).max((0, 1)) / np.abs(want).max((0, 1))
+    assert err.max() < 100 * kappa * np.finfo(float).eps
+
+
+def _diagonal(lam):
+    """``F = diag(lam)``, ``G = I`` as 1 x 1 blocks: the eigenvalues are ``lam`` exactly."""
+    z = jnp.zeros((lam.size, 1, 1))
+    return (z, jnp.asarray(lam).reshape(-1, 1, 1), z), (z, jnp.ones((lam.size, 1, 1)), z)
+
+
+def test_converged_certifies_the_nearest_excluded_pair():
+    """Diagonal pencil of plan section 8.9, eigenvalues ``1e-3`` and ``linspace(1, 10, 191)``: the
+    selected pair converges in the first sweep, the excluded one at ``lam = 1`` does not, so one
+    extra sweep (``max_iter=1``) must not report ``converged``; with room to iterate it does."""
+    lam = np.concatenate([[1e-3], np.linspace(1.0, 10.0, 191)])
+    F, G = _diagonal(lam)
+    short = sx.generalized_eigenpairs(F, G, 0.0, 1, 1e-10, 1, 0)
+    assert float(short.residuals.max()) <= 1e-10 < float(short.excluded_residual)
+    assert not bool(short.converged)
+    full = sx.generalized_eigenpairs(F, G, 0.0, 1, 1e-10, 100, 0)
+    assert bool(full.converged) and float(full.excluded_residual) <= 1e-10
+    np.testing.assert_allclose(np.asarray(full.values), [1e-3], rtol=1e-12)
+    np.testing.assert_allclose(float(full.gap), 1.0 - 1e-3, rtol=1e-9)
+
+
+def test_excluded_pair_in_a_cluster_keeps_converged_false():
+    """Three values at the target, then 397 in ``[0.6, 0.61]``: the nearest excluded Ritz pair sits
+    in the cluster and converges at a ratio near one, so the selected pairs pass ``tol`` after any
+    number of sweeps while the excluded one needs about 12 (SOLVAX 0.36.2 reported ``converged``
+    at sweep 1 with an excluded residual of 2.9e-4)."""
+    F, G = _diagonal(np.concatenate([[0.4999, 0.5, 0.5001], np.linspace(0.6, 0.61, 397)]))
+    for max_iter in range(4):
+        r = sx.generalized_eigenpairs(F, G, 0.50003, 3, 1e-10, max_iter, 0)
+        assert float(r.residuals.max()) <= 1e-10 < float(r.excluded_residual)
+        assert not bool(r.converged)
+    r = sx.generalized_eigenpairs(F, G, 0.50003, 3, 1e-10, 100, 0)
+    assert bool(r.converged) and float(r.excluded_residual) <= 1e-10
+    assert int(r.iterations) + 1 <= 13
+    np.testing.assert_allclose(np.asarray(r.values), [0.4999, 0.5, 0.5001], rtol=1e-12)
+
+
+def test_excluded_residual_under_jit_vmap_and_derivatives(pencil):
+    """The new field rides through ``jit`` and ``vmap``; value derivatives are unchanged in both
+    modes; positional access to the earlier fields is unchanged."""
+    F0, F1, G0, G1 = pencil
+    run = jax.jit(lambda t: sx.generalized_eigenpairs(_along(F0, F1, t), G0, TARGET, COUNT))
+    batched = jax.vmap(run)(jnp.array([0.0, 0.1]))
+    assert batched.excluded_residual.shape == (2,)
+    assert bool((batched.excluded_residual <= 1e-10).all()) and bool(batched.converged.all())
+    r = run(0.0)
+    # positions 0-7 keep their meaning: compare with a separate eager call, read by name
+    eager = sx.generalized_eigenpairs(F0, G0, TARGET, COUNT)
+    assert len(r) == 9
+    for i, name in enumerate(sx.EigenpairResult._fields[:8]):
+        np.testing.assert_allclose(r[i], getattr(eager, name), rtol=1e-9, atol=1e-12, err_msg=name)
+    total = lambda t: run(t).values.sum()  # noqa: E731
+    h = 1e-6
+    fd = (total(h) - total(-h)) / (2 * h)
+    np.testing.assert_allclose(jax.grad(total)(0.0), fd, rtol=1e-6)
+    np.testing.assert_allclose(jax.jvp(total, (0.0,), (1.0,))[1], fd, rtol=1e-6)
