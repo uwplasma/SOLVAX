@@ -663,3 +663,17 @@ def test_cuda_thomas_branch_dispatch_and_jvp_match_scan():
     # Very wide batches keep the scan (the Pallas path would fail to lower on CPU).
     wide = tuple(jnp.ones((3, 4100)) * v for v in (0.1, 4.0, 0.1, 1.0))
     assert jnp.array_equal(_THOMAS_WITH_PIVOTS(*wide)[0], _scan_with_pivots(*wide)[0])
+
+
+@pytest.mark.parametrize("method", ["thomas", "lax"])
+@pytest.mark.parametrize("n", [1, 2, 3, 17, 400])
+def test_discrete_laplacian_divides_each_eigenvector_by_its_eigenvalue(method, n):
+    # tridiag(-1, 2, -1) has eigenvalues 2 - 2 cos(k pi / (n + 1)) and eigenvectors
+    # sin(j k pi / (n + 1)), j, k = 1..n (LeVeque, Finite Difference Methods, 2007, section 2.10).
+    theta = np.arange(1, n + 1) * np.pi / (n + 1)
+    eig, vectors = 2 - 2 * np.cos(theta), np.sin(np.outer(np.arange(1, n + 1), theta))
+    bands = (-np.ones(n), 2 * np.ones(n), -np.ones(n))
+    x = tridiagonal_solve(*map(jnp.asarray, (*bands, vectors)), method=method)
+    # Forward error of a backward-stable solve: kappa eps per column, with a margin of 100.
+    err = np.abs(np.asarray(x) - vectors / eig).max(0) / np.abs(vectors / eig).max(0)
+    assert err.max() < 100 * (eig.max() / eig.min()) * np.finfo(float).eps

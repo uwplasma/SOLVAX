@@ -320,11 +320,11 @@ def test_single_reduction_pcg_reduces_collectives():
     fused = count_collectives(lambda rhs: solve(rhs, True), b)
     # The single-reduction recurrence is algebraically one fused reduction per
     # iteration; whether the compiled module realizes that depends on the XLA
-    # partitioner. Current JAX fuses (measured 2 vs 3); the 0.4-era GSPMD
-    # lowering does not, so there the assertion is only that the rewrite does
-    # not blow up the communication.
+    # partitioner. JAX 0.7.2, 0.8.3 and 0.12.1 fuse (measured 2 vs 3); 0.4.38,
+    # 0.5.3 and 0.6.2 do not (7 vs 6), so there the assertion is only that the
+    # rewrite does not blow up the communication.
     jax_version = tuple(int(part) for part in jax.__version__.split(".")[:2])
-    if jax_version >= (0, 5):
+    if jax_version >= (0, 7):
         assert fused < standard
     else:
         assert fused <= standard + 1

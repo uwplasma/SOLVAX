@@ -199,6 +199,24 @@ def test_exponential_eigenpairs_bypasses_the_explicit_stability_limit() -> None:
     )
 
 
+
+def test_exponential_eigenpairs_restart_keeps_every_wanted_mode():
+    """A start in two exact modes: the leading Ritz vector alone carries no second mode."""
+    eigenvalues = jnp.array([-0.1 + 1j, -0.2 - 2j, -0.3 + 3j, -0.4 - 4j, -0.5 + 5j,
+                             -0.6 - 6j, -0.7 + 7j, -0.8 - 8j, -0.9 + 9j, -1.0 - 10j])
+    start = jnp.zeros(10, jnp.complex128).at[:2].set(1.0)
+    for restarts in (1, 2, 3):
+        solution = exponential_eigenpairs(
+            lambda vector: eigenvalues * vector, start, horizon=10.0, inner_krylov_dim=10,
+            outer_krylov_dim=6, candidates=2, tol=1.0e-8, restarts=restarts,
+        )
+        assert np.all(np.asarray(solution.converged)), restarts
+        np.testing.assert_allclose(
+            np.sort_complex(np.asarray(solution.eigenvalues)),
+            np.sort_complex(np.asarray(eigenvalues[:2])), rtol=1e-10,
+        )
+
+
 @pytest.mark.parametrize("tolerance", [1e-4, 1e-7, 1e-10])
 @pytest.mark.parametrize("family", ["jordan", "skew", "diffusion", "triangular"])
 def test_taylor_action_matches_independent_dense_and_sparse(family, tolerance):
