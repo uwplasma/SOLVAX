@@ -266,13 +266,6 @@ REVERSE_ONLY = {_recycled}
 DTYPES = {"f": jnp.float64, "c": jnp.complex128}
 # Measured failures of a documented contract. Not strict: the case passes silently once
 # the source is fixed.
-DEFECTS = {
-    "root_solve-complex128": (
-        TypeError,
-        "root_solve: the default tangent_solve calls jax.jacobian without holomorphic=True "
-        "on a complex root",
-    ),
-}
 PARAMS = [
     pytest.param(
         f,
@@ -282,9 +275,6 @@ PARAMS = [
         hol,
         case,
         id=case,
-        marks=[pytest.mark.xfail(raises=DEFECTS[case][0], strict=False, reason=DEFECTS[case][1])]
-        if case in DEFECTS
-        else [],
     )
     for name, f, n, kinds, r, hol in CASES
     for k in kinds
