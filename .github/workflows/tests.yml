@@ -190,6 +190,13 @@ jobs:
             label: macos-3.12-current
             suite: compatibility
             coverage: false
+          # Default resolution on Python 3.10 is JAX 0.6.2, the newest there.
+          - os: macos-latest
+            python: "3.10"
+            stack: current
+            label: macos-3.10-current
+            suite: compatibility
+            coverage: false
           - os: ubuntu-latest
             python: "3.12"
             stack: adv

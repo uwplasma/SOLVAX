@@ -243,6 +243,15 @@ from solvax.tridiagonal import (
 
 __version__ = "0.36.2"
 
+if (0, 5) <= __import__("jax").__version_info__[:3] < (0, 8, 2):
+    __import__("warnings").warn(
+        "JAX 0.5.0 to 0.8.1 constant-fold a gather along a non-leading axis of an array "
+        "captured by jax.jit to wrong values on CPU (jax-ml/jax#33479, fixed in 0.8.2); "
+        "pass such arrays as jit arguments (README, Install)",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+
 __all__ = [
     "RECYCLE_DRIFT_ADVISORY",
     "BandedLUFactors",
