@@ -218,7 +218,13 @@ from solvax.sparse_direct import (
     sparse_eigenvalue,
     sparse_solve,
 )
-from solvax.splines import CubicSpline, cubic_spline, cubic_spline_evaluate
+from solvax.splines import (
+    CubicSpline,
+    cubic_spline,
+    cubic_spline_antiderivative,
+    cubic_spline_evaluate,
+    cubic_spline_integrate,
+)
 from solvax.transfer import (
     CoarseningPlan,
     coarse_axis_size,
@@ -333,6 +339,8 @@ __all__ = [
     "CubicSpline",
     "cubic_spline",
     "cubic_spline_evaluate",
+    "cubic_spline_integrate",
+    "cubic_spline_antiderivative",
     "FixedPointSolution",
     "affine_fixed_point_gmres",
     "aitken_fixed_point",
