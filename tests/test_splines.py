@@ -456,6 +456,11 @@ def test_stored_coefficients_evaluate_as_the_spline(bc, uniform):
     gc = jax.grad(one)(c, 0.37)
     fd = (one(c + eps * v, 0.37) - one(c - eps * v, 0.37)) / (2 * eps)
     np.testing.assert_allclose(np.vdot(gc, v), fd, rtol=1e-8)
+    if uniform and not periodic:  # far points must not overflow the interval index
+        far = np.array([1e12, -1e12])
+        np.testing.assert_array_equal(
+            piecewise_cubic_evaluate(x, c, far, uniform=True), piecewise_cubic_evaluate(x, c, far)
+        )
     if uniform:
         with pytest.raises(ValueError, match="equally spaced"):
             piecewise_cubic_evaluate(

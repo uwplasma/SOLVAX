@@ -375,7 +375,7 @@ def piecewise_cubic_evaluate(
         if concrete is not None and not np.allclose(np.diff(concrete), concrete[1] - concrete[0]):
             raise ValueError("uniform=True needs equally spaced knots")
         step = (x[-1] - x[0]) / (n - 1)
-        i = jnp.clip(jnp.floor((p - x[0]) / step).astype(jnp.int32), 0, n - 2)
+        i = jnp.clip(jnp.floor((p - x[0]) / step), 0, n - 2).astype(jnp.int32)  # clip, then cast
     else:
         i = jnp.clip(jnp.searchsorted(x, p, side="right") - 1, 0, n - 2)
     c = coefficients[:, i]
