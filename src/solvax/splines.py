@@ -260,7 +260,8 @@ def _locate(spline: CubicSpline, points):
     x, y, s, period = spline
     p = jnp.asarray(points, x.dtype)
     p = jnp.where(period > 0, x[0] + jnp.mod(p - x[0], jnp.where(period > 0, period, 1.0)), p)
-    i = jnp.clip(jnp.searchsorted(x, p, side="right") - 1, 0, x.shape[0] - 2)
+    i = jnp.searchsorted(x, p, side="right", method="scan_unrolled")
+    i = jnp.clip(i - 1, 0, x.shape[0] - 2)
     h = _column(x[i + 1] - x[i], y.ndim - 1 + p.ndim)
     u = _column(p - x[i], y.ndim - 1 + p.ndim)
     y0, y1, s0, s1 = y[i], y[i + 1], s[i], s[i + 1]
@@ -377,7 +378,7 @@ def piecewise_cubic_evaluate(
         step = (x[-1] - x[0]) / (n - 1)
         i = jnp.clip(jnp.floor((p - x[0]) / step), 0, n - 2).astype(jnp.int32)  # clip, then cast
     else:
-        i = jnp.clip(jnp.searchsorted(x, p, side="right") - 1, 0, n - 2)
+        i = jnp.clip(jnp.searchsorted(x, p, side="right", method="scan_unrolled") - 1, 0, n - 2)
     c = coefficients[:, i]
     u = _column(p - x[i], c.ndim - 1)
     values = tuple(
