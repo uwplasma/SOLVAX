@@ -16,7 +16,12 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from solvax import cubic_spline, cubic_spline_evaluate
+from solvax import (
+    cubic_spline,
+    cubic_spline_antiderivative,
+    cubic_spline_evaluate,
+    cubic_spline_integrate,
+)
 
 jax.config.update("jax_enable_x64", True)
 interpolate = pytest.importorskip("scipy.interpolate")
@@ -233,3 +238,81 @@ def test_periodic_ignores_last_value_and_knots_are_checked():
                 cubic_spline(bad, np.zeros(bad.size), bc=bc)
     traced = jax.jit(lambda x, y: cubic_spline_evaluate(cubic_spline(x, y), P))(X, np.sin(X))
     np.testing.assert_allclose(traced, interpolate.CubicSpline(X, np.sin(X))(P), atol=1e-12)
+
+
+@pytest.mark.parametrize("bc", ["not-a-knot", "natural", "clamped", "periodic"])
+def test_integral_matches_scipy_and_its_derivative_is_the_value(bc):
+    y = RNG.normal(size=(X.size, 2))
+    if bc == "periodic":
+        y[-1] = y[0]
+    spline = cubic_spline(X, y, bc=bc)
+    ref = interpolate.CubicSpline(X, y, bc_type=bc)
+    a, b = np.array([-0.2, 0.3, 1.9]), np.array([2.4, 1.1, 0.4])  # last pair reversed
+    if bc == "periodic":
+        b = b + np.array([4.0, 0.0, -6.0])  # several periods both ways
+    expected = np.stack([ref.integrate(lo, hi) for lo, hi in zip(a, b, strict=True)])
+    integral = jax.jit(cubic_spline_integrate)
+    np.testing.assert_allclose(integral(spline, a, b), expected, atol=1e-12)
+    np.testing.assert_allclose(jax.vmap(integral, (None, 0, 0))(spline, a, b), expected, atol=1e-12)
+    grad_b = jax.grad(lambda b: cubic_spline_integrate(spline, 0.1, b)[0])(1.3)
+    np.testing.assert_allclose(grad_b, cubic_spline_evaluate(spline, 1.3)[0], atol=1e-13)
+    grad_a = jax.grad(lambda a: cubic_spline_integrate(spline, a, 1.3)[1])(0.1)
+    np.testing.assert_allclose(grad_a, -cubic_spline_evaluate(spline, 0.1)[1], atol=1e-13)
+
+
+def test_integral_of_a_cubic_is_exact_and_differentiates_in_the_data():
+    f = np.polynomial.Polynomial([0.3, -1.2, 0.7, 2.0])
+    F = f.integ()
+    spline = cubic_spline(X, f(X))
+    np.testing.assert_allclose(cubic_spline_integrate(spline, -0.5, P), F(P) - F(-0.5), atol=1e-11)
+    y = np.sin(X) + 1j * np.cos(X)
+    complex_integral = cubic_spline_integrate(cubic_spline(X, y), 0.2, 1.7)
+    for part in (np.real, np.imag):
+        ref = interpolate.CubicSpline(X, part(y)).integrate(0.2, 1.7)
+        np.testing.assert_allclose(part(complex_integral), ref, atol=1e-13)
+    loss = lambda y: cubic_spline_integrate(cubic_spline(X, y, bc="natural"), 0.1, 1.9) ** 2  # noqa: E731
+    y, v, eps = np.cos(X), RNG.normal(size=X.size), 1e-6
+    fd = (loss(y + eps * v) - loss(y - eps * v)) / (2 * eps)
+    np.testing.assert_allclose(np.vdot(jax.grad(loss)(y), v), fd, rtol=1e-8)
+
+
+def test_cumulative_integral_equals_the_clamped_profile_formula():
+    """VMEX's profile spline: second derivatives m of a clamped spline, and the
+    integral of interval i from x_i to x_i + u written in m (Press et al.,
+    Numerical Recipes, 3rd ed., eq. 3.3.3 integrated)."""
+    x = np.array([0.0, 0.1, 0.25, 0.5, 0.7, 0.85, 1.0])
+    y, slopes = np.cos(3 * x) + x, (0.4, -1.1)
+    spline = cubic_spline(x, y, bc="clamped", end_slopes=slopes)
+    m = np.asarray(cubic_spline_evaluate(spline, x, derivative=2))
+    h = np.diff(x)
+
+    def piece(i, u):
+        a, b = y[i] - m[i] * h[i] ** 2 / 6, y[i + 1] - m[i + 1] * h[i] ** 2 / 6
+        return (
+            m[i] * (h[i] ** 4 - (h[i] - u) ** 4) / (24 * h[i])
+            + m[i + 1] * u**4 / (24 * h[i])
+            + a * (u - u**2 / (2 * h[i]))
+            + b * u**2 / (2 * h[i])
+        )
+
+    q = np.linspace(0.0, 1.0, 23)
+    i = np.clip(np.searchsorted(x, q, side="right") - 1, 0, x.size - 2)
+    prefix = np.r_[0.0, np.cumsum([piece(k, h[k]) for k in range(h.size)])]
+    reference = prefix[i] + piece(i, q - x[i])
+    np.testing.assert_allclose(cubic_spline_integrate(spline, 0.0, q), reference, atol=1e-15)
+
+
+@pytest.mark.parametrize("bc", ["not-a-knot", "natural", "clamped", "periodic"])
+def test_antiderivative_is_the_integral_from_the_first_knot(bc):
+    y = RNG.normal(size=(X.size, 2))
+    if bc == "periodic":
+        y[-1] = y[0]
+    spline = cubic_spline(X, y, bc=bc)
+    q = np.r_[P, P + 5.0, P - 7.0] if bc == "periodic" else P  # outside the knots
+    F = jax.jit(cubic_spline_antiderivative)
+    np.testing.assert_allclose(F(spline, q), cubic_spline_integrate(spline, X[0], q), atol=1e-13)
+    np.testing.assert_allclose(F(spline, X[0]), 0.0, atol=0)
+    scalar = jax.vmap(lambda p: cubic_spline_antiderivative(spline, p)[0])
+    np.testing.assert_allclose(scalar(q), F(spline, q)[:, 0], atol=1e-14)
+    slope = jax.vmap(jax.grad(lambda p: cubic_spline_antiderivative(spline, p)[1]))(q)
+    np.testing.assert_allclose(slope, cubic_spline_evaluate(spline, q)[:, 1], atol=1e-13)
