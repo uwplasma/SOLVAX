@@ -180,6 +180,12 @@ def test_exported_surface_is_stable():
         "gmres",
         "pcg",
         "newton_krylov",
+        "root_solve",
+        "certified_root",
+        "RootResult",
+        "ROOT_CONVERGED",
+        "ROOT_MAX_ITER",
+        "ROOT_STAGNATED",
     }
     missing = sorted(required - set(sx.__all__))
     assert not missing, f"public names disappeared from solvax.__all__: {missing}"
