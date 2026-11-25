@@ -718,3 +718,30 @@ def test_tensor_spline_derivatives_jit_and_vmap():
         GX, GY, tensor_spline_coefficients(GX, GY, np.moveaxis(fs, 0, -1)), px, py
     )
     np.testing.assert_allclose(jax.vmap(one)(fs), np.moveaxis(together, -1, 0), atol=1e-13)
+
+
+@pytest.mark.parametrize("bc", [("monotone", "monotone"), ("not-a-knot", "akima")])
+def test_tensor_spline_with_slope_rules_is_the_bicubic_hermite_patch(bc):
+    """A slope rule is not linear, so it is applied to the knot values and to the
+    x-slopes along y (the corner data f, f_x, f_y, f_xy of a bicubic Hermite patch),
+    as NTX's interp2d_at does; the reference nests SciPy's 1-D Hermite splines."""
+    rng = np.random.default_rng(46)
+    f = rng.normal(size=(GX.size, GY.size))
+    rules = {
+        "monotone": interpolate.PchipInterpolator,
+        "akima": lambda t, v, axis: interpolate.Akima1DInterpolator(
+            t, v, axis=axis, extrapolate=True
+        ),
+        "not-a-knot": lambda t, v, axis: interpolate.CubicSpline(t, v, axis=axis),
+    }
+    fx = rules[bc[0]](GX, f, axis=0)(GX, 1)
+    px, py = rng.uniform(-0.1, 2.1, 40), rng.uniform(-1.1, 1.1, 40)
+    c = tensor_spline_coefficients(GX, GY, f, bc=bc)
+    for i, j in ORDERS:
+        values, slopes = (rules[bc[1]](GY, g, axis=1)(py, j) for g in (f, fx))  # (nx, 40)
+        ref = [
+            interpolate.CubicHermiteSpline(GX, values[:, k], slopes[:, k])(px[k], i)
+            for k in range(40)
+        ]
+        got = piecewise_bicubic_evaluate(GX, GY, c, px, py, derivative=(i, j))
+        np.testing.assert_allclose(got, ref, atol=1e-11 * (1 + np.abs(ref).max()))

@@ -478,7 +478,9 @@ def tensor_spline_coefficients(
     the slopes, the highest coefficients carry one more power of ``1/h`` of
     rounding and the block of ``d_x^3 d_y^3`` loses a digit; a natural axis
     sets the end second derivatives to zero exactly, since through the end
-    slopes their rounding is amplified by the cross block. A periodic axis
+    slopes their rounding is amplified by the cross block. A slope rule along
+    ``y`` is not linear in the data, so it is applied instead to the knot
+    values and the x-slopes, the corner data of a bicubic Hermite patch. A periodic axis
     ignores the last row (``bc[0]``) or column (``bc[1]``) of ``f``.
 
     Args:
@@ -493,10 +495,19 @@ def tensor_spline_coefficients(
     """
 
     def fit(t, v, kind):
-        return _coefficients(cubic_spline(t, v, **_FITS.get(kind, {"bc": kind})), kind == "natural")
+        return cubic_spline(t, v, **_FITS.get(kind, {"bc": kind}))
 
-    along_x = fit(x, f, bc[0])  # (4, nx - 1, ny, *batch)
-    return jnp.moveaxis(fit(y, jnp.moveaxis(along_x, 2, 0), bc[1]), (0, 1), (2, 3))
+    along_x = fit(x, f, bc[0])
+    if bc[1] in _FITS:  # not linear: fit the knot values and x-slopes along y, then Hermite in x
+        knots = jnp.moveaxis(jnp.stack([along_x.y, along_x.slopes], 2), 1, 0)  # (ny, nx, 2, ...)
+        c = jnp.moveaxis(
+            cubic_spline_coefficients(fit(y, knots, bc[1])), 2, 0
+        )  # (nx, 4, ny - 1, 2, ...)
+        hermite = CubicSpline(x, c[:, :, :, 0], c[:, :, :, 1], along_x.period, jnp.asarray(False))
+        return cubic_spline_coefficients(hermite)
+    c = _coefficients(along_x, bc[0] == "natural")  # (4, nx - 1, ny, *batch)
+    c = _coefficients(fit(y, jnp.moveaxis(c, 2, 0), bc[1]), bc[1] == "natural")
+    return jnp.moveaxis(c, (0, 1), (2, 3))
 
 
 def piecewise_bicubic_evaluate(
