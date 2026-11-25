@@ -789,9 +789,9 @@ def certified_root(
             finite the root is converged only if ``f(x) == 0``.
         max_iter: built-in iteration limit (static).
         damped: halve Newton steps that do not lower ``|f|`` (no bracket).
-        tangent_solve, dense_limit, tangent_precond, tangent_rtol,
-            tangent_restart, tangent_max_restarts: as in :func:`root_solve`.
-            The GMRES keywords apply to vector roots; a scalar root's
+        tangent_solve, dense_limit: as in :func:`root_solve`.
+        tangent_precond, tangent_rtol, tangent_restart, tangent_max_restarts: as
+            in :func:`root_solve`. These GMRES keywords apply to vector roots; a scalar root's
             tangent is a division (a 2 x 2 solve if complex), so a scalar
             start with ``tangent_precond`` raises and the other three are
             unused.
