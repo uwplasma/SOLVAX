@@ -70,7 +70,7 @@ class PseudoTransientConfig:
     backtrack_factor: float = 0.5
     max_backtracks: int = 8
     eta_initial: float = 0.5
-    eta_min: float = 1.0e-4
+    eta_min: float = 0.0
     eta_max: float = 0.9
     eta_gamma: float = 0.9
     eta_power: float = 2.0
@@ -110,8 +110,8 @@ class PseudoTransientConfig:
             raise ValueError("armijo must lie in [0, 1)")
         if not 0.0 < self.backtrack_factor < 1.0:
             raise ValueError("backtrack_factor must lie in (0, 1)")
-        if not 0.0 < self.eta_min <= self.eta_initial <= self.eta_max < 1.0:
-            raise ValueError("require 0 < eta_min <= eta_initial <= eta_max < 1")
+        if not 0.0 <= self.eta_min <= self.eta_initial <= self.eta_max < 1.0:
+            raise ValueError("require 0 <= eta_min <= eta_initial <= eta_max < 1")
         if not 0.0 < self.eta_gamma <= 1.0 or self.eta_power <= 0.0:
             raise ValueError("eta_gamma must lie in (0, 1] and eta_power must be positive")
         if self.linear_restart < 1 or self.linear_max_restarts < 1:
@@ -239,17 +239,20 @@ def eisenstat_walker_forcing(
     previous_residual_norm: jax.Array,
     previous_eta: jax.Array,
     *,
-    eta_min: float = 1.0e-4,
+    eta_min: float = 0.0,
     eta_max: float = 0.9,
     gamma: float = 0.9,
     power: float = 2.0,
+    tolerance: jax.Array | float = 0.0,
 ) -> jax.Array:
     """Safeguarded Eisenstat--Walker forcing term for an inexact Newton step.
 
     The ratio rule tightens the linear tolerance as nonlinear convergence
     accelerates.  Eisenstat--Walker choice 2 applies the published lower
-    safeguard when ``gamma*eta_previous**power > 0.1``.  ``eta_min`` adds an
-    application floor for finite-work pseudo-transient stages.
+    safeguard when ``gamma*eta_previous**power > 0.1``.  ``tolerance`` is the
+    outer residual tolerance; the term is kept above ``0.5*tolerance/residual_norm``
+    (Kelley's rule) so the last inner solve is not run past what the outer stop
+    needs.  ``eta_min`` adds an optional fixed floor.
     """
 
     residual_norm = jnp.asarray(residual_norm)
@@ -264,6 +267,8 @@ def eisenstat_walker_forcing(
         jnp.maximum(ratio_eta, safeguard),
         ratio_eta,
     )
+    safe_residual = jnp.maximum(residual_norm, jnp.finfo(dtype).tiny)
+    candidate = jnp.maximum(candidate, 0.5 * tolerance / safe_residual)
     candidate = jnp.nan_to_num(
         candidate,
         nan=float(eta_max),
@@ -448,6 +453,7 @@ def pseudo_transient_continuation(
                 eta_max=config.eta_max,
                 gamma=config.eta_gamma,
                 power=config.eta_power,
+                tolerance=tolerance,
             ),
             jnp.minimum(float(config.eta_max), jnp.maximum(eta, float(config.eta_initial))),
         )
