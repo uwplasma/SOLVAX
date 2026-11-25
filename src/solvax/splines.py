@@ -303,7 +303,7 @@ def cubic_spline_integrate(spline: CubicSpline, a: jax.Array, b: jax.Array) -> j
     difference of two antiderivatives, so an interval much shorter than the
     distance of its ends from ``x[0]`` loses digits to cancellation.
     """
-    a, b = jnp.broadcast_arrays(jnp.asarray(a, spline.x.dtype), jnp.asarray(b, spline.x.dtype))
+    # Each limit keeps its own shape; the batch axes trail both, so they broadcast.
     return cubic_spline_antiderivative(spline, b) - cubic_spline_antiderivative(spline, a)
 
 
