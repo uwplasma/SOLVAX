@@ -51,6 +51,24 @@ def test_embedded_estimate_tracks_embedded_error(pair):
     assert np.log2(err[0] / err[1]) == pytest.approx(pair.embedded_order + 1, abs=0.4)
 
 
+@pytest.mark.parametrize("pair", list(PAIRS.values()), ids=list(PAIRS))
+def test_stability_polynomial_on_the_linear_test_equation(pair):
+    # On y' = lam y one step multiplies y by a polynomial R(z), z = h lam, whose coefficients
+    # b^T A^(j-1) 1 equal 1/j! up to j = order (Hairer, Norsett and Wanner, Solving ODEs I,
+    # II.2); the same holds for the embedded solution up to its order. For DOPRI5,
+    # R(z) = 1 + z + ... + z^5/120 + z^6/600 (Hairer and Wanner, Solving ODEs II, IV.2).
+    z = jnp.exp(2j * np.pi * jnp.arange(16) / 16)  # coefficients by a discrete Fourier transform
+    y_new, err, _ = erk_step(lambda t, y: z * y, 0.0, jnp.ones(16, complex), 1.0, pair)
+    taylor = 1.0 / np.cumprod([1.0, *range(1, 16)])
+    rk, embedded = (np.real(np.fft.fft(np.asarray(r))) / 16 for r in (y_new, y_new - err))
+    p, q = pair.order, pair.embedded_order
+    np.testing.assert_allclose(rk[: p + 1], taylor[: p + 1], rtol=0, atol=1e-14)
+    np.testing.assert_allclose(embedded[: q + 1], taylor[: q + 1], rtol=0, atol=1e-14)
+    assert abs(rk[p + 1] - taylor[p + 1]) > 1e-3 * taylor[p + 1]  # the order is not higher
+    if pair is DOPRI5_4:
+        np.testing.assert_allclose(rk[6:], [1 / 600, *[0.0] * 9], rtol=0, atol=1e-14)
+
+
 @pytest.mark.parametrize("pair", [BS3_2, DOPRI5_4])
 def test_fsal_stage_is_the_next_first_stage(pair):
     y_new, _, k_last = erk_step(oscillator, 0.0, Y0, 0.1, pair)
