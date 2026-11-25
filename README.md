@@ -56,6 +56,16 @@ JAX pytrees; no external operator abstraction is required.
 pip install solvax
 ```
 
+SOLVAX supports Python 3.10 and later with JAX 0.4.38 and later. JAX 0.5.0 to
+0.8.1 (on Python 3.10 the newest is 0.6.2) constant-fold, on CPU, a gather along
+a non-leading axis of an array captured by `jax.jit` and followed by an
+elementwise operation to wrong values, with no error
+([jax-ml/jax#33479](https://github.com/jax-ml/jax/issues/33479), fixed in JAX
+0.8.2). In SOLVAX this reaches `jax.vmap` of `csr_matvec` over captured probe
+vectors. Pass such arrays to the jitted function as arguments instead of closing
+over them, or set `XLA_FLAGS=--xla_disable_hlo_passes=constant_folding`.
+SOLVAX warns at import on these versions.
+
 ## Quickstart
 
 ```python

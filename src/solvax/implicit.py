@@ -202,6 +202,7 @@ def newton_krylov(
                     power=forcing_alpha,
                     eta_min=0.0,
                     eta_max=forcing_max,
+                    tolerance=tolerance,
                 )
                 current_forcing = jnp.where(
                     newton_iterations == 0,
@@ -435,19 +436,84 @@ def recycled_linear_solve(
     return _recycled_solve(operator, solver, transpose_solver, params, b)
 
 
-def _default_tangent_solve(g: Callable, y: jax.Array) -> jax.Array:
+DENSE_TANGENT_LIMIT = 1024
+"""Largest vector size whose default root tangent forms the dense Jacobian."""
+
+
+def _default_tangent_solve(
+    g: Callable,
+    y: jax.Array,
+    dense_limit: int = DENSE_TANGENT_LIMIT,
+    *,
+    precond: tuple[Callable | None, Callable | None] | None = None,
+    rtol: float | None = None,
+    restart: int | None = None,
+    max_restarts: int = 40,
+) -> jax.Array:
     """Solve the linearised system ``g(x) = y`` for the root tangent.
 
     ``g`` is the (linear) Jacobian-vector product of ``f`` at the root. For
-    scalars a single division suffices; for small vector systems the dense
-    Jacobian is materialised and solved with :func:`jnp.linalg.solve`. For
-    large systems pass a custom ``tangent_solve`` (e.g. a Krylov solve).
+    scalars a single division suffices. Up to ``dense_limit`` unknowns, and
+    without ``precond``, the dense Jacobian is materialised and solved with
+    :func:`jnp.linalg.solve`; otherwise restarted GMRES on ``g`` runs
+    matrix-free (memory ``O(n m)`` for a cycle of ``m``) to a relative
+    residual of ``rtol`` (default ``max(1e-10, 100 eps)``), right
+    preconditioned by ``M`` and its transposed system by ``M_T`` from
+    ``precond = (M, M_T)``, and the tangent is NaN if it does not converge.
+    ``M_T=None`` with a given ``M`` uses ``jax.linear_transpose(M)``. A
+    complex vector is solved as the real system of twice the size, so ``g``
+    (and ``M``) need only be real-linear (a residual with ``conj`` is
+    handled); a complex scalar uses the division and requires a holomorphic
+    residual.
     """
     y = jnp.asarray(y)
     if y.ndim == 0:
         return y / g(jnp.ones_like(y))
-    jac = jax.jacobian(g)(jnp.zeros_like(y))
-    return jnp.linalg.solve(jac, y)
+    options = dict(rtol=rtol, restart=restart, max_restarts=max_restarts)
+    if jnp.iscomplexobj(y):
+        # Solve the real 2n system, valid for any R-linear g (holomorphic or not).
+        n = y.size
+
+        def split(w: jax.Array) -> jax.Array:
+            return jnp.concatenate([w.real.ravel(), w.imag.ravel()])
+
+        def real(fn: Callable | None) -> Callable | None:
+            if fn is None:
+                return None
+            return lambda u: split(fn((u[:n] + 1j * u[n:]).reshape(y.shape)))
+
+        pair = None if precond is None else (real(precond[0]), real(precond[1]))
+        v = _default_tangent_solve(
+            real(g), split(y), 2 * dense_limit, precond=pair, **options
+        )
+        return (v[:n] + 1j * v[n:]).reshape(y.shape)
+    if precond is None and y.size <= dense_limit:
+        jac = jax.jacobian(g)(jnp.zeros_like(y))
+        return jnp.linalg.solve(jac, y)
+    if rtol is None:
+        rtol = max(1e-10, 100 * float(jnp.finfo(y.dtype).eps))
+    m, m_t = (None, None) if precond is None else precond
+    if m is not None and m_t is None:
+
+        def m_t(v: jax.Array) -> jax.Array:
+            try:
+                return jax.linear_transpose(m, v)(v)[0]
+            except NotImplementedError as error:
+                raise ValueError(
+                    "tangent_precond: M is not linear, so M_T=None cannot "
+                    "transpose it; pass M_T"
+                ) from error
+
+    def krylov(pc: Callable | None, matvec: Callable, b: jax.Array) -> jax.Array:
+        sol = gmres(
+            matvec, b, precond=pc, rtol=rtol, max_restarts=max_restarts,
+            restart=min(50, b.size) if restart is None else restart,
+        )
+        return jnp.where(sol.converged, sol.x, jnp.nan)
+
+    return jax.lax.custom_linear_solve(
+        g, y, partial(krylov, m), transpose_solve=partial(krylov, m_t)
+    )
 
 
 def root_solve(
@@ -456,7 +522,13 @@ def root_solve(
     solver: Callable,
     *,
     tangent_solve: Callable | None = None,
-) -> jax.Array:
+    dense_limit: int = DENSE_TANGENT_LIMIT,
+    tangent_precond: tuple | Callable | None = None,
+    tangent_rtol: float | None = None,
+    tangent_restart: int | None = None,
+    tangent_max_restarts: int = 40,
+    has_aux: bool = False,
+) -> Any:
     """Differentiable root find with a user-supplied black-box rootfinder.
 
     Finds ``x`` with ``f(x) = 0`` by calling ``solver(f, x0)``, and registers
@@ -474,18 +546,74 @@ def root_solve(
         x0: initial guess passed to ``solver``.
         solver: callable ``solver(f, x0) -> x_root``, e.g. a Newton loop.
             Treated as a black box (never differentiated through), but must
-            be traceable by JAX.
+            be traceable by JAX. With ``has_aux=True`` it returns
+            ``(x_root, aux)``.
         tangent_solve: optional callable ``tangent_solve(g, y) -> x`` solving
             the linearised system ``g(x) = y``, where ``g`` is the Jacobian
             of ``f`` at the root as a linear map. Defaults to a scalar
-            division for scalar problems and a dense
-            :func:`jnp.linalg.solve` of the materialised Jacobian for small
-            vector systems.
+            division for scalar problems, a dense :func:`jnp.linalg.solve`
+            of the materialised Jacobian up to ``dense_limit`` unknowns, and
+            matrix-free restarted GMRES above it, whose tangent is NaN when
+            GMRES does not reach a relative residual of ``tangent_rtol``
+            (default ``max(1e-10, 100 eps)``). The limit is not a cost crossover; it keeps
+            the dense solve, which never gives NaN on a nonsingular
+            Jacobian, where it is affordable: unpreconditioned GMRES is
+            cheaper on a well-conditioned Jacobian but returns NaN on a hard one (even a non-normal
+            Jacobian of condition 1e2), where the remedy is
+            ``dense_limit=n``, ``tangent_precond`` or a ``tangent_solve``. Complex
+            vector roots may be non-holomorphic (``conj`` in ``f``): they
+            are solved as the real system of size ``2n``. Complex scalar
+            roots require a holomorphic ``f``.
+        dense_limit: largest number of unknowns for which the default
+            tangent forms the dense ``n x n`` Jacobian (static). Ignored
+            when ``tangent_solve`` or ``tangent_precond`` is given.
+        tangent_precond: right preconditioner of the default GMRES tangent,
+            which it then selects at every size: a pair ``(M, M_T)`` of
+            callables ``v -> M^{-1} v`` and ``v -> M^{-T} v`` (``M_T`` for
+            the transposed system of reverse mode), or a factory
+            ``x_root -> (M, M_T)`` called once with the root, so a
+            preconditioner built from the root costs no second solve.
+            ``M_T=None`` takes ``jax.linear_transpose`` of ``M``, which
+            must then be linear. ``M`` acts on arrays shaped like ``x``;
+            for a complex ``x`` it must be real-linear and ``M_T`` is its
+            adjoint (conjugate transpose), since the tangent is the real
+            ``2n`` system. Exclusive with ``tangent_solve``.
+        tangent_rtol: GMRES relative residual of the default tangent.
+        tangent_restart: GMRES cycle (default ``min(50, size)``).
+        tangent_max_restarts: GMRES cycles before the tangent is NaN.
+        has_aux: ``solver`` returns ``(x_root, aux)`` and so does this
+            function; ``aux`` (iterations, residual, status) carries a zero
+            derivative. Before JAX 0.7 an integer or boolean ``aux`` fails
+            (in ``jax.lax.custom_root``): give it a floating dtype.
 
     Returns:
         The root ``x``, differentiable w.r.t. the parameters closed over by
-        ``f``.
+        ``f``, or ``(x, aux)`` with ``has_aux=True``.
     """
-    if tangent_solve is None:
-        tangent_solve = _default_tangent_solve
-    return jax.lax.custom_root(f, x0, solver, tangent_solve)
+    if tangent_solve is not None and tangent_precond is not None:
+        raise ValueError("pass tangent_solve or tangent_precond, not both")
+    options = dict(
+        rtol=tangent_rtol, restart=tangent_restart,
+        max_restarts=tangent_max_restarts,
+    )
+    if tangent_precond is None:
+        if tangent_solve is None:
+            tangent_solve = partial(
+                _default_tangent_solve, dense_limit=dense_limit, **options
+            )
+        return jax.lax.custom_root(f, x0, solver, tangent_solve, has_aux=has_aux)
+    factory = (
+        tangent_precond if callable(tangent_precond)
+        else lambda _: tuple(tangent_precond)
+    )
+    # Solve once for the root, build the pair there, then let custom_root
+    # differentiate (to any order) with a no-op solver returning that root.
+    # The pair enters custom_root's tangent as a constant, so derivatives of
+    # M (and of values it closes over) are not taken: a converged tangent
+    # does not depend on its preconditioner.
+    found = jax.lax.stop_gradient(
+        jax.lax.custom_root(f, x0, solver, lambda g, y: y, has_aux=has_aux)
+    )
+    precond = factory(found[0] if has_aux else found)
+    tangent = partial(_default_tangent_solve, precond=precond, **options)
+    return jax.lax.custom_root(f, x0, lambda *_: found, tangent, has_aux=has_aux)
