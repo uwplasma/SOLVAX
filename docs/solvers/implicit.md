@@ -195,14 +195,56 @@ root = sx.root_solve(
 
 `solver(f, x0)` computes the primal root. `tangent_solve(g, y)` solves the
 linearized system $g(v)=y$, where `g` is a Jacobian-vector product at the root.
-The default uses scalar division for scalar roots and materializes a dense
-Jacobian for vectors, so large roots should always supply a matrix-free tangent
-solver.
+The default uses scalar division for scalar roots, a dense Jacobian for vectors
+of at most `dense_limit` unknowns (1024, `solvax.implicit.DENSE_TANGENT_LIMIT`),
+and above that unpreconditioned restarted GMRES (cycle of 50, 40 restarts,
+relative residual `max(1e-10, 100 eps)`), so no `n x n` buffer is formed. The
+limit is not a cost crossover; it keeps the dense solve, which never gives NaN
+on a nonsingular Jacobian, where it is affordable: on a well-conditioned
+Jacobian GMRES is already cheaper at 512 unknowns, but unpreconditioned GMRES
+fails on hard Jacobians (a random non-normal one of condition 1e2 is enough),
+and then the tangent is NaN. The remedy is `dense_limit=n` or a preconditioned
+tangent solver. Complex vector roots are solved as the real system of size
+`2n`, so `f` may contain `conj`; complex scalar roots need a holomorphic `f`.
+Reverse mode transposes a custom tangent solver, so wrap a Krylov solve in
+`jax.lax.custom_linear_solve`:
 
 ```python
 def tangent_solve(jvp, rhs):
-    return sx.gmres(jvp, rhs, rtol=1e-10).x
+    def solve(matvec, b):
+        return sx.gmres(matvec, b, precond=precond, rtol=1e-10).x
+
+    return jax.lax.custom_linear_solve(jvp, rhs, solve, transpose_solve=solve)
 ```
+
+To keep the dense tangent above the limit, pass `dense_limit=n`.
+
+The default GMRES tangent also takes a right preconditioner and its options,
+which avoids writing the wrapper above:
+
+```python
+root = sx.root_solve(f, x0, newton_solver, tangent_precond=(M, M_T))
+root = sx.root_solve(f, x0, newton_solver,
+                     tangent_precond=lambda x_root: build_pair(x_root),
+                     tangent_rtol=1e-10, tangent_restart=50,
+                     tangent_max_restarts=40)
+```
+
+`tangent_precond` is a pair of callables `v -> M^{-1} v` and
+`v -> M^{-T} v`, or a factory called once with the root, so a preconditioner
+built from the Jacobian at the root needs no second primal solve. Given, it
+selects the GMRES tangent at every size. `M_T` is used for the transposed
+system of reverse mode; `M_T=None` uses `jax.linear_transpose(M)`, so `M` must
+then be linear. For a complex root `M` acts on the complex vector, and `M_T` is
+its adjoint (conjugate transpose), because the tangent is the real `2n` system.
+On a nonsymmetric advection-diffusion root of 1200 unknowns with
+`cond(df/dx) = 7e4`, the unpreconditioned tangent is NaN, and
+`tangent_precond` with the LU of the linear part matches the dense tangent to
+2e-13 and central differences to 3e-10.
+
+With `has_aux=True` the solver returns `(root, aux)` and so does `root_solve`;
+`aux` (iterations, residual, status) has a zero derivative. Before JAX 0.7
+give it a floating dtype, as `certified_root` does.
 
 ## PCG-specific wrapper
 
