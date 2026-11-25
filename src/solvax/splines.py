@@ -480,8 +480,11 @@ def tensor_spline_coefficients(
     sets the end second derivatives to zero exactly, since through the end
     slopes their rounding is amplified by the cross block. A slope rule along
     ``y`` is not linear in the data, so it is applied instead to the knot
-    values and the x-slopes, the corner data of a bicubic Hermite patch. A periodic axis
-    ignores the last row (``bc[0]``) or column (``bc[1]``) of ``f``.
+    values and the x-slopes, the corner data of a bicubic Hermite patch: the
+    spline is then only C1 in ``x`` between the y-knots, and swapping the axes
+    of the data and of ``bc`` gives a different interpolant. ``"clamped"`` sets
+    the end slopes to zero. A periodic axis ignores the last row (``bc[0]``) or
+    column (``bc[1]``) of ``f``.
 
     Args:
         x, y: strictly increasing knots, shapes ``(nx,)`` and ``(ny,)``.
