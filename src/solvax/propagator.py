@@ -449,10 +449,12 @@ def _filtered_eigenpairs(
                 (count, *initial.shape)
             )
 
+        # Restart from the sum of all wanted Ritz vectors: restarting from the
+        # leading one alone leaves the others only as rounding error.
         initial = jax.lax.fori_loop(
             1,
             restarts,
-            lambda _index, start: extract(start, 1)[0],
+            lambda _index, start: extract(start, candidates).sum(axis=0),
             initial,
         )
         vectors = extract(initial, candidates)

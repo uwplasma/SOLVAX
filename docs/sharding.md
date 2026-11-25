@@ -101,8 +101,8 @@ iteration at identical arithmetic.
 
 One honest caveat, pinned by the version-gated test: the rewrite is
 *algebraically* single-reduction, but whether the compiled module realizes the
-fusion depends on the XLA partitioner. Current JAX fuses; the oldest supported
-(0.4-era GSPMD) lowering does not, where the rewrite neither helps nor hurts.
+fusion depends on the XLA partitioner. JAX 0.7 and later fuse; 0.4.38 to 0.6.2
+do not (7 collectives against 6), where the rewrite neither helps nor hurts.
 Collective counts are a property of the algorithm *and* the compiler — which is
 exactly why they are measured, not asserted from the algebra.
 
