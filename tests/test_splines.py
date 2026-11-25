@@ -372,9 +372,7 @@ def test_coefficients_match_scipy_ppoly(bc):
         spline, ref = cubic_spline(X, y, monotone=True), interpolate.PchipInterpolator(X, y)
     else:
         spline, ref = cubic_spline(X, y, bc=bc), interpolate.CubicSpline(X, y, bc_type=bc)
-    c = jax.jit(cubic_spline_coefficients, static_argnames="monotone")(
-        spline, monotone=bc == "monotone"
-    )
+    c = jax.jit(cubic_spline_coefficients)(spline)  # the spline knows how it was fitted
     assert c.shape == ref.c.shape
     scale = np.abs(ref.c).max(axis=(1, 2), keepdims=True)
     np.testing.assert_allclose(c / scale, ref.c / scale, atol=1e-12)
@@ -389,7 +387,8 @@ def test_coefficients_against_exact_arithmetic_on_a_fine_grid():
     exact = _exact_natural([Fraction(v) for v in x], [Fraction(v) for v in y])
     spline = cubic_spline(x, y, bc="natural")
     chosen = _block_errors(cubic_spline_coefficients(spline), exact)
-    slope_form = _block_errors(cubic_spline_coefficients(spline, monotone=True), exact)
+    as_c1 = spline._replace(smooth=jnp.asarray(False))  # same slopes, coefficients from them
+    slope_form = _block_errors(cubic_spline_coefficients(as_c1), exact)
     assert np.all(chosen[:3] <= slope_form[:3]), (chosen, slope_form)
     assert chosen[0] < 1e-11 and chosen[1] < 2e-12 and chosen[2] < 1e-15, chosen
 
@@ -410,6 +409,19 @@ def test_tensor_product_cross_block_against_exact_arithmetic():
     assert error < 4.3e-10, error
 
 
+def test_coefficients_of_a_batch_of_mixed_splines_under_vmap():
+    """A stack of C2 and monotone fits: each keeps its own coefficient form."""
+    y = np.stack([np.sin(X), np.cumsum(np.random.default_rng(3).uniform(size=X.size))])
+    fits = [cubic_spline(X, y[0]), cubic_spline(X, y[1], monotone=True)]
+    stack = jax.tree_util.tree_map(lambda *a: jnp.stack(a), *fits)
+    c = jax.vmap(cubic_spline_coefficients)(stack)
+    refs = [interpolate.CubicSpline(X, y[0]), interpolate.PchipInterpolator(X, y[1])]
+    for k in range(2):
+        np.testing.assert_allclose(c[k], refs[k].c, atol=1e-12 * np.abs(refs[k].c).max())
+        v = jax.vmap(piecewise_cubic_evaluate, (None, 0, None))(X, c, P)[k]
+        np.testing.assert_allclose(v, cubic_spline_evaluate(fits[k], P), atol=1e-12)
+
+
 def test_coefficient_gradients_and_joint_evaluation():
     y = np.sin(X)
     loss = lambda y: jnp.sum(cubic_spline_coefficients(cubic_spline(X, y)) ** 2)  # noqa: E731
@@ -425,7 +437,7 @@ def test_coefficient_gradients_and_joint_evaluation():
     for k, value in enumerate(joint):
         np.testing.assert_array_equal(value, cubic_spline_evaluate(spline, P, derivative=k))
     fused = jax.jit(lambda p: cubic_spline_evaluate(spline, p, derivative=(0, 1)))(P)
-    np.testing.assert_allclose(fused[1], joint[1], rtol=1e-14, atol=1e-14)
+    np.testing.assert_allclose(fused[1], joint[1], atol=1e-14 * np.abs(joint[1]).max())
     with pytest.raises(ValueError, match="tuple"):
         cubic_spline_evaluate(spline, P, derivative=(0, 3))
 
@@ -439,7 +451,7 @@ def test_stored_coefficients_evaluate_as_the_spline(bc, uniform):
         y[-1] = y[0]
     monotone = bc == "monotone"
     spline = cubic_spline(x, y, monotone=True) if monotone else cubic_spline(x, y, bc=bc)
-    c = cubic_spline_coefficients(spline, monotone=monotone)
+    c = cubic_spline_coefficients(spline)
     q = np.r_[P, x]  # inside, at the knots and beyond the ends
     stored = jax.jit(
         lambda c, q: piecewise_cubic_evaluate(

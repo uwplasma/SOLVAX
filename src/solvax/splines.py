@@ -47,7 +47,9 @@ Knots must be real and strictly increasing; this is checked when ``x`` is
 concrete and not inside a trace, where repeated or unsorted knots give NaN or
 an undefined result. Data may be complex (except with ``monotone=True``);
 the knots and points stay real. With knot spacings that differ by a factor
-of 1e6 the C2 slope systems lose about four digits (SciPy agrees to 1e-9).
+of 1e6 the values agree with SciPy to about 4e-10 of the data scale for every
+end condition on 16 or more knots, and for all but not-a-knot on fewer; the
+not-a-knot end rows lose more on few knots, up to 1e-4 on four.
 """
 
 from __future__ import annotations
@@ -81,12 +83,16 @@ class CubicSpline(NamedTuple):
         y: data at the knots, shape ``(n, *batch)``.
         slopes: first derivative at the knots, shape of ``y``.
         period: ``x[-1] - x[0]`` for a periodic spline, zero otherwise.
+        smooth: true when the slopes make the spline C2 (the end conditions of
+            ``bc``), false for the C1 slopes of ``monotone=True``; it decides
+            how :func:`cubic_spline_coefficients` forms the coefficients.
     """
 
     x: jax.Array
     y: jax.Array
     slopes: jax.Array
     period: jax.Array
+    smooth: jax.Array
 
 
 def _column(v: jax.Array, ndim: int) -> jax.Array:
@@ -166,23 +172,23 @@ def cubic_spline(
         y = y.at[-1].set(y[0])
     h = jnp.diff(x)
     d = jnp.diff(y, axis=0) / _column(h, y.ndim)
-    zero = jnp.zeros((), x.dtype)
+    zero, c2 = jnp.zeros((), x.dtype), jnp.asarray(not monotone)
     if (n == 2 and bc != "clamped") or (n == 3 and bc == "not-a-knot" and not monotone):
         # Line or parabola through the data: its slope at a knot is a weighted secant.
         if n == 2:
-            return CubicSpline(x, y, jnp.concatenate([d, d]), zero)
+            return CubicSpline(x, y, jnp.concatenate([d, d]), zero, c2)
         w0, w1 = h[1] / (h[0] + h[1]), h[0] / (h[0] + h[1])
         mid = w0 * d[0] + w1 * d[1]
         s = jnp.stack([2 * d[0] - mid, mid, 2 * d[1] - mid])
-        return CubicSpline(x, y, s, zero)
+        return CubicSpline(x, y, s, zero, c2)
     if monotone:
-        return CubicSpline(x, y, _pchip_slopes(h, d), zero)
+        return CubicSpline(x, y, _pchip_slopes(h, d), zero, c2)
     if bc == "periodic":
         hl, hr = jnp.roll(h, 1), h  # widths left and right of knots 0 .. n-2
         dl, dr = jnp.roll(d, 1, axis=0), d
         rhs = 3.0 * (_column(hr, y.ndim) * dl + _column(hl, y.ndim) * dr)
         s = cyclic_tridiagonal_solve(hr, 2.0 * (hl + hr), hl, rhs)
-        return CubicSpline(x, y, jnp.concatenate([s, s[:1]], axis=0), x[-1] - x[0])
+        return CubicSpline(x, y, jnp.concatenate([s, s[:1]], axis=0), x[-1] - x[0], c2)
     # Interior rows: continuity of the second derivative at knots 1 .. n-2.
     lower = jnp.concatenate([zero[None], h[1:], zero[None]])
     diag = jnp.concatenate([zero[None], 2.0 * (h[:-1] + h[1:]), zero[None]])
@@ -203,7 +209,7 @@ def cubic_spline(
         r0 = jnp.broadcast_to(jnp.asarray(end_slopes[0], dtype), y.shape[1:])
         r1 = jnp.broadcast_to(jnp.asarray(end_slopes[1], dtype), y.shape[1:])
     rhs = jnp.concatenate([r0[None], rhs, r1[None]], axis=0)
-    return CubicSpline(x, y, tridiagonal_solve(lower, diag, upper, rhs), zero)
+    return CubicSpline(x, y, tridiagonal_solve(lower, diag, upper, rhs), zero, c2)
 
 
 def cubic_spline_evaluate(
@@ -265,7 +271,7 @@ def _interval(x: jax.Array, p: jax.Array) -> jax.Array:
 
 def _locate(spline: CubicSpline, points):
     """Interval index, offset and power coefficients at the (wrapped) points."""
-    x, y, s, period = spline
+    x, y, s, period, _ = spline
     p = jnp.asarray(points, x.dtype)
     p = jnp.where(period > 0, x[0] + jnp.mod(p - x[0], jnp.where(period > 0, period, 1.0)), p)
     i = _interval(x, p)
@@ -315,7 +321,7 @@ def cubic_spline_integrate(spline: CubicSpline, a: jax.Array, b: jax.Array) -> j
     return cubic_spline_antiderivative(spline, b) - cubic_spline_antiderivative(spline, a)
 
 
-def cubic_spline_coefficients(spline: CubicSpline, *, monotone: bool = False) -> jax.Array:
+def cubic_spline_coefficients(spline: CubicSpline) -> jax.Array:
     """Power coefficients of each interval, in the layout of SciPy's ``PPoly.c``.
 
     Returns ``c`` of shape ``(4, n - 1, *batch)``: on ``[x[i], x[i+1]]`` the
@@ -324,22 +330,23 @@ def cubic_spline_coefficients(spline: CubicSpline, *, monotone: bool = False) ->
     the spline's own end slopes (the same spline for every end condition),
     and ``c[0]``, ``c[1]``, ``c[2]`` are formed from them: the slope formula
     for ``c[0]``, ``(s0 + s1 - 2 delta) / h^2``, cancels to O(h^2) of its terms
-    and carries about five times more rounding. Pass ``monotone=True`` for a
-    spline fitted with ``monotone=True``, which is only C1: its coefficients
-    are then formed from the slopes.
+    and carries about five times more rounding. A spline that is only C1
+    (``spline.smooth`` false) has its coefficients formed from the slopes.
     """
     x, y, s = spline.x, spline.y, spline.slopes
     h = _column(jnp.diff(x), y.ndim)
     d = jnp.diff(y, axis=0) / h
-    if monotone:
-        c3, c2 = (s[:-1] + s[1:] - 2.0 * d) / h**2, (3.0 * d - 2.0 * s[:-1] - s[1:]) / h
-        return jnp.stack([c3, c2, s[:-1], y[:-1]])
+    c1 = jnp.stack(
+        [(s[:-1] + s[1:] - 2.0 * d) / h**2, (3.0 * d - 2.0 * s[:-1] - s[1:]) / h, s[:-1]]
+    )
     zero = jnp.zeros((1,), x.dtype)
     hl, hr = jnp.concatenate([zero, jnp.diff(x)]), jnp.concatenate([jnp.diff(x), zero])
     rhs = 6.0 * jnp.concatenate([d[:1] - s[:1], d[1:] - d[:-1], s[-1:] - d[-1:]], axis=0)
     m = tridiagonal_solve(hl, 2.0 * (hl + hr), hr, rhs)
-    c1 = d - h * (2.0 * m[:-1] + m[1:]) / 6.0
-    return jnp.stack([(m[1:] - m[:-1]) / (6.0 * h), 0.5 * m[:-1], c1, y[:-1]])
+    c2 = jnp.stack(
+        [(m[1:] - m[:-1]) / (6.0 * h), 0.5 * m[:-1], d - h * (2.0 * m[:-1] + m[1:]) / 6.0]
+    )
+    return jnp.concatenate([jnp.where(spline.smooth, c2, c1), y[None, :-1]])
 
 
 def piecewise_cubic_evaluate(
