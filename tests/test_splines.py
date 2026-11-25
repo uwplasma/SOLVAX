@@ -24,7 +24,9 @@ from solvax import (
     cubic_spline_coefficients,
     cubic_spline_evaluate,
     cubic_spline_integrate,
+    piecewise_bicubic_evaluate,
     piecewise_cubic_evaluate,
+    tensor_spline_coefficients,
 )
 
 jax.config.update("jax_enable_x64", True)
@@ -407,6 +409,26 @@ def test_tensor_product_cross_block_against_exact_arithmetic():
     cross = [_exact_natural(ft, [rows[j][i] for j in range(t.size)])[0] for i in range(t.size - 1)]
     error = _block_errors(np.asarray(both[0, :, 0, :]).T, cross).max()
     assert error < 4.3e-10, error
+    tensor = tensor_spline_coefficients(t, t, f, bc=("natural", "natural"))  # (4, 23, 4, 23)
+    np.testing.assert_allclose(tensor, jnp.moveaxis(both, (0, 1), (2, 3)), rtol=1e-8, atol=1e-14)
+
+
+@pytest.mark.parametrize(("freq", "neo"), [(0.01, 4.31e-10), (0.07, 9.84e-13)])
+def test_tensor_cross_block_on_the_neo_jax_grid(freq, neo):
+    """The 9 x 7 grid (spacings 0.1, 0.2) and data of NEO_JAX's spline tests.
+    ``neo`` is the error of NEO_JAX's spl2d there against exact arithmetic; the
+    two differ by the order of the rounding, up to a factor 1.4 either way over
+    frequencies 0.003 to 0.3. Differencing secants before the moment solve gave
+    2.7 and 2.3 times ``neo``, slope-formed coefficients ten times."""
+    x, y = np.arange(9) * 0.1, np.arange(7) * 0.2
+    f = np.sin(np.arange(63.0).reshape(9, 7) * freq)
+    fx, fy = [Fraction(v) for v in x], [Fraction(v) for v in y]
+    rows = [_exact_natural(fx, [Fraction(v) for v in f[:, j]])[0] for j in range(y.size)]
+    cross = [_exact_natural(fy, [rows[j][i] for j in range(y.size)])[0] for i in range(x.size - 1)]
+    c = tensor_spline_coefficients(x, y, f, bc=("natural", "natural"))
+    cross = np.array([[float(v) for v in row] for row in cross])
+    error = np.abs(np.asarray(c[0, :, 0, :]) - cross).max() / np.abs(cross).max()
+    assert error <= 1.5 * neo, error
 
 
 def test_coefficients_of_a_batch_of_mixed_splines_under_vmap():
@@ -561,3 +583,138 @@ def test_slope_modes_against_finite_differences(slopes):
             lambda a, arg=arg: loss(*args[:arg], a, *args[arg + 1 :]), (args[arg],), (v,)
         )
         np.testing.assert_allclose(tangent, np.vdot(g, v), rtol=1e-12)
+
+
+GX = np.sort(np.r_[0.0, np.random.default_rng(41).uniform(0.0, 2.0, 7), 2.0])  # 9 knots
+GY = np.sort(np.r_[-1.0, np.random.default_rng(42).uniform(-1.0, 1.0, 5), 1.0])  # 7 knots
+ORDERS = [(i, j) for i in range(3) for j in range(3)]
+
+
+def _nested(x, y, f, bc, px, py, i, j):
+    """Nested 1-D SciPy splines on the grid px x py: along x, then along y."""
+    along_x = interpolate.CubicSpline(x, f, bc_type=bc[0], axis=0)(px, i)
+    return interpolate.CubicSpline(y, along_x, bc_type=bc[1], axis=1)(py, j)
+
+
+@pytest.mark.parametrize(
+    "bc",
+    [
+        ("not-a-knot", "not-a-knot"),
+        ("periodic", "periodic"),
+        ("periodic", "natural"),
+        ("clamped", "not-a-knot"),
+    ],
+)
+def test_tensor_spline_against_nested_scipy(bc):
+    rng = np.random.default_rng(43)
+    f = rng.normal(size=(GX.size, GY.size, 2))
+    for axis in (0, 1):
+        if bc[axis] == "periodic":
+            f[(slice(None),) * axis + (-1,)] = f[(slice(None),) * axis + (0,)]
+    c = jax.jit(lambda x, y, f: tensor_spline_coefficients(x, y, f, bc=bc))(GX, GY, f)
+    assert c.shape == (4, GX.size - 1, 4, GY.size - 1, 2)
+    px, py = np.linspace(-0.2, 2.2, 13), np.linspace(-1.3, 1.3, 11)  # beyond the ends
+    periodic = tuple(b == "periodic" for b in bc)
+    ev = jax.jit(
+        lambda c, px, py, d: piecewise_bicubic_evaluate(
+            GX, GY, c, px, py, derivative=d, periodic=periodic
+        ),
+        static_argnums=3,
+    )
+    grid = ev(c, px[:, None], py[None, :], tuple(ORDERS))
+    for (i, j), got in zip(ORDERS, grid, strict=True):
+        ref = _nested(GX, GY, f, bc, px, py, i, j)
+        np.testing.assert_allclose(got, ref, atol=1e-11 * (1 + np.abs(ref).max()))
+        scattered = ev(c, px[:11], py, (i, j))  # one point per pair: the diagonal of the grid
+        np.testing.assert_allclose(
+            scattered, ref[np.arange(11), np.arange(11)], atol=1e-11 * (1 + np.abs(ref).max())
+        )
+
+
+def test_tensor_spline_matches_rect_bivariate_spline_and_bicubics():
+    """FITPACK's interpolating bicubic (s=0) is the not-a-knot spline on each axis;
+    a not-a-knot spline reproduces any bicubic polynomial (de Boor 2001, ch. XVII)."""
+    rng = np.random.default_rng(44)
+    a = rng.normal(size=(4, 4))
+    poly = lambda x, y: np.polynomial.polynomial.polyval2d(x, y, a)  # noqa: E731
+    xx, yy = np.meshgrid(GX, GY, indexing="ij")
+    f = np.stack([poly(xx, yy), np.sin(2 * xx) * np.cos(3 * yy)], axis=-1)
+    c = tensor_spline_coefficients(GX, GY, f)
+    px, py = rng.uniform(-0.2, 2.2, 50), rng.uniform(-1.2, 1.2, 50)
+    rbs = interpolate.RectBivariateSpline(GX, GY, f[..., 1], s=0)
+    for i, j in ORDERS:
+        got = piecewise_bicubic_evaluate(GX, GY, c, px, py, derivative=(i, j))
+        exact = np.polynomial.polynomial.polyval2d(
+            px,
+            py,
+            np.polynomial.polynomial.polyder(
+                np.polynomial.polynomial.polyder(a, i, axis=0), j, axis=1
+            ),
+        )
+        np.testing.assert_allclose(got[:, 0], exact, atol=1e-10 * (1 + np.abs(exact).max()))
+        inside = (px >= 0) & (px <= 2) & (py >= -1) & (py <= 1)  # FITPACK does not extrapolate
+        ref = rbs.ev(px[inside], py[inside], dx=i, dy=j)
+        np.testing.assert_allclose(got[inside, 1], ref, atol=1e-11 * (1 + np.abs(ref).max()))
+
+
+def test_tensor_spline_uniform_index_minimum_knots_and_errors():
+    x, y = np.linspace(0.0, 1.0, 5), np.linspace(0.0, 2.0, 2)  # two knots: a line in y
+    f = np.add.outer(np.sin(3 * x), 0.5 * y)
+    c = tensor_spline_coefficients(x, y, f, bc=("periodic", "not-a-knot"))
+    p, q = np.linspace(-0.5, 1.5, 9), np.linspace(-0.5, 2.5, 9)
+    for d in ORDERS:
+        searched = piecewise_bicubic_evaluate(x, y, c, p, q, derivative=d, periodic=(True, False))
+        uniform = piecewise_bicubic_evaluate(
+            x, y, c, p, q, derivative=d, periodic=(True, False), uniform=(True, True)
+        )
+        np.testing.assert_allclose(uniform, searched, atol=1e-12)
+    np.testing.assert_allclose(
+        piecewise_bicubic_evaluate(x, y, c, 0.3, q, derivative=(0, 1)), 0.5, atol=1e-13
+    )
+    c = tensor_spline_coefficients(x, y, f, bc=("akima", "monotone"))
+    ref = interpolate.Akima1DInterpolator(x, f, extrapolate=True)(0.37)
+    np.testing.assert_allclose(piecewise_bicubic_evaluate(x, y, c, 0.37, y), ref, atol=1e-13)
+    for bad in ((0, 3), (1,), 0):
+        with pytest.raises(ValueError, match="pair"):
+            piecewise_bicubic_evaluate(x, y, c, p, q, derivative=bad)
+
+
+def test_tensor_spline_derivatives_jit_and_vmap():
+    rng = np.random.default_rng(45)
+    f = rng.normal(size=(GX.size, GY.size))
+    f[-1] = f[0]
+    bc = ("periodic", "not-a-knot")
+    px, py = rng.uniform(0.05, 1.95, 6), rng.uniform(-0.95, 0.95, 6)
+
+    def loss(x, y, f, px, py):
+        c = tensor_spline_coefficients(x, y, f, bc=bc)
+        v = piecewise_bicubic_evaluate(
+            x, y, c, px, py, derivative=((0, 0), (1, 1)), periodic=(True, False)
+        )
+        return jnp.sum(jnp.sin(v[0]) + 0.1 * v[1])
+
+    args = [GX, GY, f, px, py]
+    grads = jax.jit(jax.grad(loss, argnums=range(5)))(*args)
+    for arg, g in enumerate(grads):
+        v, eps = rng.normal(size=np.shape(args[arg])), 1e-6
+        if arg == 0:
+            v[[0, -1]] = 0.0  # the period is fixed by the end knots
+        if arg == 2:
+            v[-1] = v[0]
+        plus, minus = list(args), list(args)
+        plus[arg], minus[arg] = args[arg] + eps * v, args[arg] - eps * v
+        fd = (loss(*plus) - loss(*minus)) / (2 * eps)
+        np.testing.assert_allclose(np.vdot(g, v), fd, rtol=1e-6, atol=1e-8)
+        _, t = jax.jvp(
+            lambda a, arg=arg: loss(*args[:arg], a, *args[arg + 1 :]), (args[arg],), (v,)
+        )
+        np.testing.assert_allclose(t, np.vdot(g, v), rtol=1e-11, atol=1e-13)
+    fs = rng.normal(size=(3, GX.size, GY.size))
+
+    def one(f):
+        return piecewise_bicubic_evaluate(GX, GY, tensor_spline_coefficients(GX, GY, f), px, py)
+
+    together = piecewise_bicubic_evaluate(
+        GX, GY, tensor_spline_coefficients(GX, GY, np.moveaxis(fs, 0, -1)), px, py
+    )
+    np.testing.assert_allclose(jax.vmap(one)(fs), np.moveaxis(together, -1, 0), atol=1e-13)

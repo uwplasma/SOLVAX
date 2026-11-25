@@ -225,7 +225,9 @@ from solvax.splines import (
     cubic_spline_coefficients,
     cubic_spline_evaluate,
     cubic_spline_integrate,
+    piecewise_bicubic_evaluate,
     piecewise_cubic_evaluate,
+    tensor_spline_coefficients,
 )
 from solvax.transfer import (
     CoarseningPlan,
@@ -336,6 +338,8 @@ __all__ = [
     "cubic_spline_antiderivative",
     "cubic_spline_coefficients",
     "piecewise_cubic_evaluate",
+    "tensor_spline_coefficients",
+    "piecewise_bicubic_evaluate",
     "FixedPointSolution",
     "affine_fixed_point_gmres",
     "aitken_fixed_point",

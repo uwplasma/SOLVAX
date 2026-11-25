@@ -5,6 +5,8 @@ piecewise cubic; :func:`cubic_spline_evaluate` gives its value, first or second
 derivative at any points, or several of them from one interval search.
 :func:`cubic_spline_coefficients` gives the power coefficients of each interval,
 which :func:`piecewise_cubic_evaluate` evaluates without rebuilding them.
+:func:`tensor_spline_coefficients` and :func:`piecewise_bicubic_evaluate` do the
+same for the tensor-product spline on a rectilinear 2-D grid.
 On the interval :math:`[x_i, x_{i+1}]` of width
 :math:`h_i`, with secant :math:`\delta_i = (y_{i+1} - y_i)/h_i` and slopes
 :math:`s_i`, the cubic in :math:`u = x - x_i` is
@@ -77,6 +79,8 @@ __all__ = [
     "cubic_spline_antiderivative",
     "cubic_spline_coefficients",
     "piecewise_cubic_evaluate",
+    "tensor_spline_coefficients",
+    "piecewise_bicubic_evaluate",
 ]
 
 _BCS = ("not-a-knot", "natural", "clamped", "periodic")
@@ -363,9 +367,16 @@ def cubic_spline_coefficients(spline: CubicSpline) -> jax.Array:
     the spline's own end slopes (the same spline for every end condition),
     and ``c[0]``, ``c[1]``, ``c[2]`` are formed from them: the slope formula
     for ``c[0]``, ``(s0 + s1 - 2 delta) / h^2``, cancels to O(h^2) of its terms
-    and carries about five times more rounding. A spline that is only C1
-    (``spline.smooth`` false) has its coefficients formed from the slopes.
+    and carries about five times more rounding. The moment equations take the
+    second differences of the data before dividing by the spacings. A spline
+    that is only C1 (``spline.smooth`` false) has its coefficients formed
+    from the slopes.
     """
+    return _coefficients(spline, natural=False)
+
+
+def _coefficients(spline: CubicSpline, natural: bool) -> jax.Array:
+    """:func:`cubic_spline_coefficients`; ``natural`` closes the moments with zero end curvature."""
     x, y, s = spline.x, spline.y, spline.slopes
     h = _column(jnp.diff(x), y.ndim)
     d = jnp.diff(y, axis=0) / h
@@ -374,7 +385,13 @@ def cubic_spline_coefficients(spline: CubicSpline) -> jax.Array:
     )
     zero = jnp.zeros((1,), x.dtype)
     hl, hr = jnp.concatenate([zero, jnp.diff(x)]), jnp.concatenate([jnp.diff(x), zero])
-    rhs = 6.0 * jnp.concatenate([d[:1] - s[:1], d[1:] - d[:-1], s[-1:] - d[-1:]], axis=0)
+    # Second differences of the data before dividing: exact on equal spacings, where
+    # differencing the secants d would lose the digits that d and d' share.
+    dy = jnp.diff(y, axis=0)
+    jump = (dy[1:] - dy[:-1] * (h[1:] / h[:-1])) / h[1:]
+    rhs = 6.0 * jnp.concatenate([d[:1] - s[:1], jump, s[-1:] - d[-1:]], axis=0)
+    if natural:  # exact zeros, not the rounding of 6 (d - s) / h at the ends
+        hl, hr, rhs = hl.at[-1].set(0.0), hr.at[0].set(0.0), rhs.at[0].set(0.0).at[-1].set(0.0)
     m = tridiagonal_solve(hl, 2.0 * (hl + hr), hr, rhs)
     c2 = jnp.stack(
         [(m[1:] - m[:-1]) / (6.0 * h), 0.5 * m[:-1], d - h * (2.0 * m[:-1] + m[1:]) / 6.0]
@@ -410,6 +427,17 @@ def piecewise_cubic_evaluate(
         Array (or tuple) of shape ``points.shape + batch``.
     """
     _check_orders(derivative)
+    i, u = _index(x, points, uniform, periodic)
+    c = coefficients[:, i]
+    u = _column(u, c.ndim - 1)
+    values = tuple(
+        _horner(k, c, u) for k in (derivative if isinstance(derivative, tuple) else (derivative,))
+    )
+    return values if isinstance(derivative, tuple) else values[0]
+
+
+def _index(x: jax.Array, points: jax.Array, uniform: bool, periodic: bool):
+    """Interval index and offset of each point, as for :func:`piecewise_cubic_evaluate`."""
     x = jnp.asarray(x)
     p = jnp.asarray(points, x.dtype)
     n = x.shape[0]
@@ -426,9 +454,90 @@ def piecewise_cubic_evaluate(
         i = jnp.clip(jnp.floor((p - x[0]) / step), 0, n - 2).astype(jnp.int32)  # clip, then cast
     else:
         i = _interval(x, p)
-    c = coefficients[:, i]
-    u = _column(p - x[i], c.ndim - 1)
+    return i, p - x[i]
+
+
+_FITS = {
+    "monotone": {"monotone": True},
+    "akima": {"slopes": "akima"},
+    "makima": {"slopes": "makima"},
+}
+
+
+def tensor_spline_coefficients(
+    x: jax.Array, y: jax.Array, f: jax.Array, *, bc: tuple[str, str] = ("not-a-knot", "not-a-knot")
+) -> jax.Array:
+    """Power coefficients of the tensor-product cubic spline through ``f[i, j]``.
+
+    The spline is fitted along ``x`` (with ``bc[0]``), and its interval
+    coefficients are fitted along ``y`` (with ``bc[1]``); by linearity this is
+    the tensor-product interpolant, whatever the order. Each entry of ``bc`` is
+    an end condition of :func:`cubic_spline` or ``"monotone"``, ``"akima"``,
+    ``"makima"`` for those slopes. The C2 coefficients come from the knot
+    second derivatives, as in :func:`cubic_spline_coefficients`: formed from
+    the slopes, the highest coefficients carry one more power of ``1/h`` of
+    rounding and the block of ``d_x^3 d_y^3`` loses a digit; a natural axis
+    sets the end second derivatives to zero exactly, since through the end
+    slopes their rounding is amplified by the cross block. A periodic axis
+    ignores the last row (``bc[0]``) or column (``bc[1]``) of ``f``.
+
+    Args:
+        x, y: strictly increasing knots, shapes ``(nx,)`` and ``(ny,)``.
+        f: data, shape ``(nx, ny, *batch)``.
+        bc: the fit along ``x`` and along ``y``.
+
+    Returns:
+        ``c`` of shape ``(4, nx - 1, 4, ny - 1, *batch)``: on the cell
+        ``[x[i], x[i+1]] x [y[j], y[j+1]]`` the spline is
+        ``sum_ab c[a, i, b, j] (x - x[i]) ** (3 - a) (y - y[j]) ** (3 - b)``.
+    """
+
+    def fit(t, v, kind):
+        return _coefficients(cubic_spline(t, v, **_FITS.get(kind, {"bc": kind})), kind == "natural")
+
+    along_x = fit(x, f, bc[0])  # (4, nx - 1, ny, *batch)
+    return jnp.moveaxis(fit(y, jnp.moveaxis(along_x, 2, 0), bc[1]), (0, 1), (2, 3))
+
+
+def piecewise_bicubic_evaluate(
+    x: jax.Array,
+    y: jax.Array,
+    coefficients: jax.Array,
+    px: jax.Array,
+    py: jax.Array,
+    *,
+    derivative: tuple = (0, 0),
+    uniform: tuple[bool, bool] = (False, False),
+    periodic: tuple[bool, bool] = (False, False),
+) -> jax.Array | tuple[jax.Array, ...]:
+    """Evaluate :func:`tensor_spline_coefficients` or a mixed partial derivative.
+
+    Args:
+        x, y: the knots.
+        coefficients: shape ``(4, nx - 1, 4, ny - 1, *batch)``.
+        px, py: coordinates of the points; they broadcast together, so
+            ``px[:, None]`` and ``py[None, :]`` evaluate on a grid.
+        derivative: ``(i, j)`` for ``d^(i+j) / dx^i dy^j`` with ``i, j`` in
+            0, 1, 2, or a tuple of such pairs, evaluated from one search.
+        uniform, periodic: per axis, as in :func:`piecewise_cubic_evaluate`.
+
+    Returns:
+        Array (or tuple) of the broadcast shape of the points plus ``batch``.
+    """
+    pairs = derivative if derivative and isinstance(derivative[0], tuple) else (derivative,)
+    if not isinstance(derivative, tuple) or not all(
+        isinstance(d, tuple) and len(d) == 2 and all(type(k) is int and 0 <= k <= 2 for k in d)
+        for d in pairs
+    ):
+        raise ValueError("derivative must be a pair of orders 0, 1, 2, or a tuple of pairs")
+    i, u = _index(x, px, uniform[0], periodic[0])
+    j, v = _index(y, py, uniform[1], periodic[1])
+    i, u, j, v = jnp.broadcast_arrays(i, u, j, v)
+    batch = coefficients.shape[4:]
+    block = coefficients[:, i.ravel(), :, j.ravel()].reshape(u.size, 4, 4, -1)  # (m, a, b, k)
+    along_x = {a: _horner(a, jnp.unstack(block, axis=1), u.reshape(-1, 1, 1)) for a, _ in pairs}
     values = tuple(
-        _horner(k, c, u) for k in (derivative if isinstance(derivative, tuple) else (derivative,))
+        _horner(b, jnp.unstack(along_x[a], axis=1), v.reshape(-1, 1)).reshape(u.shape + batch)
+        for a, b in pairs
     )
-    return values if isinstance(derivative, tuple) else values[0]
+    return values if isinstance(derivative[0], tuple) else values[0]
