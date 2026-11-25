@@ -223,6 +223,7 @@ from solvax.sparse_direct import (
     sparse_eigenvalue,
     sparse_solve,
 )
+from solvax.splines import CubicSpline, cubic_spline, cubic_spline_evaluate
 from solvax.transfer import (
     CoarseningPlan,
     coarse_axis_size,
@@ -325,6 +326,9 @@ __all__ = [
     "TridiagonalSolveDiagnostics",
     "TridiagonalSolveResult",
     "cyclic_tridiagonal_solve",
+    "CubicSpline",
+    "cubic_spline",
+    "cubic_spline_evaluate",
     "FixedPointSolution",
     "affine_fixed_point_gmres",
     "aitken_fixed_point",
