@@ -182,6 +182,12 @@ def test_exported_surface_is_stable():
         "newton_krylov",
         "ellipk",
         "plasma_dispersion",
+        "root_solve",
+        "certified_root",
+        "RootResult",
+        "ROOT_CONVERGED",
+        "ROOT_MAX_ITER",
+        "ROOT_STAGNATED",
     }
     missing = sorted(required - set(sx.__all__))
     assert not missing, f"public names disappeared from solvax.__all__: {missing}"

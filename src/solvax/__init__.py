@@ -87,7 +87,12 @@ from solvax.fixed_point import (
     fixed_point_iteration,
 )
 from solvax.implicit import (
+    ROOT_CONVERGED,
+    ROOT_MAX_ITER,
+    ROOT_STAGNATED,
     NewtonKrylovSolution,
+    RootResult,
+    certified_root,
     linear_solve,
     newton_krylov,
     recycled_linear_solve,
@@ -228,7 +233,13 @@ from solvax.special import (
     faddeeva,
     plasma_dispersion,
 )
-from solvax.splines import CubicSpline, cubic_spline, cubic_spline_evaluate
+from solvax.splines import (
+    CubicSpline,
+    cubic_spline,
+    cubic_spline_antiderivative,
+    cubic_spline_evaluate,
+    cubic_spline_integrate,
+)
 from solvax.transfer import (
     CoarseningPlan,
     coarse_axis_size,
@@ -343,6 +354,8 @@ __all__ = [
     "CubicSpline",
     "cubic_spline",
     "cubic_spline_evaluate",
+    "cubic_spline_integrate",
+    "cubic_spline_antiderivative",
     "FixedPointSolution",
     "affine_fixed_point_gmres",
     "aitken_fixed_point",
@@ -363,6 +376,11 @@ __all__ = [
     "NewtonKrylovSolution",
     "newton_krylov",
     "root_solve",
+    "certified_root",
+    "RootResult",
+    "ROOT_CONVERGED",
+    "ROOT_MAX_ITER",
+    "ROOT_STAGNATED",
     "LeastSquaresConfig",
     "LeastSquaresHistory",
     "LeastSquaresSolution",
