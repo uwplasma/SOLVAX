@@ -158,6 +158,8 @@ jobs:
               tests/test_precond_alfven.py tests/test_native_eigen.py
               tests/test_refine.py tests/test_pcg_benchmark.py tests/test_packaging.py
               tests/test_least_squares.py tests/test_compression.py tests/test_equilibration.py
+              tests/test_gpu.py tests/test_hygiene.py tests/test_krylov_compile_reuse.py
+              tests/test_ci_inventory.py tests/test_derivative_contracts.py
           - os: ubuntu-latest
             python: "3.12"
             stack: current
@@ -175,7 +177,7 @@ jobs:
               tests/test_pcg.py tests/test_propagator.py tests/test_ode.py tests/test_sharding.py
               tests/test_generated_block_benchmark.py
               tests/test_checkpointed_block_benchmark.py tests/test_native.py
-              tests/test_sparse_direct.py tests/test_separable.py
+              tests/test_sparse_direct.py tests/test_separable.py tests/test_splines.py
               tests/test_operator_couplings_benchmark.py
               tests/test_newton_krylov_root.py
           - os: ubuntu-latest
@@ -188,6 +190,13 @@ jobs:
             python: "3.12"
             stack: current
             label: macos-3.12-current
+            suite: compatibility
+            coverage: false
+          # Default resolution on Python 3.10 is JAX 0.6.2, the newest there.
+          - os: macos-latest
+            python: "3.10"
+            stack: current
+            label: macos-3.10-current
             suite: compatibility
             coverage: false
           - os: ubuntu-latest
@@ -215,7 +224,7 @@ jobs:
         tests/test_multigrid.py tests/test_eigen.py tests/test_generalized_eigenpairs.py
         tests/test_sharding.py
         tests/test_least_squares.py tests/test_sparse_direct.py tests/test_ode.py
-        tests/test_propagator.py
+        tests/test_propagator.py tests/test_splines.py
         tests/test_newton_krylov_root.py
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -303,10 +312,26 @@ jobs:
           path: artifacts/coverage/.coverage.adv
           key: solvax-coverage-${{ github.run_id }}-${{ github.run_attempt }}-adv
           fail-on-cache-miss: true
+      # Statements and branches are gated separately: the combined figure hid a
+      # branch coverage below 95%. Each gate is the measured value rounded down;
+      # raise it as tests land, up to 95.
       - run: |
           coverage combine artifacts/coverage
-          coverage report --fail-under=95
+          coverage report --fail-under=0
           coverage xml
+          coverage json -q -o coverage.json
+          python - <<'PY'
+          import json
+          t = json.load(open("coverage.json"))["totals"]
+          fail_under = {"statements": 98, "branches": 94}
+          got = {
+              "statements": 100 * t["covered_lines"] / t["num_statements"],
+              "branches": 100 * t["covered_branches"] / t["num_branches"],
+          }
+          for kind, value in got.items():
+              print(f"{kind}: {value:.2f}% (gate {fail_under[kind]}%)")
+          assert all(got[k] >= fail_under[k] for k in got), "coverage below its gate"
+          PY
       - uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

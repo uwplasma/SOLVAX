@@ -46,7 +46,8 @@ the Newton/Krylov iteration history.
 The default `forcing="constant"` passes `linear_rtol` to every inner GMRES
 solve. Opt-in `forcing="eisenstat_walker"` treats `linear_rtol` as the initial
 forcing term and uses the safeguarded Eisenstat--Walker choice 2 residual ratio
-for later Newton steps {cite}`eisenstat1996`. This avoids solving early Newton
+for later Newton steps {cite}`eisenstat1996`. The term never drops below `0.5*tol/||F_k||`, with `tol` the outer residual
+tolerance, so the last step is not oversolved. This avoids solving early Newton
 systems to terminal accuracy while tightening the inner tolerance as the
 nonlinear residual contracts. `forcing_gamma`, `forcing_alpha`, and
 `forcing_max` control the choice-2 formula; the maximum must remain below one.
