@@ -1,4 +1,8 @@
-"""Tests for pseudo-transient, forcing, homotopy, and arclength solves."""
+"""Tests for pseudo-transient, forcing, homotopy, and arclength solves.
+
+Forcing terms are checked against Eisenstat and Walker (1996), SIAM J. Sci.
+Comput. 17, 16, choice 2 with the safeguards of their section 2.1.
+"""
 
 from __future__ import annotations
 
@@ -194,13 +198,144 @@ def test_zero_residual_and_zero_step_budget_finish_without_linear_work():
     assert int(budgeted.steps) == 0
 
 
-def test_inexact_forcing_saves_krylov_work_against_fixed_tight_tolerance():
+_TIGHT_FIXED_FORCING = dict(eta_initial=1.0e-6, eta_min=1.0e-6, eta_max=1.0e-6)
+
+
+def _choice_2_forcing(norms, config):
+    """Eisenstat--Walker (1996) choice 2, eq. (2.6), with the safeguard of their
+    section 2.1, the cap eta_max of their section 3.1 and Kelley's floor
+    0.5*tol/||F_k|| tied to the outer tolerance, written out in NumPy."""
+
+    tolerance = max(config.atol, config.rtol * norms[0])
+    eta = [config.eta_initial]
+    for previous, current in zip(norms[:-1], norms[1:], strict=True):
+        candidate = config.eta_gamma * (current / previous) ** config.eta_power
+        safeguard = config.eta_gamma * eta[-1] ** config.eta_power
+        if safeguard > 0.1:
+            candidate = max(candidate, safeguard)
+        candidate = max(candidate, 0.5 * tolerance / current)
+        eta.append(min(config.eta_max, max(config.eta_min, candidate)))
+    return np.asarray(eta)
+
+
+def test_inexact_forcing_follows_choice_2_without_oversolving():
+    # Graded diagonal (1 to 1e5) with GMRES(20) on 32 unknowns: Newton needs four
+    # steps, and the inner cost depends on the right-hand side, not only on eta.
+    # After a tight solve the next residual is the quadratic remainder, which
+    # GMRES(20) reduces by 1e-4 in 26-217 iterations; after a loose solve it is
+    # the GMRES residual, spread over the spectrum, which takes 330-391. The two
+    # totals (1127 and 1119 with JAX 0.12.1, 1170 and 1352 with 0.12.0.1) are
+    # therefore not ordered by the method, and only its guarantees are asserted.
     size = 32
     diagonal = jnp.logspace(0.0, 5.0, size)
     matrix = jnp.diag(diagonal) + 0.2 * jnp.diag(diagonal[:-1], 1)
     residual = lambda x: matrix @ x + 0.2 * x**3 - 1.0  # noqa: E731
     common = dict(
         rtol=1.0e-9,
+        initial_dt=1.0e8,
+        max_dt=1.0e8,
+        linear_restart=20,
+        linear_max_restarts=40,
+        max_backtracks=4,
+    )
+    config = PseudoTransientConfig(max_steps=20, **common)
+    adaptive = pseudo_transient_continuation(residual, jnp.zeros(size), config=config)
+    fixed = pseudo_transient_continuation(
+        residual,
+        jnp.zeros(size),
+        config=PseudoTransientConfig(max_steps=20, **common, **_TIGHT_FIXED_FORCING),
+    )
+    assert bool(adaptive.converged) and bool(fixed.converged)
+    np.testing.assert_allclose(adaptive.x, fixed.x, rtol=1.0e-8, atol=0.0)
+    steps = int(adaptive.steps)
+    # Looser inner solves cost Newton steps; every full step is accepted here.
+    assert steps > int(fixed.steps)
+    for run in (adaptive, fixed):
+        assert int(run.rejected_steps) == 0
+        assert int(run.residual_evaluations) == 1 + 2 * int(run.steps)
+
+    norms = np.asarray(adaptive.history.residual_norm[: steps + 1])
+    eta = np.asarray(adaptive.history.eta[: steps + 1])
+    np.testing.assert_allclose(eta, _choice_2_forcing(norms, config), rtol=1.0e-12)
+
+    # GMRES stops at the first iterate with ||F_k + J_k s_k|| <= eta_k ||F_k||,
+    # so the ratio is at most one; one GMRES(20) iteration on this spectrum
+    # reduces the residual by less than a factor 10 (0.92-1.00 measured), so a
+    # ratio below 0.1 would mean the inner solve ran past its forcing term.
+    states = [
+        pseudo_transient_continuation(
+            residual, jnp.zeros(size), config=PseudoTransientConfig(max_steps=k, **common)
+        ).x
+        for k in range(steps + 1)
+    ]
+    for k in range(steps):
+        value, jvp = jax.linearize(residual, states[k])
+        step = states[k + 1] - states[k]
+        inner = float(jnp.linalg.norm(value + jvp(step) + step / common["max_dt"]))
+        assert 0.1 * eta[k] * norms[k] <= inner <= (1.0 + 1.0e-6) * eta[k] * norms[k]
+
+
+@pytest.mark.parametrize("size", [32, 64, 128])
+def test_inexact_forcing_saves_krylov_work_on_shifted_laplacian(size):
+    # u'' discretized with eigenvalues 2 - 2 cos(k pi / (size + 1)), shifted by
+    # sigma = 0.01, plus a cubic: the Jacobian condition number stays below
+    # (4 + sigma) / sigma = 401 at every size, so the GMRES cost per requested
+    # digit is bounded independently of the right-hand side. With the default
+    # pseudo-time stages the fixed run asks for 6 digits in each of 7 steps
+    # (42); choice 2 asks for about 11 over 8 steps. Measured iterations:
+    # 28/87, 29/87, 29/84 for sizes 32, 64, 128 with JAX 0.12.1 (ratio 0.32-0.35).
+    def residual(u):
+        laplacian = 2.0 * u - jnp.pad(u[:-1], (1, 0)) - jnp.pad(u[1:], (0, 1))
+        return laplacian + 0.01 * u + u**3 - 0.2
+
+    common = dict(rtol=1.0e-9, max_steps=60)
+    adaptive = pseudo_transient_continuation(
+        residual, jnp.zeros(size), config=PseudoTransientConfig(**common)
+    )
+    fixed = pseudo_transient_continuation(
+        residual,
+        jnp.zeros(size),
+        config=PseudoTransientConfig(**common, **_TIGHT_FIXED_FORCING),
+    )
+    assert bool(adaptive.converged) and bool(fixed.converged)
+    np.testing.assert_allclose(adaptive.x, fixed.x, rtol=1.0e-8, atol=0.0)
+
+    def requested_digits(run):
+        return float(-np.sum(np.log10(np.asarray(run.history.eta[: int(run.steps)]))))
+
+    assert requested_digits(adaptive) < 0.5 * requested_digits(fixed)
+    assert int(adaptive.linear_iterations) < 0.5 * int(fixed.linear_iterations)
+
+
+def test_forcing_floor_is_tied_to_the_outer_tolerance():
+    # Choice 2 alone gives 0.9*(1e-8/1e-4)**2 = 9e-9; Kelley's floor
+    # 0.5*tol/||F_k|| = 0.5*1e-10/1e-8 = 5e-3 keeps the inner solve from asking
+    # for more than the outer stop needs.
+    eta = eisenstat_walker_forcing(1.0e-8, 1.0e-4, 1.0e-3, tolerance=1.0e-10)
+    assert float(eta) == pytest.approx(5.0e-3, rel=1.0e-12)
+    assert float(eisenstat_walker_forcing(1.0e-8, 1.0e-4, 1.0e-3)) == pytest.approx(9.0e-9)
+    assert PseudoTransientConfig().eta_min == 0.0
+
+
+@pytest.mark.parametrize(
+    "jacobi,rtol,newton_steps",
+    [(False, 1.0e-13, 6), (True, 1.0e-10, 4)],
+)
+def test_tolerance_floor_keeps_the_superlinear_tail(jacobi, rtol, newton_steps):
+    # The graded diagonal of the inexact-forcing test. A fixed floor eta >= 1e-4
+    # makes the tail linear (contraction about 1e-4 per step) and costs one more
+    # Newton step than choice 2 with the tolerance floor. Regression counts with
+    # JAX 0.12.1: 7 and 5 steps with the former floor 1e-4, 6 and 4 without it.
+    size = 32
+    diagonal = jnp.logspace(0.0, 5.0, size)
+    matrix = jnp.diag(diagonal) + 0.2 * jnp.diag(diagonal[:-1], 1)
+    residual = lambda x: matrix @ x + 0.2 * x**3 - 1.0  # noqa: E731
+
+    def precond(x, rhs, dt):
+        return rhs / (diagonal + 0.6 * x**2 + 1.0 / dt)
+
+    config = PseudoTransientConfig(
+        rtol=rtol,
         max_steps=20,
         initial_dt=1.0e8,
         max_dt=1.0e8,
@@ -208,25 +343,17 @@ def test_inexact_forcing_saves_krylov_work_against_fixed_tight_tolerance():
         linear_max_restarts=40,
         max_backtracks=4,
     )
-    adaptive = pseudo_transient_continuation(
-        residual,
-        jnp.zeros(size),
-        config=PseudoTransientConfig(**common),
+    solution = pseudo_transient_continuation(
+        residual, jnp.zeros(size), precond=precond if jacobi else None, config=config
     )
-    fixed = pseudo_transient_continuation(
-        residual,
-        jnp.zeros(size),
-        config=PseudoTransientConfig(
-            **common,
-            eta_initial=1.0e-6,
-            eta_min=1.0e-6,
-            eta_max=1.0e-6,
-        ),
-    )
-    assert bool(adaptive.converged) and bool(fixed.converged)
-    assert int(adaptive.linear_iterations) < int(fixed.linear_iterations)
-    assert int(adaptive.residual_evaluations) == 13
-    assert int(fixed.residual_evaluations) == 9
+    assert bool(solution.converged)
+    steps = int(solution.steps)
+    norms = np.asarray(solution.history.residual_norm[: steps + 1])
+    eta = np.asarray(solution.history.eta[:steps])
+    tolerance = rtol * norms[0]
+    # Every inner solve asks for an absolute residual of at least 0.5 tol.
+    assert np.all(eta * norms[:steps] >= 0.5 * tolerance * (1.0 - 1.0e-12))
+    assert steps == newton_steps
 
 
 def test_adaptive_continuation_records_rejection_then_reaches_target():

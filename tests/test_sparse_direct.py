@@ -96,12 +96,16 @@ def test_csr_data_from_products_recovers_values_and_is_differentiable():
     for g, cols in enumerate(groups):
         seeds[g, cols] = 1.0
 
-    def assemble(scale):
-        products = jax.vmap(lambda s: scale * sd.csr_matvec(pattern, values, s))(jnp.asarray(seeds))
+    # The seeds are a jit argument, not a captured constant: JAX 0.5.0-0.8.1 folds
+    # a non-leading-axis gather of captured constants to wrong values (README, Install).
+    def assemble(scale, seeds):
+        products = jax.vmap(lambda s: scale * sd.csr_matvec(pattern, values, s))(seeds)
         return sd.csr_data_from_products(pattern, groups, products)
 
-    np.testing.assert_allclose(jax.jit(assemble)(2.0), 2.0 * values, atol=1e-13)
-    np.testing.assert_allclose(jax.grad(lambda s: assemble(s).sum())(1.0), values.sum(), rtol=1e-12)
+    np.testing.assert_allclose(jax.jit(assemble)(2.0, seeds), 2.0 * values, atol=1e-13)
+    np.testing.assert_allclose(
+        jax.grad(lambda s: assemble(s, seeds).sum())(1.0), values.sum(), rtol=1e-12
+    )
     with pytest.raises(ValueError, match="products must have shape"):
         sd.csr_data_from_products(pattern, groups, jnp.zeros((1, n)))
     with pytest.raises(ValueError, match="more than one group"):
