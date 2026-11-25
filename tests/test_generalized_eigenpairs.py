@@ -409,3 +409,55 @@ def test_target_between_an_isolated_and_an_accumulating_eigenvalue_converges():
     assert bool(result.converged) and int(result.iterations) < 100
     np.testing.assert_allclose(np.asarray(result.values), want, rtol=1e-12)
     assert float(result.gap) > 0.0
+
+
+def _kronecker_pencil(n, m):
+    """``F = T_n (x) I_m + M_n (x) T_m``, ``G = M_n (x) I_m`` with its closed-form spectrum.
+
+    ``T = tridiag(-1, 2, -1)`` and the linear finite-element mass ``M = tridiag(1, 4, 1) / 6``
+    share the eigenvectors ``s_k = sin(i k pi / (n + 1))``, with eigenvalues
+    ``lam_k = 2 - 2 cos(k pi / (n + 1))`` and ``mu_k = (4 + 2 cos(k pi / (n + 1))) / 6``
+    (LeVeque, Finite Difference Methods, 2007, section 2.10), so that
+    ``F (s_j (x) s_k) = (lam_j / mu_j + lam_k) G (s_j (x) s_k)``.
+    """
+    theta_n, theta_m = (np.arange(1, k + 1) * np.pi / (k + 1) for k in (n, m))
+    t_m = 2 * np.eye(m) - np.eye(m, k=1) - np.eye(m, k=-1)
+    ones = np.ones((n, 1, 1))
+    F = (ones * (-np.eye(m) + t_m / 6), ones * (2 * np.eye(m) + 4 * t_m / 6))
+    G = (ones * np.eye(m) / 6, ones * 4 * np.eye(m) / 6)
+    mu = (4 + 2 * np.cos(theta_n)) / 6
+    spectrum = ((2 - 2 * np.cos(theta_n)) / mu)[:, None] + (2 - 2 * np.cos(theta_m))[None, :]
+    s_n = np.sin(np.outer(np.arange(1, n + 1), theta_n))
+    s_m = np.sin(np.outer(np.arange(1, m + 1), theta_m))
+    vectors = np.einsum("ij,ck->icjk", s_n, s_m)  # (block i, component c, pair j, k)
+    triple = [tuple(jnp.asarray(a) for a in (off, d, off)) for off, d in (F, G)]
+    return *triple, spectrum, mu, vectors
+
+
+@pytest.mark.parametrize("n,m", [(200, 1), (40, 3)])
+def test_kronecker_pencil_eigenvalues_match_closed_form(n, m):
+    F, G, spectrum, _, _ = _kronecker_pencil(n, m)
+    result = sx.generalized_eigenpairs(F, G, 3.0, 4)
+    want = _nearest(spectrum.ravel(), 3.0, 4)
+    # Hermitian pencil: |lam - theta| <= ||F y - theta G y||_2 / (lambda_min(G) ||y||_2), with
+    # lambda_min(G) > 1/3; the residual is reported in the infinity norm, which bounds the
+    # 2-norm ratio within a factor sqrt(n m).
+    Fd, Gd = _dense_pencil(F, G)
+    scale = np.abs(Fd).sum(1).max() + np.abs(want) * np.abs(Gd).sum(1).max()
+    bound = 3 * np.sqrt(n * m) * np.asarray(result.residuals) * scale
+    assert bool(result.converged)
+    assert np.all(np.abs(np.asarray(result.values) - want) <= bound)
+
+
+@pytest.mark.parametrize("n,m", [(200, 1), (40, 3)])
+def test_block_thomas_on_shifted_kronecker_pencil_matches_closed_form(n, m):
+    # (F - sigma G) v = mu_j (Lam - sigma) v for every Kronecker eigenvector v.
+    F, G, spectrum, mu, vectors = _kronecker_pencil(n, m)
+    shifted = tuple(f - 3.0 * g for f, g in zip(F, G, strict=True))
+    eig = mu[:, None] * (spectrum - 3.0)
+    x = sx.block_thomas(*shifted, jnp.asarray(vectors.reshape(n, m, n * m)))
+    want = (vectors / eig).reshape(n, m, n * m)
+    # Forward error of a backward-stable solve: kappa eps per column, with a margin of 100.
+    kappa = np.abs(eig).max() / np.abs(eig).min()
+    err = np.abs(np.asarray(x) - want).max((0, 1)) / np.abs(want).max((0, 1))
+    assert err.max() < 100 * kappa * np.finfo(float).eps
