@@ -384,6 +384,40 @@ def test_sparse_eigenvalue_validation():
         sd.sparse_eigenvalue(operator, p, bare, jnp.ones(12), 0.0)
 
 
+@pytest.mark.parametrize("platforms", ["cuda", "cuda,rocm"])
+def test_host_callbacks_refuse_a_platform_list_without_cpu(platforms):
+    # jax.pure_callback runs on a local CPU device and raises "failed to find a local CPU
+    # device" deep inside the computation when JAX_PLATFORMS hides the CPU (jax/_src/callback.py,
+    # pure_callback_impl). The check runs at trace time and names the remedy.
+    _, pattern, values = random_system(n=12, seed=21)
+    fam_pattern, values_at, operator = parametric_family(n=12, seed=14)
+    p = jnp.zeros(2)
+    fam_values = values_at(p)
+    calls = {
+        "sparse_solve": lambda: sd.sparse_solve(pattern, values, jnp.ones(12)),
+        "sparse_eigenvalue": lambda: sd.sparse_eigenvalue(
+            operator, p, fam_pattern, fam_values, 0.0
+        ),
+    }
+    previous = jax.config.jax_platforms
+    jax.config.update("jax_platforms", platforms)
+    try:
+        for name, call in calls.items():
+            with pytest.raises(RuntimeError) as info:
+                call()
+            text = str(info.value)
+            assert name in text and "CPU platform must be visible" in text
+            assert "JAX_PLATFORMS=cuda,cpu" in text and repr(platforms) in text
+    finally:
+        jax.config.update("jax_platforms", previous)
+    for platforms in (None, "", "cpu", "cuda,cpu", "CUDA, CPU"):
+        jax.config.update("jax_platforms", platforms)
+        try:
+            sd._require_cpu_platform("sparse_solve")
+        finally:
+            jax.config.update("jax_platforms", previous)
+
+
 def test_separately_built_identical_patterns_share_one_factorization():
     matrix = scipy_sparse.random(30, 30, density=0.1, random_state=4) + 5 * scipy_sparse.eye(30)
     matrix = matrix.tocsr()

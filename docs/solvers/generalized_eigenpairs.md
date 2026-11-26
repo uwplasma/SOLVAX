@@ -53,13 +53,15 @@ therefore fails on an invertible matrix whose Schur complement is singular, for
 example $\begin{pmatrix}0&1\\1&0\end{pmatrix}$ with one scalar block per row, or
 on an indefinite pencil whose shift lands on a diagonal block. A probe solve
 with a fixed vector is checked against the band operator after every
-factorization. If its relative residual is not below $\sqrt{\epsilon}$ or is not
-finite, a dense pivoted LU of the assembled band is used instead
-(`result.fallback` is True). The dense path is compiled only when
-`n_blocks * m <= dense_limit` (default 2048); for larger problems there is no
-fallback and a breakdown shows as non-finite residuals and `converged=False`.
-Under `vmap` a `cond` runs both branches, so pass `dense_limit=0` when batching
-large problems.
+factorization; its relative residual is `result.probe_residual`. If it is not
+below $\sqrt{\epsilon}$ or is not finite, `result.fallback` is True, at any size.
+A dense pivoted LU of the assembled band then takes over only if
+`n_blocks * m <= dense_limit`, and the default is 0: there is no dense path
+unless it is asked for, and a breakdown shows as large or non-finite residuals
+and `converged=False`. Under `vmap` a `cond` runs both branches, so a nonzero
+`dense_limit` pays for the dense factorization on every batched call.
+The dense path ran exactly when `fallback` is True and
+`n_blocks * m <= dense_limit`.
 
 ## Result fields
 
@@ -72,8 +74,9 @@ large problems.
 | `iterations` | sweeps after the first, each applying $T$ six times |
 | `converged` | `max(residuals) <= tol` and `excluded_residual <= tol`, False if non-finite |
 | `gap` | $\lvert\lambda-\text{target}\rvert$ of the nearest excluded Ritz value minus that of the farthest selected one |
-| `fallback` | the dense pivoted path ran |
+| `fallback` | the probe solve failed; the dense pivoted path ran if `n_blocks * m <= dense_limit` |
 | `excluded_residual` | the relative residual of the nearest excluded Ritz pair, the one that sets `gap`; zero if every Ritz value was selected |
+| `probe_residual` | relative residual of the block-Thomas probe solve at the shift |
 
 `gap` is zero when the selection splits a degenerate or tied set. It sees only
 the subspace: an eigenvalue the iteration never captured is not counted.
@@ -122,7 +125,7 @@ Value and cluster-mean tangents are unaffected. Certify the selection with `gap`
 | | real symmetric | complex Hermitian |
 |---|---|---|
 | eager, `jit` | yes | yes |
-| `vmap` | yes (use `dense_limit=0` for large problems) | yes |
+| `vmap` | yes (a nonzero `dense_limit` runs the dense LU on every call) | yes |
 | `jvp` (forward), `values` | yes | yes |
 | `jvp`, `vectors` | yes, phase-gauge tangent | yes, phase-gauge tangent |
 | `vjp` / `grad` | yes | yes |
@@ -165,7 +168,7 @@ and `G`; seconds):
 The gradient's cold time carries a constant for the Python loop over `count`
 (1.8-2.0 s here, against 0.8-1.0 s when the loop was a scan, still independent
 of `n_blocks`); it grows with `count`. Gradients agree to all printed digits. The dense fallback is compiled only if
-`n_blocks * m <= dense_limit`, so its LU adds a constant at small sizes.
+`n_blocks * m <= dense_limit` (0 by default), so when asked for its LU adds a constant at small sizes.
 
 ## API summary
 
