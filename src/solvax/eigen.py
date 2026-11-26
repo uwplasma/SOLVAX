@@ -252,10 +252,13 @@ class EigenpairResult(NamedTuple):
             so the gap is a converged eigenvalue distance, but it only sees the subspace: an
             eigenvalue the iteration never captured is not counted. Zero means the selection
             may split a degenerate or tied set; ``inf`` if every Ritz value was selected.
-        fallback: True if block Thomas failed its probe solve and the dense pivoted
-            path ran.
+        fallback: True if block Thomas failed its probe solve, at any size; the dense pivoted
+            path then ran if ``n_blocks * m <= dense_limit``, and otherwise the residuals show
+            the breakdown.
         excluded_residual: relative residual of the Ritz pair that sets ``gap`` (the nearest
             excluded one); zero if every Ritz value was selected.
+        probe_residual: relative residual of the block-Thomas probe solve at the shift; above
+            ``sqrt(eps)`` (or not finite) it sets ``fallback``.
     """
 
     values: jax.Array
@@ -267,6 +270,7 @@ class EigenpairResult(NamedTuple):
     gap: jax.Array
     fallback: jax.Array
     excluded_residual: jax.Array
+    probe_residual: jax.Array
 
 
 def _hermitian(band):
@@ -331,7 +335,7 @@ def _thomas(factors, b):
 
 
 def _shifted_solver(band, dense_limit):
-    """``(solve, fallback)`` for a Hermitian band: block Thomas, else dense pivoted LU.
+    """``(solve, fallback, probe residual)`` for a Hermitian band: block Thomas, else dense LU.
 
     Block Thomas does not pivot across blocks, so it breaks down on an invertible matrix with a
     singular Schur complement such as ``[[0, 1], [1, 0]]``. A probe solve whose relative
@@ -346,14 +350,14 @@ def _shifted_solver(band, dense_limit):
     residual = block_tridiag_relative_residual(*band, thomas(probe), probe)
     ok = residual <= jnp.sqrt(jnp.finfo(band[1].dtype).eps)
     if size > dense_limit:
-        return thomas, jnp.zeros((), bool)
+        return thomas, ~ok, residual
     lu = jax.lax.cond(
         ok,
         lambda: (jnp.zeros((size, size), band[1].dtype), jnp.zeros(size, jnp.int32)),
         lambda: lu_factor(_dense(band)),
     )
     dense = lambda b: lu_solve(lu, b.reshape(size, -1)).reshape(b.shape)  # noqa: E731
-    return (lambda b: jax.lax.cond(ok, thomas, dense, b)), ~ok
+    return (lambda b: jax.lax.cond(ok, thomas, dense, b)), ~ok, residual
 
 
 def _scale(values, nF, nG):
@@ -378,7 +382,7 @@ def _subspace_iteration(F, G, target, count, tol, max_iter, dense_limit):
     target = jnp.asarray(target, real)
     # A shift that is exactly an eigenvalue makes the factorization singular: nudge it.
     sigma = target + 16 * jnp.finfo(real).eps * (nF + jnp.abs(target) * nG) / nG
-    solve, fallback = _shifted_solver(_shift(F, G, sigma), dense_limit)
+    solve, fallback, probe = _shifted_solver(_shift(F, G, sigma), dense_limit)
     matvec = lambda A, X: block_tridiag_matvec(*A, X)  # noqa: E731
     width = min(2 * count + 8, size)
     keep = min(count + 1, width)  # the selected pairs and the nearest excluded one
@@ -435,7 +439,7 @@ def _subspace_iteration(F, G, target, count, tol, max_iter, dense_limit):
     others = jnp.where(others > _cluster_tol(values, nF, nG)[:, None], others, jnp.inf)
     result = EigenpairResult(
         values, vectors, res, jnp.abs(gram - jnp.eye(count)).max(), iterations,
-        converged, gap, fallback, excluded,
+        converged, gap, fallback, excluded, probe,
     )  # fmt: skip
     return result, others.min(axis=1)
 
@@ -463,9 +467,9 @@ def _first_order(F, G, dF, dG, values, vectors, sep, dense_limit):
 
     def one(i):
         lam, c = values[i], cluster[:, i]
-        solve, _ = _shifted_solver(
+        solve = _shifted_solver(
             _shift(F, G, lam + jnp.minimum(sep[i], scale[i]) / 1e3), dense_limit
-        )
+        )[0]
         Yc, GYc = vectors * c, GY * c
         project = lambda x: x - Yc @ dot(GYc, x)  # noqa: E731 - G-orthogonal to the cluster
         rhs = GYc @ dot(Yc, dA[..., i]) - dA[..., i]
@@ -489,7 +493,7 @@ def _attach_jvp(dense_limit, primals, tangents):
 
 @partial(jax.jit, static_argnames=("count", "max_iter", "dense_limit"))
 def generalized_eigenpairs(
-    F, G, target, count: int = 8, tol: float = 1e-10, max_iter: int = 100, dense_limit: int = 2048
+    F, G, target, count: int = 8, tol: float = 1e-10, max_iter: int = 100, dense_limit: int = 0
 ) -> EigenpairResult:
     """The ``count`` eigenpairs of ``F y = lam G y`` nearest ``target`` (block-tridiagonal pencil).
 
@@ -507,12 +511,12 @@ def generalized_eigenpairs(
     ``|mu|``, so that Ritz ghosts between eigenvalues on either side of ``target`` cannot be
     selected. ``sigma`` is ``target`` moved by ``16 eps ||F|| / ||G||``, so that a target equal to
     an eigenvalue does not give a singular factor. A probe solve checks every factorization (see
-    ``_shifted_solver``): if block Thomas has broken down, a dense pivoted LU takes over and
-    ``fallback`` is True. The dense path exists only if ``n_blocks * m <= dense_limit``; above
-    that a breakdown gives non-finite residuals and ``converged=False``. Under ``vmap`` a ``cond``
-    runs both branches, so pass ``dense_limit=0`` there to avoid always paying for the dense
-    factorization. ``count``, ``max_iter`` and ``dense_limit`` are static; everything else may be
-    traced.
+    ``_shifted_solver``); its relative residual is ``probe_residual``, and ``fallback`` is True
+    when it fails. A dense pivoted LU then takes over only if ``n_blocks * m <= dense_limit``,
+    which is 0 by default: without it a breakdown gives large or non-finite residuals and
+    ``converged=False``. Under ``vmap`` a ``cond`` runs both branches, so a nonzero
+    ``dense_limit`` pays for the dense factorization on every call there. ``count``,
+    ``max_iter`` and ``dense_limit`` are static; everything else may be traced.
 
     Derivatives are implicit, so the iteration is not differentiated, and are valid only when
     ``converged`` is True. They support ``jax.jvp``, ``jax.grad`` and ``jax.jacfwd/jacrev``.
@@ -546,7 +550,8 @@ def generalized_eigenpairs(
         count: number of eigenpairs, at most ``n_blocks * m``.
         tol: relative residual to stop at.
         max_iter: maximum sweeps (see ``iterations``).
-        dense_limit: largest ``n_blocks * m`` for which the dense fallback is compiled.
+        dense_limit: largest ``n_blocks * m`` for which the dense fallback is compiled; 0 (the
+            default) compiles none.
     """
     F, G = _hermitian(F), _hermitian(G)
     if not 1 <= count <= F[1].shape[0] * F[1].shape[1]:
