@@ -14,7 +14,7 @@ import pytest
 import scipy.linalg as sla
 
 import solvax as sx
-from solvax.eigen import _dense, _hermitian, _ritz
+from solvax.eigen import _dense, _gap_resolved, _hermitian, _ritz
 
 jax.config.update("jax_enable_x64", True)
 
@@ -478,33 +478,45 @@ def _diagonal(lam):
 
 def test_converged_certifies_the_nearest_excluded_pair():
     """Diagonal pencil of plan section 8.9, eigenvalues ``1e-3`` and ``linspace(1, 10, 191)``: the
-    selected pair converges in the first sweep, the excluded one at ``lam = 1`` does not, so one
-    extra sweep (``max_iter=1``) must not report ``converged``; with room to iterate it does."""
+    selected pair converges in the first sweep and the excluded one at ``lam = 1`` does not reach
+    ``tol``. S8: its residual bound ``||r||_{G^-1}`` (here ``||r||``, ``G = I``) already resolves
+    the gap of about 1, so the first sweep is certified; the reported gap is within that bound."""
     lam = np.concatenate([[1e-3], np.linspace(1.0, 10.0, 191)])
     F, G = _diagonal(lam)
-    short = sx.generalized_eigenpairs(F, G, 0.0, 1, 1e-10, 1, 0)
-    assert float(short.residuals.max()) <= 1e-10 < float(short.excluded_residual)
-    assert not bool(short.converged)
-    full = sx.generalized_eigenpairs(F, G, 0.0, 1, 1e-10, 100, 0)
-    assert bool(full.converged) and float(full.excluded_residual) <= 1e-10
-    np.testing.assert_allclose(np.asarray(full.values), [1e-3], rtol=1e-12)
-    np.testing.assert_allclose(float(full.gap), 1.0 - 1e-3, rtol=1e-9)
+    r = sx.generalized_eigenpairs(F, G, 0.0, 1, 1e-10, 100, 0)
+    assert float(r.residuals.max()) <= 1e-10 < float(r.excluded_residual)
+    assert bool(r.converged) and int(r.iterations) == 0
+    np.testing.assert_allclose(np.asarray(r.values), [1e-3], rtol=1e-12)
+    # |theta - 1| <= ||r||_2 <= ||r||_inf sqrt(n), ||r||_inf <= excluded_residual (||F|| + |theta|)
+    bound = float(r.excluded_residual) * (10.0 + 1.0) * np.sqrt(lam.size)
+    assert abs(float(r.gap) - (1.0 - 1e-3)) <= bound < float(r.gap) / 2
 
 
-def test_excluded_pair_in_a_cluster_keeps_converged_false():
+def test_excluded_pair_in_a_cluster_stops_once_it_resolves_the_gap():
     """Three values at the target, then 397 in ``[0.6, 0.61]``: the nearest excluded Ritz pair sits
     in the cluster and converges at a ratio near one, so the selected pairs pass ``tol`` after any
     number of sweeps while the excluded one needs about 12 (SOLVAX 0.36.2 reported ``converged``
-    at sweep 1 with an excluded residual of 2.9e-4)."""
+    at sweep 1 with an excluded residual of 2.9e-4). S8: that pair resolves the gap of 0.1 after
+    the first sweep, so it stops there (it ran 12 sweeps to ``tol`` before) and is certified."""
     F, G = _diagonal(np.concatenate([[0.4999, 0.5, 0.5001], np.linspace(0.6, 0.61, 397)]))
-    for max_iter in range(4):
-        r = sx.generalized_eigenpairs(F, G, 0.50003, 3, 1e-10, max_iter, 0)
-        assert float(r.residuals.max()) <= 1e-10 < float(r.excluded_residual)
-        assert not bool(r.converged)
     r = sx.generalized_eigenpairs(F, G, 0.50003, 3, 1e-10, 100, 0)
-    assert bool(r.converged) and float(r.excluded_residual) <= 1e-10
-    assert int(r.iterations) + 1 <= 13
+    assert float(r.residuals.max()) <= 1e-10 < float(r.excluded_residual)
+    assert bool(r.converged) and int(r.iterations) == 0
     np.testing.assert_allclose(np.asarray(r.values), [0.4999, 0.5, 0.5001], rtol=1e-12)
+    np.testing.assert_allclose(float(r.gap), 0.6 - 0.5001, rtol=1e-3)
+
+
+def test_excluded_pair_that_does_not_resolve_the_gap_is_not_certified():
+    """Near tie: the selected value 0.4 and the excluded cluster starting at ``0.6 + 1e-7`` are
+    ``1e-7`` apart in distance from the target 0.5, so the gap is resolved only once the excluded
+    error bound is below ``5e-8``: the early sweeps must not report ``converged``."""
+    F, G = _diagonal(np.concatenate([[0.4], np.linspace(0.6 + 1e-7, 0.61, 399)]))
+    for max_iter in range(3):
+        r = sx.generalized_eigenpairs(F, G, 0.5, 1, 1e-10, max_iter, 0)
+        assert float(r.excluded_residual) > 1e-10 and not bool(r.converged)
+    r = sx.generalized_eigenpairs(F, G, 0.5, 1, 1e-10, 3, 0)  # selected at tol, excluded is not
+    assert float(r.residuals.max()) <= 1e-10 < float(r.excluded_residual)
+    assert not bool(r.converged)
 
 
 def test_excluded_residual_under_jit_vmap_and_derivatives(pencil):
@@ -514,7 +526,21 @@ def test_excluded_residual_under_jit_vmap_and_derivatives(pencil):
     run = jax.jit(lambda t: sx.generalized_eigenpairs(_along(F0, F1, t), G0, TARGET, COUNT))
     batched = jax.vmap(run)(jnp.array([0.0, 0.1]))
     assert batched.excluded_residual.shape == (2,)
-    assert bool((batched.excluded_residual <= 1e-10).all()) and bool(batched.converged.all())
+    assert bool(batched.converged.all())
+    # The rule itself, from an independent bound: |theta - lam| <= ||r||_{G^-1} <= ||r||_2 /
+    # sqrt(s_min) <= sqrt(N) ||r||_inf / sqrt(s_min), ||x||_inf <= ||x||_2 <= 1 / sqrt(s_min),
+    # s_min the smallest eigenvalue of the dense G; ||r||_inf = res (||F|| + |theta| ||G||) ||x||.
+    Gd = _dense_pencil(F0, G0)[1]
+    s_min, N = np.linalg.eigvalsh(Gd)[0], Gd.shape[0]
+    nG = np.abs(Gd).sum(1).max()
+    for i, t in enumerate([0.0, 0.1]):
+        Fd = _dense_pencil(_along(F0, F1, t), G0)[0]
+        nF, far = np.abs(Fd).sum(1).max(), np.abs(np.asarray(batched.values[i]) - TARGET).max()
+        theta = abs(TARGET) + far + float(batched.gap[i])  # |theta| bound of the excluded pair
+        e = lambda res, th, nF=nF: res * (nF + th * nG) * np.sqrt(N) / s_min  # noqa: E731
+        bound = e(float(batched.excluded_residual[i]), theta)
+        bound += e(float(batched.residuals[i].max()), abs(TARGET) + far)
+        assert float(batched.excluded_residual[i]) <= 1e-10 or bound <= float(batched.gap[i]) / 2
     r = run(0.0)
     # positions 0-7 keep their meaning: compare with a separate eager call, read by name
     eager = sx.generalized_eigenpairs(F0, G0, TARGET, COUNT)
@@ -673,3 +699,87 @@ def test_default_tol_follows_the_dtype():
     assert float(r.residuals.max()) <= 100 * float(jnp.finfo(jnp.float32).eps)
     r64 = sx.generalized_eigenpairs(F, G, TARGET, COUNT)
     assert bool(r64.converged) and float(r64.residuals.max()) <= 1e-10
+
+
+def _laplacian(n, t):
+    """``F = tridiag(-1, 2 + t sin(k), -1)``, ``G = I``: a dense spectrum near 0, so a target below
+    it converges at a ratio near one and needs several sweeps."""
+    z = jnp.zeros((n, 1, 1))
+    upper = -jnp.ones((n, 1, 1)).at[-1].set(0)
+    return (None, jnp.asarray(2 + t * np.sin(np.arange(n))).reshape(n, 1, 1), upper), (z, z + 1, z)
+
+
+def test_warm_start_from_a_nearby_pencil_takes_fewer_sweeps():
+    """S8 warm start: the vectors of ``t = 0`` start the solve at ``t = 0.01``; same values as a
+    cold start and as ``eigvalsh`` to 1e-12 (tol 1e-10 times a condition of order 1)."""
+    n, target = 400, -0.2
+    F0, G = _laplacian(n, 0.0)
+    F, _ = _laplacian(n, 1e-2)
+    previous = sx.generalized_eigenpairs(F0, G, target, 3, 1e-10)
+    cold = sx.generalized_eigenpairs(F, G, target, 3, 1e-10)
+    warm = sx.generalized_eigenpairs(F, G, target, 3, 1e-10, start=previous.vectors)
+    assert int(cold.iterations) >= 2 and bool(cold.converged) and bool(warm.converged)
+    assert int(warm.iterations) < int(cold.iterations)
+    A = np.diag(np.asarray(F[1]).ravel()) - np.eye(n, k=1) - np.eye(n, k=-1)
+    np.testing.assert_allclose(warm.values, _nearest(np.linalg.eigvalsh(A), target, 3), atol=1e-12)
+    np.testing.assert_allclose(warm.values, cold.values, atol=1e-12)
+    # a partial start fills the rest with the random block; a wrong shape is refused
+    part = sx.generalized_eigenpairs(F, G, target, 3, 1e-10, start=previous.vectors[..., :1])
+    np.testing.assert_allclose(part.values, cold.values, atol=1e-12)
+    with pytest.raises(ValueError, match="start"):
+        sx.generalized_eigenpairs(F, G, target, 3, start=previous.vectors[1:])
+    with pytest.raises(ValueError, match="start"):
+        sx.generalized_eigenpairs(F, G, target, 3, start=jnp.zeros((n, 1, 15)))
+
+
+def test_start_has_zero_derivative_and_none_is_unchanged(pencil):
+    """``start=None`` is the cold start; values carry the implicit derivative, ``start`` none."""
+    F0, F1, G0, G1 = pencil
+    cold = _solve(pencil)
+    for name in ("values", "residuals", "iterations"):
+        again = getattr(_solve(pencil, start=None), name)
+        np.testing.assert_array_equal(again, getattr(cold, name))
+    loss = lambda s: _solve(pencil, start=s).values.sum()  # noqa: E731
+    np.testing.assert_array_equal(jax.grad(loss)(cold.vectors), 0.0)
+
+
+def test_max_iter_is_traced_and_does_not_recompile():
+    """S8: a static ``max_iter`` compiled once per value (1.1 to 2.6 s each on CPU)."""
+    F, G = _laplacian(50, 0.0)
+    run = jax.jit(lambda mi: sx.generalized_eigenpairs(F, G, -0.2, 2, 1e-10, mi).iterations)
+    assert int(run(0)) == 0 and int(run(30)) > 0
+    assert run._cache_size() == 1
+    before = sx.generalized_eigenpairs._cache_size()
+    sx.generalized_eigenpairs(F, G, -0.2, 2, 1e-10, 7)
+    sx.generalized_eigenpairs(F, G, -0.2, 2, 1e-10, 9)
+    assert sx.generalized_eigenpairs._cache_size() - before <= 1
+
+
+def test_gap_rule_margin_and_selected_term():
+    """S8 rule ``e_excluded + max e_selected <= gap / 2``: distances 0.1 and 0.2 (gap 0.1). With
+    radii 0.02 and 0.04 the sum 0.06 exceeds 0.05: not resolved, although 0.06 <= gap and the
+    excluded radius alone (0.04) is below gap / 2. Radii 0.01 and 0.03 resolve it."""
+    distance = jnp.array([0.1, 0.2, 0.5])
+    assert not bool(_gap_resolved(distance, jnp.array([0.02, 0.04, 9.0]), 1))
+    assert bool(_gap_resolved(distance, jnp.array([0.01, 0.03, 9.0]), 1))
+
+
+@pytest.mark.parametrize("cplx", [False, True], ids=["real", "complex"])
+def test_gap_rule_uses_the_g_inverse_norm(cplx):
+    """``(s F, s G)`` has the eigenpairs of ``(F, G)``; with ``x^H G x = 1`` the residual scales by
+    ``sqrt(s)`` and ``||r||_{G^-1}`` not at all, so the cluster pencil (gap 0.1, excluded residual
+    2.9e-4 after one sweep) stops after one sweep for any ``s``. A 2-norm bound would be
+    ``sqrt(s) = 1e4`` times larger at ``s = 1e8`` and would not resolve the gap. ``G`` is a
+    non-identity diagonal (entries 1 to 4); ``cplx`` runs the same pencil in complex128."""
+    lam = np.concatenate([[0.4999, 0.5, 0.5001], np.linspace(0.6, 0.61, 397)])
+    g = 1.0 + 3.0 * np.random.default_rng(0).random(lam.size)
+    z = np.zeros((lam.size, 1, 1))
+    for s in (1.0, 1e8):
+        F = (z, jnp.asarray(s * lam * g).reshape(-1, 1, 1), z)
+        G = (z, jnp.asarray(s * g).reshape(-1, 1, 1), z)
+        if cplx:
+            F, G = [tuple(a.astype(complex) for a in b) for b in (F, G)]
+        r = sx.generalized_eigenpairs(F, G, 0.50003, 3, 1e-10, 100, 0)
+        assert float(r.residuals.max()) <= 1e-10 < float(r.excluded_residual)
+        assert bool(r.converged) and int(r.iterations) == 0
+        np.testing.assert_allclose(np.asarray(r.values), [0.4999, 0.5, 0.5001], rtol=1e-12)

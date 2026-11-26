@@ -245,19 +245,21 @@ class EigenpairResult(NamedTuple):
         orthogonality: ``max |Y^H G Y - I|``.
         iterations: sweeps performed after the first, each applying the shift-invert operator six
             times (fewer if ``n_blocks m`` is small).
-        converged: ``max(residuals) <= tol``, ``excluded_residual <= tol`` and
-            ``hermitian_defect <= tol``; False if anything
-            is not finite.
+        converged: ``max(residuals) <= tol``, ``hermitian_defect <= tol``, and either
+            ``excluded_residual <= tol`` or the gap is resolved: the error bounds
+            ``e = ||r||_{G^-1}`` of the excluded pair and of the farthest-erring selected one sum
+            to at most ``gap / 2``. False if anything is not finite.
         gap: ``|lam - target|`` of the nearest excluded Ritz value minus that of the
-            farthest selected one. The iteration also converges that excluded pair to ``tol``,
-            so the gap is a converged eigenvalue distance, but it only sees the subspace: an
+            farthest selected one. When ``converged`` it is known to within ``gap / 2``, but it
+            only sees the subspace: an
             eigenvalue the iteration never captured is not counted. Zero means the selection
             may split a degenerate or tied set; ``inf`` if every Ritz value was selected.
         fallback: True if the probe residual is above ``eps**0.75`` (or not finite), at any
             size; the dense pivoted path then ran if ``n_blocks * m <= dense_limit``. This also
             happens with a target near an eigenvalue, where block Thomas is fine.
         excluded_residual: relative residual of the Ritz pair that sets ``gap`` (the nearest
-            excluded one); zero if every Ritz value was selected.
+            excluded one); zero if every Ritz value was selected. It may exceed ``tol`` when
+            ``converged``, if that pair resolved the gap.
         probe_residual: relative residual of the block-Thomas probe solve at the shift; above
             ``eps**0.75`` (or not finite) it sets ``fallback``.
         hermitian_defect: the larger over ``F`` and ``G`` of ``||A - A_h|| / ||A_h||``, with
@@ -395,7 +397,13 @@ def _cluster_tol(values, nF, nG):
 _KRYLOV_BLOCKS = 6  # shift-invert applications per Rayleigh-Ritz step
 
 
-def _subspace_iteration(F, G, target, count, tol, max_iter, dense_limit):
+def _gap_resolved(distance, error, count):
+    """Error intervals of the excluded pair (``error[count]``) and the selected ones are disjoint
+    with margin: their radii sum to at most half the gap of the sorted ``distance``."""
+    return error[count] + error[:count].max() <= (distance[count] - distance[count - 1]) / 2
+
+
+def _subspace_iteration(F, G, target, count, tol, max_iter, dense_limit, start=None):
     """Shift-invert subspace iteration; returns the result and each value's Ritz separation."""
     n, m = F[1].shape[:2]
     size = n * m
@@ -414,6 +422,7 @@ def _subspace_iteration(F, G, target, count, tol, max_iter, dense_limit):
     adjoint = lambda a: jnp.conj(a.T)  # noqa: E731
     apply = lambda A, Z: matvec(A, Z.reshape(n, m, -1)).reshape(size, -1)  # noqa: E731
     invert = lambda Z: solve(Z.reshape(n, m, -1)).reshape(size, -1)  # noqa: E731
+    g_factors = block_thomas_factor(*G)  # G is positive definite: no pivoting across blocks
 
     def sweep(Y):
         """Rayleigh-Ritz for ``S = (F - sigma G)^-1 G`` on the block Krylov space of ``Y``.
@@ -442,16 +451,32 @@ def _subspace_iteration(F, G, target, count, tol, max_iter, dense_limit):
         order = jnp.argsort(jnp.abs(theta - target))[:keep]
         R = FX[:, order] - GX[:, order] * theta[order]
         scale = (nF + jnp.abs(theta[order]) * nG) * jnp.linalg.norm(X[:, order], axis=0)
-        return SV @ C, theta, order, jnp.linalg.norm(R, axis=0) / scale, X[:, order]
+        # ``||r||_{G^-1}`` with ``x^H G x = 1`` bounds ``|theta - lam|`` for some eigenvalue lam.
+        GiR = _thomas(g_factors, R.reshape(n, m, -1)).reshape(size, -1)
+        error = jnp.sqrt(jnp.maximum(jnp.real(jnp.sum(jnp.conj(R) * GiR, 0)), 0))
+        res = jnp.linalg.norm(R, axis=0) / scale
+        return SV @ C, theta, order, res, X[:, order], error
 
-    start = jax.random.normal(jax.random.PRNGKey(0), (size, width), dtype)
-    running = lambda k, res: (k < max_iter) & ~(res.max() <= tol) & jnp.isfinite(res.max())  # noqa: E731
-    iterations, _, theta, order, res, X = jax.lax.while_loop(
-        lambda s: running(s[0], s[4]),
+    def done(theta, res, error):
+        """Selected pairs at ``tol``; the excluded one at ``tol`` or resolving the gap."""
+        if keep == count:
+            return res.max() <= tol
+        resolved = _gap_resolved(jnp.sort(jnp.abs(theta - target)), error, count)
+        return (res[:count].max() <= tol) & ((res[count] <= tol) | resolved)
+
+    Y = jax.random.normal(jax.random.PRNGKey(0), (size, width), dtype)
+    if start is not None:  # warm start: the given columns first, the random block after them
+        start = jnp.asarray(start, dtype).reshape(size, -1)
+        Y = Y.at[:, : start.shape[1]].set(start)
+    finite = lambda res: jnp.isfinite(res.max())  # noqa: E731
+    running = lambda s: (s[0] < max_iter) & ~done(s[2], s[4], s[6]) & finite(s[4])  # noqa: E731
+    iterations, _, theta, order, res, X, error = jax.lax.while_loop(
+        running,
         lambda s: (s[0] + 1, *sweep(s[1])),
-        (jnp.zeros((), jnp.int32), *sweep(start)),
+        (jnp.zeros((), jnp.int32), *sweep(Y)),
     )
-    converged, excluded = res.max() <= tol, res[count] if keep > count else jnp.zeros((), real)
+    converged = done(theta, res, error) & finite(res)
+    excluded = res[count] if keep > count else jnp.zeros((), real)
     perm = jnp.argsort(theta[order[:count]])  # ascending values among the selected
     sel, res = order[:count][perm], res[:count][perm]
     vectors, values = X[:, :count][:, perm].reshape(n, m, count), theta[sel]
@@ -515,7 +540,7 @@ def _attach_jvp(dense_limit, primals, tangents):
     return (values, vectors), _first_order(F, G, dF, dG, values, vectors, sep, dense_limit)
 
 
-@partial(jax.jit, static_argnames=("count", "max_iter", "dense_limit"))
+@partial(jax.jit, static_argnames=("count", "dense_limit"))
 def generalized_eigenpairs(
     F,
     G,
@@ -524,6 +549,7 @@ def generalized_eigenpairs(
     tol: float | None = None,
     max_iter: int = 100,
     dense_limit: int = 0,
+    start=None,
 ) -> EigenpairResult:
     """The ``count`` eigenpairs of ``F y = lam G y`` nearest ``target`` (block-tridiagonal pencil).
 
@@ -547,13 +573,13 @@ def generalized_eigenpairs(
     if ``n_blocks * m <= dense_limit``, which is 0 by default:
     without it a breakdown gives large or non-finite residuals and ``converged=False``. Under
     ``vmap`` a ``cond`` runs both branches, so a nonzero ``dense_limit`` pays for the dense
-    factorization on every call there. ``count``, ``max_iter`` and ``dense_limit`` are static;
-    everything else may be traced.
+    factorization on every call there. ``count`` and ``dense_limit`` are static; everything
+    else may be traced, so changing ``max_iter`` does not compile again.
 
     Derivatives are implicit, so the iteration is not differentiated, and are valid only when
     ``converged`` is True. They support ``jax.jvp``, ``jax.grad`` and ``jax.jacfwd/jacrev``.
     The second derivative of ``values`` is tested; that of ``vectors`` is not. ``target``,
-    ``tol`` and the diagnostics have zero derivative.
+    ``tol``, ``max_iter``, ``start`` and the diagnostics have zero derivative.
 
     * ``values``: ``d lam = Re y^H (dF - lam dG) y``. For a degenerate or clustered selected
       set the individual values are not differentiable but their sum is:
@@ -582,9 +608,13 @@ def generalized_eigenpairs(
         count: number of eigenpairs, at most ``n_blocks * m``.
         tol: relative residual to stop at; None (the default) means ``max(1e-10, 100 eps)``
             of the pencil's dtype (1e-10 in float64, 1.2e-5 in float32).
-        max_iter: maximum sweeps (see ``iterations``).
+        max_iter: maximum sweeps (see ``iterations``); a non-integer value is truncated.
         dense_limit: largest ``n_blocks * m`` for which the dense fallback is compiled; 0 (the
             default) compiles none.
+        start: optional ``(n_blocks, m, k)`` warm start, ``k <= min(2 count + 8, n_blocks m)``,
+            for example the ``vectors`` of a nearby pencil; it replaces the first ``k`` columns of
+            the random starting block. None (the default) is the cold start. A non-finite
+            entry makes every value NaN and ``converged`` False.
     """
     defect = jax.lax.stop_gradient(jnp.maximum(_defect(F), _defect(G)))
     if tol is None:
@@ -593,7 +623,12 @@ def generalized_eigenpairs(
     if not 1 <= count <= F[1].shape[0] * F[1].shape[1]:
         raise ValueError("count must lie in [1, n_blocks * m]")
     stop = lambda t: jax.tree_util.tree_map(jax.lax.stop_gradient, t)  # noqa: E731
-    solved = _subspace_iteration(stop(F), stop(G), target, count, tol, max_iter, dense_limit)
+    if start is not None and not (start.ndim == 3 and start.shape[:2] == F[1].shape[:2]):
+        raise ValueError("start must have shape (n_blocks, m, k)")
+    if start is not None and start.shape[2] > min(2 * count + 8, F[1].size // F[1].shape[2]):
+        raise ValueError("start has more columns than the subspace, min(2 count + 8, n_blocks m)")
+    start = None if start is None else stop(start)
+    solved = _subspace_iteration(stop(F), stop(G), target, count, tol, max_iter, dense_limit, start)
     result, sep = stop(solved)
     values, vectors = _attach(F, G, result.values, result.vectors, sep, dense_limit)
     defect = defect.astype(result.residuals.dtype)
