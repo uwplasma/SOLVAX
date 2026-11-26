@@ -180,6 +180,8 @@ def test_exported_surface_is_stable():
         "gmres",
         "pcg",
         "newton_krylov",
+        "ellipk",
+        "plasma_dispersion",
         "root_solve",
         "certified_root",
         "RootResult",

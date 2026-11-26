@@ -155,6 +155,9 @@ original application operator.
 
 {mod}`solvax.sparse_direct` puts the same host factorizations behind
 `jax.pure_callback`, so they can sit inside `jit`, `vmap` and `grad`. The
+callback runs on the host CPU, so on a GPU host the CPU platform must be
+visible (`JAX_PLATFORMS=cuda,cpu`, or unset); a list without `cpu` raises a
+`RuntimeError` at trace time. The
 matrix is a static {class}`solvax.CsrPattern` plus traced values:
 
 ```python
