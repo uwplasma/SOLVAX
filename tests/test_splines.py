@@ -287,7 +287,8 @@ def test_integral_of_a_cubic_is_exact_and_differentiates_in_the_data():
         ref = interpolate.CubicSpline(X, part(y)).integrate(0.2, 1.7)
         np.testing.assert_allclose(part(complex_integral), ref, atol=1e-13)
     loss = lambda y: cubic_spline_integrate(cubic_spline(X, y, bc="natural"), 0.1, 1.9) ** 2  # noqa: E731
-    y, v, eps = np.cos(X), RNG.normal(size=X.size), 1e-3  # the loss is quadratic in y, so the difference is exact
+    # The loss is quadratic in y, so the central difference is exact up to rounding.
+    y, v, eps = np.cos(X), RNG.normal(size=X.size), 1e-3
     fd = (loss(y + eps * v) - loss(y - eps * v)) / (2 * eps)
     np.testing.assert_allclose(np.vdot(jax.grad(loss)(y), v), fd, rtol=1e-8)
 

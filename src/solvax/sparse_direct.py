@@ -397,6 +397,18 @@ def _host_solve(pattern, options, core_ndim, trans, values, rhs):
     return solved.reshape(batch + core).astype(dtype)
 
 
+def _require_cpu_platform(name: str) -> None:
+    # jax.pure_callback runs on a local CPU device; JAX_PLATFORMS without "cpu" hides it.
+    # Reads the config string only, so no backend is initialised; runs once per trace.
+    platforms = jax.config.jax_platforms
+    if platforms and "cpu" not in [p.strip().lower() for p in platforms.split(",")]:
+        raise RuntimeError(
+            f"{name} factors on the host through jax.pure_callback, so the CPU platform must be "
+            f"visible; JAX_PLATFORMS is {platforms!r}. Add cpu, e.g. JAX_PLATFORMS=cuda,cpu, "
+            "or leave JAX_PLATFORMS unset."
+        )
+
+
 def _traced_solve(pattern, options, core_ndim, trans, values, rhs):
     return jax.pure_callback(
         partial(_host_solve, pattern, options, core_ndim, trans),
@@ -432,7 +444,12 @@ def sparse_solve(
     matrix once while the batch fits in the factor cache
     (:func:`set_factor_cache_size`); a reverse-mode pass over a larger batch
     refactors evicted matrices for its transposed solves.
+
+    The factorization runs on the host CPU, so the CPU platform must be visible:
+    on a GPU host use ``JAX_PLATFORMS=cuda,cpu`` or leave it unset. A list without
+    ``cpu`` raises ``RuntimeError`` at trace time.
     """
+    _require_cpu_platform("sparse_solve")
     options = HostFactorOptions() if options is None else options
     if pattern.shape[0] != pattern.shape[1]:
         raise ValueError("sparse_solve needs a square pattern")
@@ -638,7 +655,11 @@ def sparse_eigenvalue(
         derivative of ``value`` is ``y^H (d_params A) x / (y^H x)`` from one
         ``jax.jvp`` of ``operator`` at the right eigenvector, so reverse mode
         costs one operator VJP. Valid for a simple eigenvalue.
+
+    As for :func:`sparse_solve`, the CPU platform must be visible
+    (``JAX_PLATFORMS=cuda,cpu`` or unset on a GPU host).
     """
+    _require_cpu_platform("sparse_eigenvalue")
     if select not in {"max_real", "nearest"}:
         raise ValueError("select must be 'max_real' or 'nearest'")
     n = pattern.shape[0]

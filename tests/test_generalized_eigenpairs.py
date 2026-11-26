@@ -112,30 +112,32 @@ def test_bad_pivot_falls_back_to_dense_and_reports():
     F = (jnp.zeros((n, 1, 1)), jnp.asarray(diag), upper)
     G = (jnp.zeros((n, 1, 1)), jnp.ones((n, 1, 1)), jnp.zeros((n, 1, 1)))
     values = sla.eigh(*_dense_pencil(F, G), eigvals_only=True)
-    result = sx.generalized_eigenpairs(F, G, 0.7, 2)
+    result = sx.generalized_eigenpairs(F, G, 0.7, 2, dense_limit=n)
     assert bool(result.fallback) and bool(result.converged)
     np.testing.assert_allclose(result.values, _nearest(values, 0.7, 2), atol=1e-12)
     # derivative through the dense path
     dF = (jnp.zeros_like(upper), jnp.asarray(rng.normal(size=(n, 1, 1))), upper * 0)
     _, dv = jax.jvp(
-        lambda t: sx.generalized_eigenpairs(_along(F, dF, t), G, 0.7, 2).values, (0.0,), (1.0,)
+        lambda t: sx.generalized_eigenpairs(_along(F, dF, t), G, 0.7, 2, dense_limit=n).values,
+        (0.0,),
+        (1.0,),
     )
     h = 1e-6
     fd = (
-        sx.generalized_eigenpairs(_along(F, dF, h), G, 0.7, 2).values
-        - sx.generalized_eigenpairs(_along(F, dF, -h), G, 0.7, 2).values
+        sx.generalized_eigenpairs(_along(F, dF, h), G, 0.7, 2, dense_limit=n).values
+        - sx.generalized_eigenpairs(_along(F, dF, -h), G, 0.7, 2, dense_limit=n).values
     ) / (2 * h)
     np.testing.assert_allclose(dv, fd, atol=1e-8)
-    # without the dense path the breakdown is reported, not hidden
-    off = sx.generalized_eigenpairs(F, G, 0.7, 2, dense_limit=0)
-    assert not bool(off.fallback) and not bool(off.converged)
+    # without the dense path (the default) the breakdown is reported, not hidden
+    off = sx.generalized_eigenpairs(F, G, 0.7, 2)
+    assert bool(off.fallback) and not bool(off.converged)
 
 
 def test_invertible_indefinite_two_by_two_pencil():
     """``[[0, 1], [1, 0]]`` has eigenvalues +-1 although its first Schur pivot is zero."""
     F = (jnp.zeros((2, 1, 1)), jnp.zeros((2, 1, 1)), jnp.array([[[1.0]], [[0.0]]]))
     G = (jnp.zeros((2, 1, 1)), jnp.ones((2, 1, 1)), jnp.zeros((2, 1, 1)))
-    result = sx.generalized_eigenpairs(F, G, 0.0, 2)
+    result = sx.generalized_eigenpairs(F, G, 0.0, 2, dense_limit=2)
     np.testing.assert_allclose(result.values, [-1.0, 1.0], atol=1e-14)
     assert bool(result.fallback) and bool(result.converged)
     assert float(result.excluded_residual) == 0.0 and float(result.gap) == np.inf  # all selected
@@ -512,7 +514,7 @@ def test_excluded_residual_under_jit_vmap_and_derivatives(pencil):
     r = run(0.0)
     # positions 0-7 keep their meaning: compare with a separate eager call, read by name
     eager = sx.generalized_eigenpairs(F0, G0, TARGET, COUNT)
-    assert len(r) == 9
+    assert len(r) == 10  # probe_residual is the tenth
     for i, name in enumerate(sx.EigenpairResult._fields[:8]):
         np.testing.assert_allclose(r[i], getattr(eager, name), rtol=1e-9, atol=1e-12, err_msg=name)
     total = lambda t: run(t).values.sum()  # noqa: E731
@@ -520,3 +522,50 @@ def test_excluded_residual_under_jit_vmap_and_derivatives(pencil):
     fd = (total(h) - total(-h)) / (2 * h)
     np.testing.assert_allclose(jax.grad(total)(0.0), fd, rtol=1e-6)
     np.testing.assert_allclose(jax.jvp(total, (0.0,), (1.0,))[1], fd, rtol=1e-6)
+
+
+def _lu_shapes(jaxpr):
+    """Operand shapes of every ``lu`` primitive in a closed jaxpr, sub-jaxprs included."""
+    shapes = []
+    for eqn in jaxpr.eqns:
+        if eqn.primitive.name == "lu":
+            shapes.append(tuple(eqn.invars[0].aval.shape))
+        for value in eqn.params.values():
+            for sub in value if isinstance(value, (tuple, list)) else (value,):
+                sub = getattr(sub, "jaxpr", sub)  # a ClosedJaxpr holds its Jaxpr
+                if hasattr(sub, "eqns"):
+                    shapes += _lu_shapes(sub)
+    return shapes
+
+
+def test_default_compiles_no_dense_lu_under_vmap():
+    """Gate of S4: ``vmap`` over 8 targets with the default ``dense_limit`` compiles no LU of
+    size ``n_blocks * m``; a ``cond`` under ``vmap`` would run it on every call."""
+    n, m = 100, 2  # 200 unknowns, below the former default of 2048
+    rng = np.random.default_rng(4)
+    F, G = _band(rng, n, m, False), _band(rng, n, m, False, 4 * m)
+    run = lambda t: sx.generalized_eigenpairs(F, G, t, 2).values  # noqa: E731
+    jaxpr = jax.make_jaxpr(jax.vmap(run))(jnp.linspace(-1.0, 1.0, 8)).jaxpr
+    assert (n * m, n * m) not in [s[-2:] for s in _lu_shapes(jaxpr)]
+    explicit = lambda t: sx.generalized_eigenpairs(F, G, t, 2, dense_limit=n * m).values  # noqa: E731
+    jaxpr = jax.make_jaxpr(jax.vmap(explicit))(jnp.linspace(-1.0, 1.0, 8)).jaxpr
+    assert (n * m, n * m) in [s[-2:] for s in _lu_shapes(jaxpr)]  # opt-in still compiles it
+
+
+def test_probe_failure_is_reported_at_any_size():
+    """``fallback`` is the probe's verdict and ``probe_residual`` its value, with or without the
+    dense path."""
+    n = 14
+    rng = np.random.default_rng(2)
+    diag = rng.normal(size=(n, 1, 1))
+    diag[-1] = 0.7  # singular last Schur pivot at sigma = 0.7 (as in the dense fallback test)
+    F = (jnp.zeros((n, 1, 1)), jnp.asarray(diag), jnp.asarray(rng.normal(size=(n, 1, 1))))
+    G = (jnp.zeros((n, 1, 1)), jnp.ones((n, 1, 1)), jnp.zeros((n, 1, 1)))
+    bound = np.sqrt(np.finfo(float).eps)
+    for limit in (0, n):
+        r = sx.generalized_eigenpairs(F, G, 0.7, 2, dense_limit=limit)
+        assert bool(r.fallback) and not float(r.probe_residual) <= bound
+        assert bool(r.converged) == (limit == n)
+    F, G = _band(rng, 10, 3, False), _band(rng, 10, 3, False, 12)
+    r = sx.generalized_eigenpairs(F, G, 0.2, 2)
+    assert not bool(r.fallback) and float(r.probe_residual) <= bound
