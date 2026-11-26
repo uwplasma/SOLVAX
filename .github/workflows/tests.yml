@@ -177,6 +177,7 @@ jobs:
               tests/test_pcg.py tests/test_propagator.py tests/test_ode.py tests/test_sharding.py
               tests/test_generated_block_benchmark.py
               tests/test_checkpointed_block_benchmark.py tests/test_native.py
+              tests/test_special.py
               tests/test_sparse_direct.py tests/test_separable.py tests/test_splines.py
               tests/test_operator_couplings_benchmark.py
               tests/test_newton_krylov_root.py
@@ -224,7 +225,7 @@ jobs:
         tests/test_multigrid.py tests/test_eigen.py tests/test_generalized_eigenpairs.py
         tests/test_sharding.py
         tests/test_least_squares.py tests/test_sparse_direct.py tests/test_ode.py
-        tests/test_propagator.py tests/test_splines.py
+        tests/test_propagator.py tests/test_splines.py tests/test_special.py
         tests/test_newton_krylov_root.py
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

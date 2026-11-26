@@ -224,6 +224,16 @@ from solvax.sparse_direct import (
     sparse_eigenvalue,
     sparse_solve,
 )
+from solvax.special import (
+    bessel_j0,
+    bessel_j1,
+    carlson_rd,
+    carlson_rf,
+    ellipe,
+    ellipk,
+    faddeeva,
+    plasma_dispersion,
+)
 from solvax.splines import (
     CubicSpline,
     cubic_spline,
@@ -461,6 +471,14 @@ __all__ = [
     "sparse_backward_error",
     "sparse_eigenvalue",
     "sparse_solve",
+    "bessel_j0",
+    "bessel_j1",
+    "carlson_rd",
+    "carlson_rf",
+    "ellipe",
+    "ellipk",
+    "faddeeva",
+    "plasma_dispersion",
     "sparse_operator_matrix",
     "block_tridiagonal_from_products",
     "column_groups",
