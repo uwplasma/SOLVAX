@@ -247,6 +247,7 @@ def pcg(
     after termination repeat the final norm, which keeps the result compatible
     with ``jit`` and ``vmap`` without dynamic allocation. A missing ``x0`` skips
     the initial matvec (the residual is ``b``); an explicit zero ``x0`` does not.
+    A zero ``b`` returns ``x = 0``, converged after 0 iterations, whatever ``x0`` is.
     """
 
     if max_steps < 0:
@@ -269,6 +270,8 @@ def pcg(
     precond = _identity if precond is None else precond
 
     b_norm = _tree_norm(b)
+    if not zero_start:  # b = 0 has the solution 0, which rtol * ||b|| = 0 never reaches from x0
+        x0 = jax.tree.map(lambda leaf: jnp.where(b_norm == 0, jnp.zeros_like(leaf), leaf), x0)
     tolerance = jnp.maximum(
         jnp.asarray(atol, scalar_dtype),
         jnp.asarray(rtol, scalar_dtype) * b_norm,

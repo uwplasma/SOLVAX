@@ -22,18 +22,18 @@ N_BLOCKS, M, COUNT, TARGET = 10, 3, 3, 0.2
 
 
 def _band(rng, n, m, cplx, shift=0.0):
-    """Random Hermitian band triple (``lower`` is junk on purpose: it is ignored)."""
+    """Random Hermitian band triple, ``lower=None`` (not provided: only ``diag`` and ``upper``)."""
 
     def draw(*shape):
         return rng.normal(size=shape) + (1j * rng.normal(size=shape) if cplx else 0.0)
 
     diag = draw(n, m, m)
     diag = diag + np.conj(np.swapaxes(diag, -1, -2)) + shift * np.eye(m)
-    return tuple(jnp.asarray(a) for a in (draw(n, m, m), diag, draw(n, m, m)))
+    return None, jnp.asarray(diag), jnp.asarray(draw(n, m, m))
 
 
 def _along(a, b, t):
-    return tuple(x + t * y for x, y in zip(a, b, strict=True))
+    return tuple(None if x is None else x + t * y for x, y in zip(a, b, strict=True))
 
 
 def _dense_pencil(F, G):
@@ -109,7 +109,7 @@ def test_bad_pivot_falls_back_to_dense_and_reports():
     diag = rng.normal(size=(n, 1, 1))
     diag[-1] = 0.7  # the last Schur pivot is F - sigma G = 0 exactly at sigma = 0.7
     upper = jnp.asarray(rng.normal(size=(n, 1, 1)))
-    F = (jnp.zeros((n, 1, 1)), jnp.asarray(diag), upper)
+    F = (None, jnp.asarray(diag), upper)
     G = (jnp.zeros((n, 1, 1)), jnp.ones((n, 1, 1)), jnp.zeros((n, 1, 1)))
     values = sla.eigh(*_dense_pencil(F, G), eigvals_only=True)
     t = 0.7
@@ -139,7 +139,7 @@ def test_bad_pivot_falls_back_to_dense_and_reports():
 
 def test_invertible_indefinite_two_by_two_pencil():
     """``[[0, 1], [1, 0]]`` has eigenvalues +-1 although its first Schur pivot is zero."""
-    F = (jnp.zeros((2, 1, 1)), jnp.zeros((2, 1, 1)), jnp.array([[[1.0]], [[0.0]]]))
+    F = (None, jnp.zeros((2, 1, 1)), jnp.array([[[1.0]], [[0.0]]]))
     G = (jnp.zeros((2, 1, 1)), jnp.ones((2, 1, 1)), jnp.zeros((2, 1, 1)))
     result = sx.generalized_eigenpairs(F, G, 0.0, 2, dense_limit=2)
     np.testing.assert_allclose(result.values, [-1.0, 1.0], atol=1e-14)
@@ -147,16 +147,16 @@ def test_invertible_indefinite_two_by_two_pencil():
     assert float(result.excluded_residual) == 0.0 and float(result.gap) == np.inf  # all selected
 
 
-def test_lower_is_ignored_and_diag_is_hermitized():
+def test_lower_none_reads_diag_and_upper_and_reports_diag_defect():
     rng = np.random.default_rng(3)
     F, G = _band(rng, 8, 2, True), _band(rng, 8, 2, True, 8)
     skew = rng.normal(size=F[1].shape) + 1j * rng.normal(size=F[1].shape)
     skew = jnp.asarray(skew - np.conj(np.swapaxes(skew, -1, -2)))  # anti-Hermitian
-    messy = (F[0] * 7 + 1, F[1] + 0.3 * skew, F[2])
-    clean = sx.generalized_eigenpairs((jnp.zeros_like(F[0]), F[1], F[2]), G, 0.0, 2).values
-    np.testing.assert_allclose(
-        sx.generalized_eigenpairs(messy, G, 0.0, 2).values, clean, atol=1e-12
-    )
+    messy = sx.generalized_eigenpairs((None, F[1] + 0.3 * skew, F[2]), G, 0.0, 2)
+    clean = sx.generalized_eigenpairs(F, G, 0.0, 2)
+    np.testing.assert_allclose(messy.values, clean.values, atol=1e-12)
+    assert float(messy.hermitian_defect) > 0.01 and not bool(messy.converged)
+    assert float(clean.hermitian_defect) == 0.0 and bool(clean.converged)
 
 
 def test_count_is_validated():
@@ -292,11 +292,11 @@ def test_cluster_mean_derivative_survives_degeneracy(split):
     scalar = lambda shift: jnp.asarray(np.kron(rng.normal(size=(n, 1, 1)) + shift, np.eye(2)))  # noqa: E731
     zero = jnp.zeros((n, 2, 2))
     F = (
-        zero,
+        None,
         scalar(0.0) + split * jnp.diag(jnp.array([1.0, -1.0])),
         jnp.asarray(np.kron(rng.normal(size=(n, 1, 1)), np.eye(2))),
     )
-    G = (zero, scalar(6.0), zero)
+    G = (None, scalar(6.0), zero)
     dF, dG = _band(rng, n, 2, True), _band(rng, n, 2, True, 0.0)
     levels = sla.eigh(*_dense_pencil(F, G), eigvals_only=True)
     target = float(levels[8] + 1e-3)  # next to a doubly degenerate level
@@ -322,9 +322,9 @@ def _degenerate_pair(cplx):
     """``F = blockdiag(I2, diag(3, 4))``, ``G = I``: the pair nearest ``1.0`` is degenerate."""
     z = jnp.zeros((2, 2, 2))
     d = jnp.stack([jnp.eye(2), jnp.diag(jnp.array([3.0, 4.0]))]).astype(complex if cplx else float)
-    eye = (z, jnp.stack([jnp.eye(2)] * 2).astype(d.dtype), z)
+    eye = (None, jnp.stack([jnp.eye(2)] * 2).astype(d.dtype), z)
     dF = _band(np.random.default_rng(7), 2, 2, cplx)
-    return (z, d, z), eye, dF
+    return (None, d, z), eye, dF
 
 
 @pytest.mark.parametrize("cplx", [False, True], ids=["real", "complex"])
@@ -402,7 +402,7 @@ def _accumulating_pencil(n=60):
             b.append(np.linalg.norm(w))
             Q.append(w / b[-1])
     z = jnp.zeros((n, 1, 1))
-    F = (z, jnp.asarray(a).reshape(n, 1, 1), jnp.asarray(np.append(b, 0.0)).reshape(n, 1, 1))
+    F = (None, jnp.asarray(a).reshape(n, 1, 1), jnp.asarray(np.append(b, 0.0)).reshape(n, 1, 1))
     return F, (z, jnp.ones((n, 1, 1)), z), lam
 
 
@@ -518,8 +518,11 @@ def test_excluded_residual_under_jit_vmap_and_derivatives(pencil):
     r = run(0.0)
     # positions 0-7 keep their meaning: compare with a separate eager call, read by name
     eager = sx.generalized_eigenpairs(F0, G0, TARGET, COUNT)
-    assert len(r) == 10  # probe_residual is the tenth
-    for i, name in enumerate(sx.EigenpairResult._fields[:8]):
+    fields = sx.EigenpairResult._fields
+    assert fields[:8] == ("values", "vectors", "residuals", "orthogonality", "iterations",
+                          "converged", "gap", "fallback")  # fmt: skip
+    assert {"excluded_residual", "probe_residual", "hermitian_defect"} <= set(fields)
+    for i, name in enumerate(fields[:8]):
         np.testing.assert_allclose(r[i], getattr(eager, name), rtol=1e-9, atol=1e-12, err_msg=name)
     total = lambda t: run(t).values.sum()  # noqa: E731
     h = 1e-6
@@ -563,7 +566,7 @@ def test_probe_failure_is_reported_at_any_size():
     rng = np.random.default_rng(2)
     diag = rng.normal(size=(n, 1, 1))
     diag[-1] = 0.7  # singular last Schur pivot at sigma = 0.7 (as in the dense fallback test)
-    F = (jnp.zeros((n, 1, 1)), jnp.asarray(diag), jnp.asarray(rng.normal(size=(n, 1, 1))))
+    F = (None, jnp.asarray(diag), jnp.asarray(rng.normal(size=(n, 1, 1))))
     G = (jnp.zeros((n, 1, 1)), jnp.ones((n, 1, 1)), jnp.zeros((n, 1, 1)))
     bound = np.finfo(float).eps ** 0.75  # the probe threshold
     for limit in (0, n):
@@ -581,7 +584,7 @@ def test_target_exactly_on_an_eigenvalue_of_a_large_pencil_converges():
     rank and the Cholesky factor of the Rayleigh-Ritz Gram matrix was NaN."""
     n = 401
     ones, zero = jnp.ones((n, 1, 1)), jnp.zeros((n, 1, 1))
-    F, G = (zero, zero, ones), (zero, ones, zero)
+    F, G = (None, zero, ones), (zero, ones, zero)
     exact = 2 * np.cos(np.arange(1, n + 1) * np.pi / (n + 1))
     r = sx.generalized_eigenpairs(F, G, 0.0, 3)
     assert bool(r.converged) and np.isfinite(np.asarray(r.residuals)).all()
@@ -604,3 +607,69 @@ def test_ritz_cuts_a_rank_deficient_basis():
     np.testing.assert_allclose(
         np.sort(np.asarray(theta)[~cut]), np.linalg.eigvalsh(Q.T @ np.asarray(A) @ Q), atol=1e-12
     )
+
+
+def _skew(F, eps):
+    """``F`` with ``eps`` times a fixed anti-Hermitian matrix added to ``diag``: its Hermitian part
+    is ``F``."""
+    k = jnp.triu(jnp.ones(F[1].shape[-2:]), 1)
+    return F[0], F[1] + eps * (k - k.T).astype(F[1].dtype), F[2]
+
+
+def test_non_hermitian_input_is_refused(pencil):
+    """S6: a non-Hermitian ``diag`` is not silently replaced by its Hermitian part. The defect is
+    returned and ``converged`` is False above ``tol``."""
+    F0, _, G0, _ = pencil
+    clean = sx.generalized_eigenpairs(F0, G0, TARGET, COUNT)
+    assert float(clean.hermitian_defect) <= 1e-15 and bool(clean.converged)
+    bent = _skew(F0, 1e-3)
+    r = sx.generalized_eigenpairs(bent, G0, TARGET, COUNT)
+    assert float(r.hermitian_defect) > 1e-5
+    assert not bool(r.converged)
+    rg = sx.generalized_eigenpairs(F0, _skew(G0, 1e-3), TARGET, COUNT)
+    assert float(rg.hermitian_defect) > 1e-5 and not bool(rg.converged)
+    # a defect below tol passes
+    small = sx.generalized_eigenpairs(_skew(F0, 1e-13), G0, TARGET, COUNT)
+    assert float(small.hermitian_defect) <= 1e-10 and bool(small.converged)
+
+
+def test_hermitian_defect_under_jit_vmap_and_grad(pencil):
+    """The new last field rides through ``jit`` and ``vmap`` and has zero, finite derivative."""
+    F0, F1, G0, _ = pencil
+    run = jax.jit(lambda e: sx.generalized_eigenpairs(_skew(F0, e), G0, TARGET, COUNT))
+    batched = jax.vmap(run)(jnp.array([0.0, 1e-3]))
+    assert sx.EigenpairResult._fields[-1] == "hermitian_defect"
+    assert batched.hermitian_defect.shape == (2,)
+    assert [bool(c) for c in batched.converged] == [True, False]
+    g = jax.grad(lambda t: run(1e-3 * t).hermitian_defect)(1.0)
+    assert np.isfinite(float(g)) and float(g) == 0.0
+    g = jax.grad(lambda t: sx.generalized_eigenpairs(_along(F0, F1, t), G0, TARGET, COUNT)
+                 .hermitian_defect)(0.0)  # fmt: skip
+    assert float(g) == 0.0
+
+
+def test_non_hermitian_lower_is_refused():
+    """S6: a real non-symmetric tridiagonal (diag 2, upper -1, lower -0.2, n=40) has its spectrum
+    in [1.106, 2.894]; its Hermitian part's eigenvalues near 0.5 are not eigenvalues of it."""
+    n = 40
+    F = (jnp.full((n, 1, 1), -0.2), jnp.full((n, 1, 1), 2.0), jnp.full((n, 1, 1), -1.0))
+    G = (None, jnp.ones((n, 1, 1)), jnp.zeros((n, 1, 1)))
+    r = sx.generalized_eigenpairs(F, G, 0.5, 3)
+    assert not bool(r.converged)
+    assert 0.1 < float(r.hermitian_defect) < 10  # ||lower - upper^H|| / ||A_h|| = 0.8 / 4
+    consistent = (jnp.full((n, 1, 1), -1.0), F[1], F[2])
+    ok = sx.generalized_eigenpairs(consistent, G, 0.5, 3)
+    assert float(ok.hermitian_defect) == 0.0 and bool(ok.converged)
+
+
+def test_default_tol_follows_the_dtype():
+    """S6: ``tol=None`` is ``max(1e-10, 100 eps)``; a float32 pencil converges in a few sweeps
+    instead of running ``max_iter`` sweeps to ``converged=False`` at a residual of about 1.9e-7."""
+    rng = np.random.default_rng(1)
+    F, G = _band(rng, N_BLOCKS, M, False), _band(rng, N_BLOCKS, M, False, 4 * M)
+    f32 = lambda b: tuple(None if a is None else a.astype(jnp.float32) for a in b)  # noqa: E731
+    r = sx.generalized_eigenpairs(f32(F), f32(G), TARGET, COUNT)
+    assert bool(r.converged) and int(r.iterations) < 20
+    assert float(r.residuals.max()) <= 100 * float(jnp.finfo(jnp.float32).eps)
+    r64 = sx.generalized_eigenpairs(F, G, TARGET, COUNT)
+    assert bool(r64.converged) and float(r64.residuals.max()) <= 1e-10

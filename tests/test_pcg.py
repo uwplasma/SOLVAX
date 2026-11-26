@@ -246,3 +246,17 @@ def test_pcg_linear_solve_adjoint_carries_a_nonfinite_cotangent():
 
     assert jnp.isfinite(jax.grad(total)(1.0, 1.0))
     assert jnp.isnan(jax.grad(total)(1.0, jnp.nan))
+
+
+@pytest.mark.parametrize("single_reduction", [False, True])
+@pytest.mark.parametrize("scale", [1e-16, 1e-3])
+def test_zero_rhs_with_nonzero_start_returns_zero_converged(single_reduction, scale):
+    """Issue 173: ``b = 0`` with a nonzero ``x0`` has the solution 0; the tolerance
+    ``rtol ||b||`` is 0, so before this change 200 steps ended unconverged (50 x 50 SPD
+    tridiagonal, ``rtol=1e-12``)."""
+    n = 50
+    A = 2 * jnp.eye(n) - jnp.eye(n, k=1) - jnp.eye(n, k=-1)
+    r = pcg(lambda v: A @ v, jnp.zeros(n), x0=scale * jnp.ones(n), rtol=1e-12, max_steps=200,
+            single_reduction=single_reduction)  # fmt: skip
+    assert bool(r.converged) and int(r.iterations) == 0
+    assert float(jnp.abs(r.x).max()) == 0.0

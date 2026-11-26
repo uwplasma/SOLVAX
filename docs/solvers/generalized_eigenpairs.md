@@ -17,9 +17,22 @@ result.values, result.vectors   # (4,), (n_blocks, m, 4)
 ## Input convention
 
 `F` and `G` are SOLVAX band triples. They are real symmetric or complex
-Hermitian, and the code makes them so: it reads only `diag` and `upper[:-1]`,
-rebuilds `lower[k]` as `upper[k-1]` conjugate-transposed, and replaces `diag` by
-its Hermitian part. Transpose and conjugate transpose differ for complex input;
+Hermitian, and the solver uses the Hermitian band $A_h$: `lower[k]` is
+`upper[k-1]` conjugate-transposed and `diag` is replaced by its Hermitian part.
+It does not do so silently: `hermitian_defect` is $\lVert A-A_h\rVert/\lVert A_h\rVert$
+(the larger over `F` and `G`), counting `diag` and `lower[1:]`, and
+`converged` is False when it is above `tol`. Pass `lower=None` to say it is not
+provided; then only `diag` is checked. A real non-symmetric operator such as
+`lower=-0.2`, `diag=2`, `upper=-1` (40 points, spectrum in $[1.106, 2.894]$) gives
+defect 0.2 and `converged=False`; its Hermitian part has eigenvalues 0.36, 0.46, 0.56.
+To first order a defect $d$ moves an eigenvalue by at most
+$d\,(\lVert F\rVert+\lvert\lambda\rvert\lVert G\rVert)$, the scale of the residual,
+which is why the bound is `tol`; on the random 30 by 30 real and complex test
+pencils the measured move is at most $0.03\,d$ of that scale for $d$ from
+$10^{-12}$ to $10^{-3}$. Eigenvectors move by about $d$ divided by the relative gap
+(about $7\,d$ on the complex test pencil), which `tol` does not bound.
+`tol=None`, the default, is $\max(10^{-10}, 100\,\epsilon)$ of the pencil's dtype.
+Transpose and conjugate transpose differ for complex input;
 the Hermitian structure uses the conjugate transpose, and
 {func}`~solvax.direct.block_thomas_solve` offers `transpose=True` ($A^T$) and
 `adjoint=True` ($A^H$) separately. For a Hermitian band $A^H=A$, so the solver
@@ -86,11 +99,12 @@ The dense path ran exactly when `fallback` is True and
 | `residuals` | the relative residual above, per pair |
 | `orthogonality` | $\max\lvert Y^H G Y-I\rvert$ |
 | `iterations` | sweeps after the first, each applying $T$ six times |
-| `converged` | `max(residuals) <= tol` and `excluded_residual <= tol`, False if non-finite |
+| `converged` | `max(residuals)`, `excluded_residual` and `hermitian_defect` at most `tol`, False if non-finite |
 | `gap` | $\lvert\lambda-\text{target}\rvert$ of the nearest excluded Ritz value minus that of the farthest selected one |
 | `fallback` | the probe solve failed; the dense pivoted path ran if `n_blocks * m <= dense_limit` |
 | `excluded_residual` | the relative residual of the nearest excluded Ritz pair, the one that sets `gap`; zero if every Ritz value was selected |
 | `probe_residual` | relative residual of the block-Thomas probe solve at the shift |
+| `hermitian_defect` | relative size of the non-Hermitian part of `diag` that was dropped (see the input convention) |
 
 `gap` is zero when the selection splits a degenerate or tied set. It sees only
 the subspace: an eigenvalue the iteration never captured is not counted.
