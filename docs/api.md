@@ -24,4 +24,5 @@ api/implicit
 api/autodiff
 api/parallel
 api/native
+api/special
 ```
