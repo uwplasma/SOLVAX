@@ -35,7 +35,8 @@ def _cuda_triangular_product(a, hi, lo, *, lower, transpose):
 
     def product(x, y, low):
         return plt.elementwise_inline_asm(
-            'mul.rn.f64 $0, $2, $3; fma.rn.f64 $1, $2, $3, -$0; '
+            'mul.rn.f64 $0, $2, $3; neg.f64 $1, $0; '
+            'fma.rn.f64 $1, $2, $3, $1; '
             'fma.rn.f64 $1, $2, $4, $1;',
             args=[x, y, low], constraints='=&d,=&d,d,d,d', pack=1,
             result_shape_dtypes=[jax.ShapeDtypeStruct(x.shape, x.dtype)]*2)

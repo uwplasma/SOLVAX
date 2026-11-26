@@ -5,7 +5,11 @@ import importlib.metadata
 import math
 import os
 from pathlib import Path
+import re
+import shutil
+import subprocess
 import sys
+import tempfile
 from types import SimpleNamespace
 import unittest
 
@@ -67,15 +71,22 @@ def numpy_kernel():
 
     def assembly(asm,*,args,constraints,pack,result_shape_dtypes):
         assert pack==1 and constraints.startswith('=&d,=&d,')
-        if asm.startswith('mul.rn'):
-            a,b,low=args
-            high=a*b
-            fma=np.vectorize(exact_fma,otypes=[float])
-            error=fma(a,b,-high)
-            return [high,fma(a,low,error)]
-        a,b=args
-        high=a+b;z=high-a
-        return [high,(a-(high-z))+(b-z)]
+        registers={f'${i+2}':value for i,value in enumerate(args)}
+        fma=np.vectorize(exact_fma,otypes=[float])
+        for instruction in asm.replace('{','').replace('}','').split(';'):
+            instruction=instruction.strip()
+            if not instruction or instruction.startswith('.reg '): continue
+            opcode,operands=instruction.split(None,1)
+            destination,*sources=[s.strip() for s in operands.split(',')]
+            values=[registers[s] for s in sources]
+            if opcode=='add.rn.f64': value=values[0]+values[1]
+            elif opcode=='sub.rn.f64': value=values[0]-values[1]
+            elif opcode=='mul.rn.f64': value=values[0]*values[1]
+            elif opcode=='neg.f64': value=-values[0]
+            elif opcode=='fma.rn.f64': value=fma(*values)
+            else: raise ValueError(f'Unsupported residual instruction: {opcode}')
+            registers[destination]=value
+        return [registers['$0'],registers['$1']]
 
     env=dict(jnp=np,jax=SimpleNamespace(
         ShapeDtypeStruct=lambda shape,dtype:SimpleNamespace(shape=shape,dtype=dtype),
@@ -87,6 +98,43 @@ def numpy_kernel():
 
 
 class LuRefinementNumpyTests(unittest.TestCase):
+    def test_literal_ptx_snippets_assemble_and_reject_previous_unary_operand(self):
+        compiler=os.environ.get('SOLVAX_TEST_PTXAS') or shutil.which('ptxas')
+        if not compiler:
+            self.skipTest('Set SOLVAX_TEST_PTXAS for a compiler-only check; no GPU required')
+        kernel=functions('_cuda_triangular_product')[0]
+        snippets=[ast.literal_eval(call.args[0]) for call in ast.walk(kernel)
+                  if isinstance(call,ast.Call) and isinstance(call.func,ast.Attribute)
+                  and call.func.attr=='elementwise_inline_asm']
+        self.assertEqual(len(snippets),2)
+        header='''
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry check_residual(.param .u64 output_ptr) {
+ .reg .u64 %rd;
+ .reg .f64 %fd<5>;
+ ld.param.u64 %rd, [output_ptr];
+ mov.f64 %fd2, 0d3FF0000000000000;
+ mov.f64 %fd3, 0d3FF0000000000000;
+ mov.f64 %fd4, 0d3C90000000000000;
+'''
+        footer='\nst.global.f64 [%rd], %fd0; st.global.f64 [%rd+8], %fd1; ret; }\n'
+        with tempfile.TemporaryDirectory() as directory:
+            ptx=Path(directory)/'residual.ptx';binary=Path(directory)/'residual.cubin'
+            def assemble(snippet):
+                ptx.write_text(header+re.sub(r'\$(\d+)',r'%fd\1',snippet)+footer)
+                return subprocess.run([compiler,'-arch=sm_80','-o',str(binary),str(ptx)],
+                                      capture_output=True,text=True,timeout=30)
+            for snippet in snippets:
+                result=assemble(snippet)
+                self.assertEqual(result.returncode,0,result.stderr)
+                self.assertGreater(binary.stat().st_size,0)
+            old='mul.rn.f64 $0, $2, $3; fma.rn.f64 $1, $2, $3, -$0;'
+            result=assemble(old)
+            self.assertNotEqual(result.returncode,0)
+            self.assertIn('fma',result.stderr.lower())
+
     def test_actual_kernel_handles_both_triangles_transposes_and_edge_tiles(self):
         jax_was_loaded='jax' in sys.modules
         kernel=numpy_kernel();rng=np.random.default_rng(26)

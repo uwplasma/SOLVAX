@@ -60,3 +60,28 @@ buffer sizes. The dense AD probes test the isolated LU application, not the
 full transport gradient or optimization workload. Compiled buffer sizes are
 not measurements of host RSS. Neither a full transport accuracy improvement
 nor a speed/memory claim is established until the CUDA results are obtained.
+
+## First CUDA attempt: PTX syntax correction
+
+The first remote run at `c48b96b` stopped during the JAX 0.7.2 CUDA tests.
+All three CUDA tests hit the same assembler error: the inline `fma.rn.f64`
+used an unsupported unary-negated register operand. JAX 0.10.0 tests and
+the saved-point timing comparison were therefore not reached. The four
+NumPy tests passed, but their original assembly mock evaluated the intended
+formula without parsing each literal instruction, so it missed this error.
+
+The product-error sequence now emits an explicit `neg.f64` before the FMA.
+This preserves the intended arithmetic and changes only its valid PTX
+encoding. The NumPy mock now interprets the actual instruction sequence.
+An additional compiler-only regression test assembles both literal kernel
+snippets for `sm_80` and verifies that the previous unary-operand sequence
+is rejected. Set `SOLVAX_TEST_PTXAS` to an assembler path to run this check;
+it requires no GPU or JAX import.
+
+NVIDIA `ptxas` 12.9.86 was downloaded into the ignored local workspace,
+verified against its published wheel checksum, and used without installing
+or changing any runtime package. Both corrected snippets assemble, the
+previous invalid snippet is rejected, and all five local checks pass.
+The three full CUDA tests and the accuracy/timing comparison remain to be
+rerun; no correction performance or transport-gradient claim follows from
+this compiler-only check.
