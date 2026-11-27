@@ -31,6 +31,7 @@ jobs:
           python-version: "3.12"
           enable-cache: false
           activate-environment: true
+          venv-path: ${{ runner.temp }}/venv
       - run: uv pip install ruff==0.15.10
       - run: ruff check src tests examples
 
@@ -52,14 +53,9 @@ jobs:
           python-version: "3.12"
           enable-cache: false
           activate-environment: true
+          venv-path: ${{ runner.temp }}/venv
       - run: uv pip install mypy==1.20.0 jax numpy
       - run: mypy
-      - name: Remove the virtual environment
-        if: always()
-        run: rm -rf .venv
-      - name: Remove the virtual environment
-        if: always()
-        run: rm -rf .venv
 
   mumps:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
@@ -122,6 +118,7 @@ jobs:
           python-version: ${{ matrix.python }}
           enable-cache: false
           activate-environment: true
+          venv-path: ${{ runner.temp }}/venv
       # One resolver call, so equinox is chosen to match the pinned JAX.
       - name: Install SOLVAX on the pinned JAX
         if: matrix.jax != 'latest'
@@ -131,9 +128,6 @@ jobs:
         run: uv pip install -e '.[dev]'
       - run: python -c "import jax; print(jax.__version__)"
       - run: pytest -n 3 tests/test_generalized_eigenpairs.py
-      - name: Clean workspace
-        if: always()
-        run: rm -rf .venv
 
   test:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
@@ -236,6 +230,7 @@ jobs:
           python-version: ${{ matrix.python }}
           enable-cache: false
           activate-environment: true
+          venv-path: ${{ runner.temp }}/venv
       - run: uv pip install -e '.[dev]'
       # adv-jax-math 1.2 imports VJPHiPrimitive from jax.experimental.hijax, which
       # JAX 0.11.2 no longer provides, so the backend installs and then fails to
@@ -281,7 +276,7 @@ jobs:
           key: solvax-coverage-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.suite }}
       - name: Clean workspace
         if: always()
-        run: rm -rf .venv artifacts
+        run: rm -rf artifacts
 
   coverage:
     name: Combined branch coverage
@@ -297,6 +292,7 @@ jobs:
           python-version: "3.12"
           enable-cache: false
           activate-environment: true
+          venv-path: ${{ runner.temp }}/venv
       - run: uv pip install coverage
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
