@@ -11,7 +11,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import lax
-from jax.scipy.linalg import lu_factor, lu_solve, solve_triangular
+from jax.scipy.linalg import lu_factor, lu_solve
 
 from solvax.direct import (
     block_thomas_factor,
@@ -252,13 +252,13 @@ class EigenpairResult(NamedTuple):
             so the gap is a converged eigenvalue distance, but it only sees the subspace: an
             eigenvalue the iteration never captured is not counted. Zero means the selection
             may split a degenerate or tied set; ``inf`` if every Ritz value was selected.
-        fallback: True if block Thomas failed its probe solve, at any size; the dense pivoted
-            path then ran if ``n_blocks * m <= dense_limit``, and otherwise the residuals show
-            the breakdown.
+        fallback: True if the probe residual is above ``eps**0.75`` (or not finite), at any
+            size; the dense pivoted path then ran if ``n_blocks * m <= dense_limit``. This also
+            happens with a target near an eigenvalue, where block Thomas is fine.
         excluded_residual: relative residual of the Ritz pair that sets ``gap`` (the nearest
             excluded one); zero if every Ritz value was selected.
         probe_residual: relative residual of the block-Thomas probe solve at the shift; above
-            ``sqrt(eps)`` (or not finite) it sets ``fallback``.
+            ``eps**0.75`` (or not finite) it sets ``fallback``.
     """
 
     values: jax.Array
@@ -300,11 +300,19 @@ def _dense(band):
 
 
 def _ritz(Fp, Gp):
-    """Eigenpairs of the Hermitian pencil ``(Fp, Gp)`` with ``Gp`` positive definite."""
-    L = jnp.linalg.cholesky((Gp + jnp.conj(Gp.T)) / 2)
-    M = solve_triangular(L, jnp.conj(solve_triangular(L, Fp, lower=True).T), lower=True)
-    theta, W = jnp.linalg.eigh((M + jnp.conj(M.T)) / 2)
-    return theta, solve_triangular(L, W, lower=True, trans="C")
+    """Eigenpairs of the Hermitian pencil ``(Fp, Gp)`` with ``Gp`` positive semidefinite.
+
+    ``Gp`` is the Gram matrix of a Krylov basis. A safeguard against a basis that has lost rank,
+    where a Cholesky factor would be NaN: ``Gp = U s U^H`` and the directions with
+    ``s <= sqrt(eps) max(s)`` are cut. They come back as zero vectors with ``theta = 0`` and rank
+    last; if one were ever selected, its residual is NaN and ``converged`` is False.
+    """
+    herm = lambda a: (a + jnp.conj(a.T)) / 2  # noqa: E731
+    s, U = jnp.linalg.eigh(herm(Gp))
+    keep = s > jnp.sqrt(jnp.finfo(s.dtype).eps) * s.max()
+    Q = U * jnp.where(keep, 1 / jnp.sqrt(jnp.where(keep, s, 1)), 0)
+    theta, W = jnp.linalg.eigh(herm(jnp.conj(Q.T) @ Fp @ Q))
+    return theta, Q @ W
 
 
 def _thomas(factors, b):
@@ -339,7 +347,7 @@ def _shifted_solver(band, dense_limit):
 
     Block Thomas does not pivot across blocks, so it breaks down on an invertible matrix with a
     singular Schur complement such as ``[[0, 1], [1, 0]]``. A probe solve whose relative
-    residual is not below ``sqrt(eps)``, or is not finite, selects the dense path, which is
+    residual is above ``eps**0.75``, or is not finite, selects the dense path, which is
     compiled in only if ``n_blocks * m <= dense_limit``.
     """
     n, m = band[1].shape[:2]
@@ -348,7 +356,7 @@ def _shifted_solver(band, dense_limit):
     thomas = lambda b: _thomas(factors, b)  # noqa: E731
     probe = jnp.sin(1.0 + jnp.arange(size)).reshape(n, m).astype(band[1].dtype)
     residual = block_tridiag_relative_residual(*band, thomas(probe), probe)
-    ok = residual <= jnp.sqrt(jnp.finfo(band[1].dtype).eps)
+    ok = residual <= jnp.finfo(band[1].dtype).eps ** 0.75
     if size > dense_limit:
         return thomas, ~ok, residual
     lu = jax.lax.cond(
@@ -380,8 +388,9 @@ def _subspace_iteration(F, G, target, count, tol, max_iter, dense_limit):
     real = jnp.zeros((), dtype).real.dtype
     nF, nG = _norm(F), _norm(G)
     target = jnp.asarray(target, real)
-    # A shift that is exactly an eigenvalue makes the factorization singular: nudge it.
-    sigma = target + 16 * jnp.finfo(real).eps * (nF + jnp.abs(target) * nG) / nG
+    # A shift on an eigenvalue makes the factorization singular, and one within delta of it
+    # leaves a solve error of about eps / delta in the other directions: nudge by sqrt(eps).
+    sigma = target + jnp.sqrt(jnp.finfo(real).eps) * (nF + jnp.abs(target) * nG) / nG
     solve, fallback, probe = _shifted_solver(_shift(F, G, sigma), dense_limit)
     matvec = lambda A, X: block_tridiag_matvec(*A, X)  # noqa: E731
     width = min(2 * count + 8, size)
@@ -505,18 +514,20 @@ def generalized_eigenpairs(
     replaced by its Hermitian part.
 
     The method is shift-invert subspace iteration over ``min(2 count + 8, n_blocks m)`` vectors,
-    factoring ``F - sigma G`` with :func:`block_thomas_factor`. Each sweep applies the
-    shift-invert operator ``S = (F - sigma G)^-1 G`` six times (a block Krylov space; fewer if
-    it would exceed ``n_blocks m``) and extracts the pairs by Rayleigh-Ritz for ``S``, ranked by
-    ``|mu|``, so that Ritz ghosts between eigenvalues on either side of ``target`` cannot be
-    selected. ``sigma`` is ``target`` moved by ``16 eps ||F|| / ||G||``, so that a target equal to
-    an eigenvalue does not give a singular factor. A probe solve checks every factorization (see
+    factoring ``F - sigma G`` with :func:`block_thomas_factor`. Each sweep applies the shift-invert
+    operator ``S = (F - sigma G)^-1 G`` six times (a block Krylov space; fewer if it would exceed
+    ``n_blocks m``) and extracts the pairs by Rayleigh-Ritz for ``S``, ranked by ``|mu|``, so that
+    Ritz ghosts between eigenvalues on either side of ``target`` cannot be selected. ``sigma`` is
+    ``target`` moved by ``sqrt(eps) (||F|| + |target| ||G||) / ||G||``, so that a target equal to an
+    eigenvalue does not give a singular factor. A probe solve checks every factorization (see
     ``_shifted_solver``); its relative residual is ``probe_residual``, and ``fallback`` is True
-    when it fails. A dense pivoted LU then takes over only if ``n_blocks * m <= dense_limit``,
-    which is 0 by default: without it a breakdown gives large or non-finite residuals and
-    ``converged=False``. Under ``vmap`` a ``cond`` runs both branches, so a nonzero
-    ``dense_limit`` pays for the dense factorization on every call there. ``count``,
-    ``max_iter`` and ``dense_limit`` are static; everything else may be traced.
+    when it is above ``eps**0.75``, which near an eigenvalue happens although block Thomas is
+    fine. A dense pivoted LU then takes over, for the solve and for the derivative solves, only
+    if ``n_blocks * m <= dense_limit``, which is 0 by default:
+    without it a breakdown gives large or non-finite residuals and ``converged=False``. Under
+    ``vmap`` a ``cond`` runs both branches, so a nonzero ``dense_limit`` pays for the dense
+    factorization on every call there. ``count``, ``max_iter`` and ``dense_limit`` are static;
+    everything else may be traced.
 
     Derivatives are implicit, so the iteration is not differentiated, and are valid only when
     ``converged`` is True. They support ``jax.jvp``, ``jax.grad`` and ``jax.jacfwd/jacrev``.
