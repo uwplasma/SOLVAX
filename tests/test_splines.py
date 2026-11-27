@@ -485,3 +485,80 @@ def test_stored_coefficients_evaluate_as_the_spline(bc, uniform):
     for bad in (True, 0.0, (1, False)):
         with pytest.raises(ValueError, match="tuple"):
             piecewise_cubic_evaluate(x, c, q, derivative=bad)
+
+
+@pytest.mark.parametrize("method", ["akima", "makima"])
+@pytest.mark.parametrize("n", [2, 3, 5, 11])
+def test_akima_slopes_match_scipy(method, n):
+    """SciPy's Akima1DInterpolator, extrapolated with its end cubics as here."""
+    rng = np.random.default_rng(n)
+    x = np.sort(np.r_[0.0, rng.uniform(0.0, 2.0, n - 2), 2.0])
+    y = np.stack([rng.normal(size=n), np.r_[-1, -1, -1, 0, 1, 1, 1, 1, 1, 0, 0][:n]], axis=1)
+    p = np.r_[np.linspace(-0.3, 2.3, 41), x]
+    spline = jax.jit(lambda x, y: cubic_spline(x, y, slopes=method))(x, y)
+    ref = interpolate.Akima1DInterpolator(x, y, method=method, extrapolate=True)
+    if n == 2:  # the line, as SciPy >= 1.16; older SciPy returns other slopes here
+        ref = interpolate.CubicHermiteSpline(x, y, np.diff(y, axis=0)[[0, 0]] / (x[1] - x[0]))
+    for k in range(2):
+        np.testing.assert_allclose(
+            cubic_spline_evaluate(spline, p, derivative=k), ref(p, k), atol=1e-12
+        )
+    np.testing.assert_allclose(cubic_spline_coefficients(spline), ref.c, atol=1e-11)
+    np.testing.assert_allclose(
+        cubic_spline_integrate(spline, 0.1, 1.9), ref.integrate(0.1, 1.9), atol=1e-12
+    )
+    one = jax.vmap(lambda y: cubic_spline_evaluate(cubic_spline(x, y, slopes=method), p), 1, 1)(y)
+    np.testing.assert_allclose(one, cubic_spline_evaluate(spline, p), atol=1e-14)
+
+
+def test_akima_reproduces_a_quadratic_on_uniform_knots():
+    """Equal weights on equal spacing: the slope is the mean secant, exact on a parabola."""
+    x = np.linspace(0.0, 1.0, 11)
+    p = np.linspace(0.0, 1.0, 201)
+    spline = cubic_spline(x, 1.0 - x**2, slopes="akima")
+    np.testing.assert_allclose(cubic_spline_evaluate(spline, p), 1.0 - p**2, atol=1e-13)
+
+
+def test_given_slopes_match_scipy_hermite_and_differentiate():
+    rng = np.random.default_rng(21)
+    y = np.exp(1j * X) + rng.normal(size=X.size)  # complex data, real knots
+    dydx = rng.normal(size=X.size) + 1j * rng.normal(size=X.size)
+    spline = cubic_spline(X, y, slopes=dydx)
+    for part in (np.real, np.imag):
+        ref = interpolate.CubicHermiteSpline(X, part(y), part(dydx))
+        for k in range(3):
+            got = part(cubic_spline_evaluate(spline, P, derivative=k))
+            np.testing.assert_allclose(got, ref(P, k), atol=1e-11 * (1 + np.abs(ref(P, k)).max()))
+        np.testing.assert_allclose(part(cubic_spline_coefficients(spline)), ref.c, atol=1e-11)
+    two = cubic_spline(X[:2], y[:2], slopes=dydx[:2])  # the minimum knot count
+    np.testing.assert_allclose(two.slopes, dydx[:2])
+    with pytest.raises(ValueError, match="slopes"):
+        cubic_spline(X, y, bc="natural", slopes=dydx)
+    with pytest.raises(ValueError, match="slopes"):
+        cubic_spline(X, y, slopes="spline")
+    with pytest.raises(ValueError, match="real"):
+        cubic_spline(X, y, slopes="akima")
+
+
+@pytest.mark.parametrize("slopes", ["akima", "makima", "given"])
+def test_slope_modes_against_finite_differences(slopes):
+    rng = np.random.default_rng(31)
+    y, s = np.sin(X) + 0.1 * rng.normal(size=X.size), rng.normal(size=X.size)
+    p = np.linspace(0.05, 1.95, 7)
+
+    def loss(x, y, p, s):
+        spline = cubic_spline(x, y, slopes=s if slopes == "given" else slopes)
+        return jnp.sum(jnp.sin(cubic_spline_evaluate(spline, p)))
+
+    args = [X, y, p, s]
+    grads = jax.jit(jax.grad(loss, argnums=(0, 1, 2, 3)))(*args)
+    for arg, g in enumerate(grads if slopes == "given" else grads[:3]):
+        v, eps = rng.normal(size=np.shape(args[arg])), 1e-6
+        plus, minus = list(args), list(args)
+        plus[arg], minus[arg] = args[arg] + eps * v, args[arg] - eps * v
+        fd = (loss(*plus) - loss(*minus)) / (2 * eps)
+        np.testing.assert_allclose(np.vdot(g, v), fd, rtol=1e-7, atol=1e-9)
+        _, tangent = jax.jvp(
+            lambda a, arg=arg: loss(*args[:arg], a, *args[arg + 1 :]), (args[arg],), (v,)
+        )
+        np.testing.assert_allclose(tangent, np.vdot(g, v), rtol=1e-12)
