@@ -95,6 +95,7 @@ from solvax.implicit import (
     certified_root,
     linear_solve,
     newton_krylov,
+    newton_krylov_root,
     recycled_linear_solve,
     root_solve,
 )
@@ -383,6 +384,7 @@ __all__ = [
     "recycled_linear_solve",
     "NewtonKrylovSolution",
     "newton_krylov",
+    "newton_krylov_root",
     "root_solve",
     "certified_root",
     "RootResult",
