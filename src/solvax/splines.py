@@ -2,7 +2,10 @@ r"""Cubic interpolating splines in Hermite form: fit once, evaluate anywhere.
 
 :func:`cubic_spline` returns the knots, the data and the knot slopes of a
 piecewise cubic; :func:`cubic_spline_evaluate` gives its value, first or second
-derivative at any points. On the interval :math:`[x_i, x_{i+1}]` of width
+derivative at any points, or several of them from one interval search.
+:func:`cubic_spline_coefficients` gives the power coefficients of each interval,
+which :func:`piecewise_cubic_evaluate` evaluates without rebuilding them.
+On the interval :math:`[x_i, x_{i+1}]` of width
 :math:`h_i`, with secant :math:`\delta_i = (y_{i+1} - y_i)/h_i` and slopes
 :math:`s_i`, the cubic in :math:`u = x - x_i` is
 
@@ -44,7 +47,9 @@ Knots must be real and strictly increasing; this is checked when ``x`` is
 concrete and not inside a trace, where repeated or unsorted knots give NaN or
 an undefined result. Data may be complex (except with ``monotone=True``);
 the knots and points stay real. With knot spacings that differ by a factor
-of 1e6 the C2 slope systems lose about four digits (SciPy agrees to 1e-9).
+of 1e6 the values agree with SciPy to about 4e-10 of the data scale for every
+end condition on 16 or more knots, and for all but not-a-knot on fewer; the
+not-a-knot end rows lose more on few knots, up to 1e-4 on four.
 """
 
 from __future__ import annotations
@@ -63,6 +68,8 @@ __all__ = [
     "cubic_spline_evaluate",
     "cubic_spline_integrate",
     "cubic_spline_antiderivative",
+    "cubic_spline_coefficients",
+    "piecewise_cubic_evaluate",
 ]
 
 _BCS = ("not-a-knot", "natural", "clamped", "periodic")
@@ -76,12 +83,16 @@ class CubicSpline(NamedTuple):
         y: data at the knots, shape ``(n, *batch)``.
         slopes: first derivative at the knots, shape of ``y``.
         period: ``x[-1] - x[0]`` for a periodic spline, zero otherwise.
+        smooth: true when the slopes make the spline C2 (the end conditions of
+            ``bc``), false for the C1 slopes of ``monotone=True``; it decides
+            how :func:`cubic_spline_coefficients` forms the coefficients.
     """
 
     x: jax.Array
     y: jax.Array
     slopes: jax.Array
     period: jax.Array
+    smooth: jax.Array
 
 
 def _column(v: jax.Array, ndim: int) -> jax.Array:
@@ -161,23 +172,23 @@ def cubic_spline(
         y = y.at[-1].set(y[0])
     h = jnp.diff(x)
     d = jnp.diff(y, axis=0) / _column(h, y.ndim)
-    zero = jnp.zeros((), x.dtype)
+    zero, c2 = jnp.zeros((), x.dtype), jnp.asarray(not monotone)
     if (n == 2 and bc != "clamped") or (n == 3 and bc == "not-a-knot" and not monotone):
         # Line or parabola through the data: its slope at a knot is a weighted secant.
         if n == 2:
-            return CubicSpline(x, y, jnp.concatenate([d, d]), zero)
+            return CubicSpline(x, y, jnp.concatenate([d, d]), zero, c2)
         w0, w1 = h[1] / (h[0] + h[1]), h[0] / (h[0] + h[1])
         mid = w0 * d[0] + w1 * d[1]
         s = jnp.stack([2 * d[0] - mid, mid, 2 * d[1] - mid])
-        return CubicSpline(x, y, s, zero)
+        return CubicSpline(x, y, s, zero, c2)
     if monotone:
-        return CubicSpline(x, y, _pchip_slopes(h, d), zero)
+        return CubicSpline(x, y, _pchip_slopes(h, d), zero, c2)
     if bc == "periodic":
         hl, hr = jnp.roll(h, 1), h  # widths left and right of knots 0 .. n-2
         dl, dr = jnp.roll(d, 1, axis=0), d
         rhs = 3.0 * (_column(hr, y.ndim) * dl + _column(hl, y.ndim) * dr)
         s = cyclic_tridiagonal_solve(hr, 2.0 * (hl + hr), hl, rhs)
-        return CubicSpline(x, y, jnp.concatenate([s, s[:1]], axis=0), x[-1] - x[0])
+        return CubicSpline(x, y, jnp.concatenate([s, s[:1]], axis=0), x[-1] - x[0], c2)
     # Interior rows: continuity of the second derivative at knots 1 .. n-2.
     lower = jnp.concatenate([zero[None], h[1:], zero[None]])
     diag = jnp.concatenate([zero[None], 2.0 * (h[:-1] + h[1:]), zero[None]])
@@ -198,27 +209,34 @@ def cubic_spline(
         r0 = jnp.broadcast_to(jnp.asarray(end_slopes[0], dtype), y.shape[1:])
         r1 = jnp.broadcast_to(jnp.asarray(end_slopes[1], dtype), y.shape[1:])
     rhs = jnp.concatenate([r0[None], rhs, r1[None]], axis=0)
-    return CubicSpline(x, y, tridiagonal_solve(lower, diag, upper, rhs), zero)
+    return CubicSpline(x, y, tridiagonal_solve(lower, diag, upper, rhs), zero, c2)
 
 
 def cubic_spline_evaluate(
-    spline: CubicSpline, points: jax.Array, *, derivative: int = 0
-) -> jax.Array:
+    spline: CubicSpline, points: jax.Array, *, derivative: int | tuple[int, ...] = 0
+) -> jax.Array | tuple[jax.Array, ...]:
     """Value (``derivative=0``), first or second derivative of a spline.
+
+    A tuple such as ``derivative=(0, 1)`` returns a tuple of those orders from
+    one interval search.
 
     Args:
         spline: the result of :func:`cubic_spline`.
         points: evaluation points of any shape.
-        derivative: 0, 1 or 2.
+        derivative: 0, 1 or 2, or a tuple of them.
 
     Returns:
-        Array of shape ``points.shape + batch``. A periodic spline is
+        Array (or tuple of arrays) of shape ``points.shape + batch``. A periodic spline is
         evaluated at the points reduced into ``[x[0], x[-1])``; any other
-        continues its end cubics beyond the knots.
+        continues its end cubics beyond the knots. At an interior knot the
+        cubic of the interval to its right is used, at ``x[-1]`` that of the
+        last interval: this decides the second derivative of a monotone
+        spline there and the derivative of any order with respect to the point.
     """
-    if derivative not in (0, 1, 2):
-        raise ValueError("derivative must be 0, 1 or 2")
+    _check_orders(derivative)
     i, u, (y0, s0, c2, c3) = _locate(spline, points)
+    if isinstance(derivative, tuple):
+        return tuple(_horner(k, (c3, c2, s0, y0), u) for k in derivative)
     if derivative == 0:
         return y0 + u * (s0 + u * (c2 + u * c3))
     if derivative == 1:
@@ -226,12 +244,37 @@ def cubic_spline_evaluate(
     return 2.0 * c2 + 6.0 * u * c3
 
 
+def _check_orders(derivative) -> None:
+    """Accept exactly the integers 0, 1, 2, alone or in a non-empty tuple."""
+    orders = derivative if isinstance(derivative, tuple) else (derivative,)
+    if not orders or any(type(k) is not int or k not in (0, 1, 2) for k in orders):
+        raise ValueError("derivative must be 0, 1 or 2, or a tuple of them")
+
+
+def _horner(k: int, c, u):
+    """Order-``k`` derivative of ``c[0] u^3 + c[1] u^2 + c[2] u + c[3]``."""
+    c3, c2, c1, c0 = c
+    if k == 0:
+        return c0 + u * (c1 + u * (c2 + u * c3))
+    if k == 1:
+        return c1 + u * (2.0 * c2 + 3.0 * u * c3)
+    return 2.0 * c2 + 6.0 * u * c3
+
+
+def _interval(x: jax.Array, p: jax.Array) -> jax.Array:
+    """Index of the interval holding each point, the end intervals extended."""
+    # Comparing with every knot is fastest for a few knots; binary search beyond.
+    method = "compare_all" if x.shape[0] <= 32 else "scan_unrolled"
+    i = jnp.searchsorted(x, p, side="right", method=method)
+    return jnp.clip(i - 1, 0, x.shape[0] - 2)
+
+
 def _locate(spline: CubicSpline, points):
     """Interval index, offset and power coefficients at the (wrapped) points."""
-    x, y, s, period = spline
+    x, y, s, period, _ = spline
     p = jnp.asarray(points, x.dtype)
     p = jnp.where(period > 0, x[0] + jnp.mod(p - x[0], jnp.where(period > 0, period, 1.0)), p)
-    i = jnp.clip(jnp.searchsorted(x, p, side="right") - 1, 0, x.shape[0] - 2)
+    i = _interval(x, p)
     h = _column(x[i + 1] - x[i], y.ndim - 1 + p.ndim)
     u = _column(p - x[i], y.ndim - 1 + p.ndim)
     y0, y1, s0, s1 = y[i], y[i + 1], s[i], s[i + 1]
@@ -274,5 +317,85 @@ def cubic_spline_integrate(spline: CubicSpline, a: jax.Array, b: jax.Array) -> j
     difference of two antiderivatives, so an interval much shorter than the
     distance of its ends from ``x[0]`` loses digits to cancellation.
     """
-    a, b = jnp.broadcast_arrays(jnp.asarray(a, spline.x.dtype), jnp.asarray(b, spline.x.dtype))
+    # Each limit keeps its own shape; the batch axes trail both, so they broadcast.
     return cubic_spline_antiderivative(spline, b) - cubic_spline_antiderivative(spline, a)
+
+
+def cubic_spline_coefficients(spline: CubicSpline) -> jax.Array:
+    """Power coefficients of each interval, in the layout of SciPy's ``PPoly.c``.
+
+    Returns ``c`` of shape ``(4, n - 1, *batch)``: on ``[x[i], x[i+1]]`` the
+    spline is ``sum_k c[k, i] (x - x[i]) ** (3 - k)``. For a C2 spline the
+    knot second derivatives are solved from the moment equations, closed by
+    the spline's own end slopes (the same spline for every end condition),
+    and ``c[0]``, ``c[1]``, ``c[2]`` are formed from them: the slope formula
+    for ``c[0]``, ``(s0 + s1 - 2 delta) / h^2``, cancels to O(h^2) of its terms
+    and carries about five times more rounding. A spline that is only C1
+    (``spline.smooth`` false) has its coefficients formed from the slopes.
+    """
+    x, y, s = spline.x, spline.y, spline.slopes
+    h = _column(jnp.diff(x), y.ndim)
+    d = jnp.diff(y, axis=0) / h
+    c1 = jnp.stack(
+        [(s[:-1] + s[1:] - 2.0 * d) / h**2, (3.0 * d - 2.0 * s[:-1] - s[1:]) / h, s[:-1]]
+    )
+    zero = jnp.zeros((1,), x.dtype)
+    hl, hr = jnp.concatenate([zero, jnp.diff(x)]), jnp.concatenate([jnp.diff(x), zero])
+    rhs = 6.0 * jnp.concatenate([d[:1] - s[:1], d[1:] - d[:-1], s[-1:] - d[-1:]], axis=0)
+    m = tridiagonal_solve(hl, 2.0 * (hl + hr), hr, rhs)
+    c2 = jnp.stack(
+        [(m[1:] - m[:-1]) / (6.0 * h), 0.5 * m[:-1], d - h * (2.0 * m[:-1] + m[1:]) / 6.0]
+    )
+    return jnp.concatenate([jnp.where(spline.smooth, c2, c1), y[None, :-1]])
+
+
+def piecewise_cubic_evaluate(
+    x: jax.Array,
+    coefficients: jax.Array,
+    points: jax.Array,
+    *,
+    derivative: int | tuple[int, ...] = 0,
+    uniform: bool = False,
+    periodic: bool = False,
+) -> jax.Array | tuple[jax.Array, ...]:
+    """Evaluate stored interval coefficients, as returned by :func:`cubic_spline_coefficients`.
+
+    Args:
+        x: the knots, shape ``(n,)``.
+        coefficients: shape ``(4, n - 1, *batch)``, highest power first.
+        points: evaluation points of any shape.
+        derivative: 0, 1 or 2, or a tuple of them.
+        uniform: the caller promises equally spaced knots; the interval is
+            then ``floor((p - x[0]) / h)`` instead of a search. Checked when
+            ``x`` is concrete; under a trace a non-uniform grid gives wrong
+            values. At a knot rounding may select either neighbouring
+            interval, which matters only where the second derivative jumps.
+        periodic: reduce the points into ``[x[0], x[-1])``, period
+            ``x[-1] - x[0]``; otherwise the end cubics continue beyond the knots.
+
+    Returns:
+        Array (or tuple) of shape ``points.shape + batch``.
+    """
+    _check_orders(derivative)
+    x = jnp.asarray(x)
+    p = jnp.asarray(points, x.dtype)
+    n = x.shape[0]
+    if periodic:
+        p = x[0] + jnp.mod(p - x[0], x[-1] - x[0])
+    if uniform:
+        try:
+            concrete = np.asarray(x)
+        except jax.errors.TracerArrayConversionError:
+            concrete = None
+        if concrete is not None and not np.allclose(np.diff(concrete), concrete[1] - concrete[0]):
+            raise ValueError("uniform=True needs equally spaced knots")
+        step = (x[-1] - x[0]) / (n - 1)
+        i = jnp.clip(jnp.floor((p - x[0]) / step), 0, n - 2).astype(jnp.int32)  # clip, then cast
+    else:
+        i = _interval(x, p)
+    c = coefficients[:, i]
+    u = _column(p - x[i], c.ndim - 1)
+    values = tuple(
+        _horner(k, c, u) for k in (derivative if isinstance(derivative, tuple) else (derivative,))
+    )
+    return values if isinstance(derivative, tuple) else values[0]
