@@ -80,6 +80,7 @@ methods
 :caption: Structured direct solvers
 
 solvers/block_tridiagonal
+neopax_reproducible_products
 solvers/generalized_eigenpairs
 solvers/banded
 solvers/tridiagonal
