@@ -6,13 +6,12 @@ SOLVAX_TEST_REPRODUCIBLE_GPU=1 python -m unittest discover -s tests
 import ast
 import importlib.metadata
 import os
-from pathlib import Path
 import sys
-from types import SimpleNamespace
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -132,7 +131,9 @@ class ProductKernelCudaTests(unittest.TestCase):
     def setUpClass(cls):
         import jax
         import jax.numpy as jnp
+
         from solvax._reproducible import schur_product
+
         cls.jax, cls.jnp = jax, jnp
         cls.product = staticmethod(schur_product)
         jax.config.update("jax_enable_x64", True)
@@ -159,13 +160,21 @@ class ProductKernelCudaTests(unittest.TestCase):
         jax, jnp = self.jax, self.jnp
         a, b = self.arrays()
         da, db = jnp.sin(a), jnp.cos(b)
-        _, tangent = jax.jit(lambda a, b, da, db: jax.jvp(self.product, (a, b), (da, db)))(a, b, da, db)
-        np.testing.assert_allclose(tangent, np.asarray(da) @ np.asarray(b) + np.asarray(a) @ np.asarray(db),
-                                   rtol=4e-13, atol=4e-13)
-        bars = jnp.sin(jnp.arange(a.shape[0]*b.shape[1], dtype=a.dtype)).reshape(a.shape[0], b.shape[1])
+        _, tangent = jax.jit(lambda a, b, da, db: jax.jvp(self.product, (a, b), (da, db)))(
+            a, b, da, db
+        )
+        np.testing.assert_allclose(
+            tangent, np.asarray(da) @ np.asarray(b) + np.asarray(a) @ np.asarray(db),
+            rtol=4e-13, atol=4e-13,
+        )
+        bars = jnp.sin(jnp.arange(a.shape[0]*b.shape[1], dtype=a.dtype)).reshape(
+            a.shape[0], b.shape[1]
+        )
         left, right = jax.jit(jax.grad(lambda a, b: jnp.sum(self.product(a, b)*bars), (0, 1)))(a, b)
         np.testing.assert_allclose(left, np.asarray(bars) @ np.asarray(b.T), rtol=4e-13, atol=4e-13)
-        np.testing.assert_allclose(right, np.asarray(a.T) @ np.asarray(bars), rtol=4e-13, atol=4e-13)
+        np.testing.assert_allclose(
+            right, np.asarray(a.T) @ np.asarray(bars), rtol=4e-13, atol=4e-13
+        )
         for axes, aa, bb in (([0, None], jnp.stack((a, da)), b),
                              ([None, 0], a, jnp.stack((b, db))),
                              ([0, 0], jnp.stack((a, da)), jnp.stack((b, db)))):
@@ -216,7 +225,9 @@ class ProductKernelCudaTests(unittest.TestCase):
         full_rhs[:3] = np.asarray(rhs)
         expected = np.linalg.solve(dense, full_rhs.reshape(-1, 1)).reshape(7, 17, 1)[:3]
         np.testing.assert_allclose(value, expected, rtol=4e-13, atol=4e-13)
-        loss = lambda d: jnp.sum(solve(d)**2)
+        def loss(d):
+            return jnp.sum(solve(d)**2)
+
         gradient = jax.jit(jax.grad(loss))(diagonal)
         direction = jnp.zeros_like(diagonal).at[2, 3, 4].set(1.)
         h = 1e-5

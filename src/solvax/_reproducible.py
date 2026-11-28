@@ -67,7 +67,9 @@ _product = extend_core.Primitive("solvax_fixed_order_product")
 _product.def_impl(partial(xla.apply_primitive, _product))
 _product.def_abstract_eval(_shape)
 mlir.register_lowering(_product, mlir.lower_fun(lambda a, b: a @ b, multiple_results=False))
-mlir.register_lowering(_product, mlir.lower_fun(_cuda_matmul, multiple_results=False), platform="cuda")
+mlir.register_lowering(
+    _product, mlir.lower_fun(_cuda_matmul, multiple_results=False), platform="cuda"
+)
 
 # The ordinary bilinear derivative; both the primal and its transposes use
 # the same primitive, so an outer jit/scan/AD transform cannot retune them.
@@ -77,10 +79,10 @@ ad.defbilinear(_product,
 
 
 def _batch(args, axes):
-    mapped = [(x, axis) for x, axis in zip(args, axes) if axis is not None]
+    mapped = [(x, axis) for x, axis in zip(args, axes, strict=True) if axis is not None]
     size = mapped[0][0].shape[mapped[0][1]]
     arrays = [jnp.broadcast_to(x, (size, *x.shape)) if axis is None
-              else jnp.moveaxis(x, axis, 0) for x, axis in zip(args, axes)]
+              else jnp.moveaxis(x, axis, 0) for x, axis in zip(args, axes, strict=True)]
     return jax.lax.map(lambda pair: _product.bind(*pair), tuple(arrays)), 0
 
 
