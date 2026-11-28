@@ -72,6 +72,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax.scipy.linalg import lu_factor, lu_solve
 
+from solvax._reproducible import schur_product
 from solvax.refine import _same_kind, iterative_refinement
 
 # Older supported JAX versions lack AD through optimization_barrier.
@@ -1744,7 +1745,7 @@ def _block_thomas_selected_fn_state(
             delta_next, l_next = carry
             l_j, d_j, u_j = block_fn(j)
             x = lu_solve(delta_next, l_next)
-            delta_j = lu_factor(d_j - u_j @ x)
+            delta_j = lu_factor(d_j - schur_product(u_j, x))
             return (delta_j, l_j), None
 
         (delta_head, l_head), _ = jax.lax.scan(
@@ -1765,8 +1766,8 @@ def _block_thomas_selected_fn_state(
         j, b_j = inputs
         l_j, d_j, u_j = block_fn(j)
         x, solved_sigma = _solve_matrix_and_rhs(delta_next, l_next, sigma_next)
-        sigma_j = b_j - u_j @ solved_sigma
-        delta_j = lu_factor(d_j - _schur_barrier(u_j) @ x)
+        sigma_j = b_j - schur_product(u_j, solved_sigma)
+        delta_j = lu_factor(d_j - schur_product(_schur_barrier(u_j), x))
         return (delta_j, l_j, sigma_j), (delta_j[0], delta_j[1], sigma_j, l_j)
 
     _, (lus, pivs, sigmas, ls) = jax.lax.scan(
@@ -1781,7 +1782,7 @@ def _block_thomas_selected_fn_state(
 
     def up_step(x_prev, inputs):
         lu_j, piv_j, l_j, sigma_j = inputs
-        x_j = lu_solve((lu_j, piv_j), sigma_j - l_j @ x_prev)
+        x_j = lu_solve((lu_j, piv_j), sigma_j - schur_product(l_j, x_prev))
         return x_j, x_j
 
     x0 = lu_solve((lus[0], pivs[0]), sigmas[0])
