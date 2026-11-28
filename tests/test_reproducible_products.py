@@ -27,6 +27,7 @@ def pallas_kernel_ast():
 class ProductKernelNumpyTests(unittest.TestCase):
     def test_calls_match_installed_jax_api_without_importing_jax(self):
         """Validate actual package signatures, not a permissive mock API."""
+        jax_before = sys.modules.get("jax")
         root = Path(importlib.metadata.distribution("jax").locate_file("jax"))
         _, kernel = pallas_kernel_ast()
         calls = [node for node in ast.walk(kernel) if isinstance(node, ast.Call)
@@ -57,10 +58,11 @@ class ProductKernelNumpyTests(unittest.TestCase):
                                     or (isinstance(index, ast.Slice)
                                         and index.lower is index.upper is index.step is None))
         if os.environ.get("SOLVAX_TEST_REPRODUCIBLE_GPU") != "1":
-            self.assertNotIn("jax", sys.modules)
+            self.assertIs(sys.modules.get("jax"), jax_before)
 
     def test_real_kernel_indexing_and_reduction_against_extended_precision(self):
         """Execute the actual kernel body with NumPy-backed masked loads."""
+        jax_before = sys.modules.get("jax")
         path, function = pallas_kernel_ast()
         function.body = [node for node in function.body if not isinstance(node, ast.ImportFrom)]
         position = [0, 0]
@@ -120,7 +122,7 @@ class ProductKernelNumpyTests(unittest.TestCase):
             np.testing.assert_allclose(result, reference, rtol=3e-13, atol=3e-13)
         self.assertTrue(all(item[0] == dict(num_warps=4, num_stages=1) for item in params))
         if os.environ.get("SOLVAX_TEST_REPRODUCIBLE_GPU") != "1":
-            self.assertNotIn("jax", sys.modules)
+            self.assertIs(sys.modules.get("jax"), jax_before)
 
 
 @unittest.skipUnless(os.environ.get("SOLVAX_TEST_REPRODUCIBLE_GPU") == "1",
