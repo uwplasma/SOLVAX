@@ -168,6 +168,7 @@ jobs:
             coverage: true
             files: >-
               tests/test_certified_window.py tests/test_direct.py tests/test_direct_ops.py
+              tests/test_reproducible_products.py
               tests/test_exact_window_properties.py tests/test_window_semantics.py
               tests/test_multigrid.py tests/test_tridiagonal.py tests/test_implicit.py
               tests/test_certified_root.py
